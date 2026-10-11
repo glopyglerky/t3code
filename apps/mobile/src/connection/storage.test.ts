@@ -36,19 +36,43 @@ import * as MobileSecureStorage from "../persistence/mobile-secure-storage";
 function makeStorage(initial: Readonly<Record<string, string>>) {
   const values = new Map(Object.entries(initial));
   const deleted: Array<string> = [];
+  const failures: Array<{ operation: "read" | "write" | "delete"; key: string }> = [];
+  const attempts: Array<{ operation: "read" | "write" | "delete"; key: string }> = [];
+  function run<A>(operation: "read" | "write" | "delete", key: string, action: () => A) {
+    return Effect.suspend(() => {
+      attempts.push({ operation, key });
+      const index = failures.findIndex(
+        (failure) => failure.operation === operation && failure.key === key,
+      );
+      if (index !== -1) {
+        failures.splice(index, 1);
+        return Effect.fail(
+          new MobileSecureStorage.MobileSecureStorageError({
+            operation,
+            key,
+            cause: new Error("injected failure"),
+          }),
+        );
+      }
+      return Effect.sync(action);
+    });
+  }
   const storage = MobileSecureStorage.MobileSecureStorage.of({
-    getItem: (key) => Effect.sync(() => values.get(key) ?? null),
+    getItem: (key) => run("read", key, () => values.get(key) ?? null),
     setItem: (key, value) =>
-      Effect.sync(() => {
+      run("write", key, () => {
         values.set(key, value);
       }),
     removeItem: (key) =>
-      Effect.sync(() => {
+      run("delete", key, () => {
         deleted.push(key);
         values.delete(key);
       }),
   });
-  return { deleted, storage, values };
+  const failNext = (operation: "read" | "write" | "delete", key: string) => {
+    failures.push({ operation, key });
+  };
+  return { deleted, storage, values, attempts, failNext };
 }
 
 describe("mobile connection catalog storage", () => {
@@ -70,6 +94,64 @@ describe("mobile connection catalog storage", () => {
       }),
       credential: new BearerConnectionCredential({ token: "saved-token" }),
     }),
+  );
+
+  const legacyRaw = JSON.stringify({
+    connections: [
+      {
+        environmentId: "legacy-environment",
+        environmentLabel: "Legacy",
+        pairingUrl: "https://legacy.example.test/pair",
+        displayUrl: "https://legacy.example.test",
+        httpBaseUrl: "https://legacy.example.test",
+        wsBaseUrl: "wss://legacy.example.test",
+        bearerToken: "legacy-token",
+        authenticationMethod: "bearer",
+      },
+    ],
+  });
+
+  it.effect("seeds a backup when an existing primary catalog is first read", () =>
+    Effect.gen(function* () {
+      const encoded = yield* encodedCatalog(fixtureCatalog);
+      const memory = makeStorage({ [CONNECTION_CATALOG_KEY]: encoded });
+      const catalog = yield* make().pipe(
+        Effect.provideService(MobileSecureStorage.MobileSecureStorage, memory.storage),
+      );
+
+      expect(yield* catalog.read).toEqual(fixtureCatalog);
+      expect(memory.values.get(CONNECTION_CATALOG_BACKUP_KEY)).toBe(encoded);
+      memory.values.set(CONNECTION_CATALOG_KEY, "{not-json");
+      const restarted = yield* make().pipe(
+        Effect.provideService(MobileSecureStorage.MobileSecureStorage, memory.storage),
+      );
+      expect(yield* restarted.read).toEqual(fixtureCatalog);
+      expect(memory.deleted).toEqual([]);
+    }),
+  );
+
+  it.effect(
+    "migrates valid legacy data when the primary is missing and the backup is malformed",
+    () =>
+      Effect.gen(function* () {
+        const memory = makeStorage({
+          [CONNECTION_CATALOG_BACKUP_KEY]: "{not-json",
+          [LEGACY_CONNECTIONS_KEY]: legacyRaw,
+        });
+        const catalog = yield* make().pipe(
+          Effect.provideService(MobileSecureStorage.MobileSecureStorage, memory.storage),
+        );
+
+        const recovered = yield* catalog.read;
+        expect(recovered.targets.map((target) => target.environmentId)).toEqual([
+          "legacy-environment",
+        ]);
+        expect(recovered.credentials[0]?.credential).toMatchObject({ token: "legacy-token" });
+        const encoded = yield* encodedCatalog(recovered);
+        expect(memory.values.get(CONNECTION_CATALOG_KEY)).toBe(encoded);
+        expect(memory.values.get(CONNECTION_CATALOG_BACKUP_KEY)).toBe(encoded);
+        expect(memory.deleted).toEqual([LEGACY_CONNECTIONS_KEY]);
+      }),
   );
 
   it.effect("recovers a corrupt current catalog from its durable backup", () =>
@@ -126,20 +208,7 @@ describe("mobile connection catalog storage", () => {
       const encoded = yield* encodedCatalog(fixtureCatalog);
       const memory = makeStorage({
         [CONNECTION_CATALOG_BACKUP_KEY]: encoded,
-        [LEGACY_CONNECTIONS_KEY]: JSON.stringify({
-          connections: [
-            {
-              environmentId: "legacy-environment",
-              environmentLabel: "Legacy",
-              pairingUrl: "https://legacy.example.test/pair",
-              displayUrl: "https://legacy.example.test",
-              httpBaseUrl: "https://legacy.example.test",
-              wsBaseUrl: "wss://legacy.example.test",
-              bearerToken: "legacy-token",
-              authenticationMethod: "bearer",
-            },
-          ],
-        }),
+        [LEGACY_CONNECTIONS_KEY]: legacyRaw,
       });
       const catalog = yield* make().pipe(
         Effect.provideService(MobileSecureStorage.MobileSecureStorage, memory.storage),
@@ -155,4 +224,203 @@ describe("mobile connection catalog storage", () => {
       expect(memory.values.has(LEGACY_CONNECTIONS_KEY)).toBe(true);
     }),
   );
+
+  it.effect(
+    "retries backup seeding without recovering an older backup or caching a failed load",
+    () =>
+      Effect.gen(function* () {
+        const encoded = yield* encodedCatalog(fixtureCatalog);
+        const older = yield* encodedCatalog(EMPTY_CONNECTION_CATALOG_DOCUMENT);
+        const memory = makeStorage({
+          [CONNECTION_CATALOG_KEY]: encoded,
+          [CONNECTION_CATALOG_BACKUP_KEY]: older,
+        });
+        memory.failNext("write", CONNECTION_CATALOG_BACKUP_KEY);
+        const catalog = yield* make().pipe(
+          Effect.provideService(MobileSecureStorage.MobileSecureStorage, memory.storage),
+        );
+
+        expect((yield* Effect.flip(catalog.read)).detail).toContain("Could not save");
+        expect(memory.values.get(CONNECTION_CATALOG_KEY)).toBe(encoded);
+        expect(memory.values.get(CONNECTION_CATALOG_BACKUP_KEY)).toBe(older);
+        expect(yield* catalog.read).toEqual(fixtureCatalog);
+        expect(memory.values.get(CONNECTION_CATALOG_BACKUP_KEY)).toBe(encoded);
+        const attempts = memory.attempts.length;
+        expect(yield* catalog.read).toEqual(fixtureCatalog);
+        expect(memory.attempts).toHaveLength(attempts);
+        expect(memory.deleted).toEqual([]);
+      }),
+  );
+
+  for (const primary of [undefined, "{not-json"]) {
+    it.effect(
+      `preserves backup and legacy data if restoring primary ${String(primary)} fails`,
+      () =>
+        Effect.gen(function* () {
+          const encoded = yield* encodedCatalog(fixtureCatalog);
+          const memory = makeStorage({
+            ...(primary === undefined ? {} : { [CONNECTION_CATALOG_KEY]: primary }),
+            [CONNECTION_CATALOG_BACKUP_KEY]: encoded,
+            [LEGACY_CONNECTIONS_KEY]: legacyRaw,
+          });
+          memory.failNext("write", CONNECTION_CATALOG_KEY);
+          const catalog = yield* make().pipe(
+            Effect.provideService(MobileSecureStorage.MobileSecureStorage, memory.storage),
+          );
+
+          expect((yield* Effect.flip(catalog.read)).detail).toContain("Could not save");
+          expect(memory.values.get(CONNECTION_CATALOG_KEY)).toBe(primary);
+          expect(memory.values.get(CONNECTION_CATALOG_BACKUP_KEY)).toBe(encoded);
+          expect(memory.values.get(LEGACY_CONNECTIONS_KEY)).toBe(legacyRaw);
+          expect(memory.deleted).toEqual([]);
+          expect(yield* catalog.read).toEqual(fixtureCatalog);
+          expect(memory.values.get(CONNECTION_CATALOG_KEY)).toBe(encoded);
+          expect(memory.values.get(LEGACY_CONNECTIONS_KEY)).toBe(legacyRaw);
+        }),
+    );
+  }
+
+  for (const key of [CONNECTION_CATALOG_KEY, CONNECTION_CATALOG_BACKUP_KEY]) {
+    it.effect(`does not migrate legacy data on a storage read failure for ${key}`, () =>
+      Effect.gen(function* () {
+        const encoded = yield* encodedCatalog(fixtureCatalog);
+        const memory = makeStorage({
+          [CONNECTION_CATALOG_BACKUP_KEY]: encoded,
+          [LEGACY_CONNECTIONS_KEY]: legacyRaw,
+        });
+        memory.failNext("read", key);
+        const catalog = yield* make().pipe(
+          Effect.provideService(MobileSecureStorage.MobileSecureStorage, memory.storage),
+        );
+
+        expect((yield* Effect.flip(catalog.read)).detail).toContain("Could not load");
+        expect(memory.values.has(CONNECTION_CATALOG_KEY)).toBe(false);
+        expect(memory.values.get(CONNECTION_CATALOG_BACKUP_KEY)).toBe(encoded);
+        expect(memory.values.get(LEGACY_CONNECTIONS_KEY)).toBe(legacyRaw);
+        expect(memory.deleted).toEqual([]);
+        expect(yield* catalog.read).toEqual(fixtureCatalog);
+      }),
+    );
+  }
+
+  for (const legacy of [undefined, " ", "{not-json", '{"connections":[{"invalid":true}]}']) {
+    it.effect(
+      `preserves a malformed backup when legacy data cannot recover it: ${String(legacy)}`,
+      () =>
+        Effect.gen(function* () {
+          const initial = {
+            [CONNECTION_CATALOG_BACKUP_KEY]: "{invalid-backup",
+            ...(legacy === undefined ? {} : { [LEGACY_CONNECTIONS_KEY]: legacy }),
+          };
+          const memory = makeStorage(initial);
+          const catalog = yield* make().pipe(
+            Effect.provideService(MobileSecureStorage.MobileSecureStorage, memory.storage),
+          );
+
+          yield* Effect.flip(catalog.read);
+          expect(Object.fromEntries(memory.values)).toEqual(initial);
+          expect(memory.deleted).toEqual([]);
+          memory.values.set(LEGACY_CONNECTIONS_KEY, legacyRaw);
+          expect((yield* catalog.read).targets[0]?.environmentId).toBe("legacy-environment");
+        }),
+    );
+  }
+
+  it.effect("fails closed when both catalogs are corrupt without consulting legacy data", () =>
+    Effect.gen(function* () {
+      const initial = {
+        [CONNECTION_CATALOG_KEY]: "{invalid-primary",
+        [CONNECTION_CATALOG_BACKUP_KEY]: "{invalid-backup",
+        [LEGACY_CONNECTIONS_KEY]: legacyRaw,
+      };
+      const memory = makeStorage(initial);
+      const catalog = yield* make().pipe(
+        Effect.provideService(MobileSecureStorage.MobileSecureStorage, memory.storage),
+      );
+
+      yield* Effect.flip(catalog.read);
+      expect(Object.fromEntries(memory.values)).toEqual(initial);
+      expect(memory.attempts.some((attempt) => attempt.key === LEGACY_CONNECTIONS_KEY)).toBe(false);
+      expect(memory.deleted).toEqual([]);
+    }),
+  );
+
+  for (const key of [CONNECTION_CATALOG_BACKUP_KEY, CONNECTION_CATALOG_KEY]) {
+    it.effect(`preserves the primary and cached catalog when an update cannot write ${key}`, () =>
+      Effect.gen(function* () {
+        const encoded = yield* encodedCatalog(fixtureCatalog);
+        const next = {
+          ...fixtureCatalog,
+          disabledEnvironmentIds: [EnvironmentId.make("saved-environment")],
+        };
+        const nextEncoded = yield* encodedCatalog(next);
+        const memory = makeStorage({ [CONNECTION_CATALOG_KEY]: encoded });
+        const catalog = yield* make().pipe(
+          Effect.provideService(MobileSecureStorage.MobileSecureStorage, memory.storage),
+        );
+        yield* catalog.read;
+        memory.attempts.length = 0;
+        memory.failNext("write", key);
+
+        expect((yield* Effect.flip(catalog.update(() => next))).detail).toContain("Could not save");
+        expect(yield* catalog.read).toEqual(fixtureCatalog);
+        expect(memory.values.get(CONNECTION_CATALOG_KEY)).toBe(encoded);
+        expect(memory.values.get(CONNECTION_CATALOG_BACKUP_KEY)).toBe(
+          key === CONNECTION_CATALOG_KEY ? nextEncoded : encoded,
+        );
+        expect(
+          memory.attempts
+            .filter((attempt) => attempt.operation === "write")
+            .map((attempt) => attempt.key),
+        ).toEqual(
+          key === CONNECTION_CATALOG_KEY
+            ? [CONNECTION_CATALOG_BACKUP_KEY, CONNECTION_CATALOG_KEY]
+            : [CONNECTION_CATALOG_BACKUP_KEY],
+        );
+
+        const restarted = yield* make().pipe(
+          Effect.provideService(MobileSecureStorage.MobileSecureStorage, memory.storage),
+        );
+        expect(yield* restarted.read).toEqual(fixtureCatalog);
+        yield* restarted.update(() => next);
+        expect(yield* restarted.read).toEqual(next);
+        expect(memory.values.get(CONNECTION_CATALOG_KEY)).toBe(nextEncoded);
+        expect(memory.values.get(CONNECTION_CATALOG_BACKUP_KEY)).toBe(nextEncoded);
+        expect(memory.deleted).toEqual([]);
+      }),
+    );
+  }
+
+  for (const [operation, key] of [
+    ["write", CONNECTION_CATALOG_BACKUP_KEY],
+    ["write", CONNECTION_CATALOG_KEY],
+    ["delete", LEGACY_CONNECTIONS_KEY],
+  ] as const) {
+    it.effect(`keeps legacy data recoverable if migration ${operation} fails for ${key}`, () =>
+      Effect.gen(function* () {
+        const memory = makeStorage({
+          [CONNECTION_CATALOG_BACKUP_KEY]: "{invalid-backup",
+          [LEGACY_CONNECTIONS_KEY]: legacyRaw,
+        });
+        memory.failNext(operation, key);
+        const catalog = yield* make().pipe(
+          Effect.provideService(MobileSecureStorage.MobileSecureStorage, memory.storage),
+        );
+
+        yield* Effect.flip(catalog.read);
+        expect(memory.values.get(LEGACY_CONNECTIONS_KEY)).toBe(legacyRaw);
+        expect(memory.deleted).toEqual([]);
+        expect(memory.values.has(CONNECTION_CATALOG_KEY)).toBe(operation === "delete");
+        if (key === CONNECTION_CATALOG_BACKUP_KEY) {
+          expect(memory.values.get(CONNECTION_CATALOG_BACKUP_KEY)).toBe("{invalid-backup");
+        }
+        const recovered = yield* catalog.read;
+        expect(recovered.targets[0]?.environmentId).toBe("legacy-environment");
+        expect(recovered.credentials[0]?.credential).toMatchObject({ token: "legacy-token" });
+        const encoded = yield* encodedCatalog(recovered);
+        expect(memory.values.get(CONNECTION_CATALOG_KEY)).toBe(encoded);
+        expect(memory.values.get(CONNECTION_CATALOG_BACKUP_KEY)).toBe(encoded);
+      }),
+    );
+  }
 });
