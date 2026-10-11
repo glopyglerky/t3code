@@ -1,10 +1,13 @@
 import { useAtomValue } from "@effect/atom-react";
-import type {
-  EnvironmentProject,
-  EnvironmentThreadShell,
+import {
+  threadRuntimeIsActive,
+  type EnvironmentProject,
+  type EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/shell";
 import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
+import { deriveThreadTitleSeed } from "@t3tools/client-runtime/operations";
 import {
+  AuthOrchestrationOperateScope,
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
@@ -13,18 +16,33 @@ import {
 } from "@t3tools/contracts";
 import { buildTemporaryWorktreeBranchName } from "@t3tools/shared/git";
 import * as Cause from "effect/Cause";
-import { AsyncResult, Atom } from "effect/unstable/reactivity";
+import { AsyncResult } from "effect/reactivity";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Alert } from "react-native";
 
-import { scopedProjectKey, scopedThreadKey } from "../lib/scopedEntities";
+import { createDebugLogger } from "../lib/debugLog";
+import { scopedThreadKey } from "../lib/scopedEntities";
 import { buildProjectThreadStartTurnInput } from "../lib/projectThreadStartTurn";
+import { serializeComposerMessageForServer, uploadedComposerContext } from "../lib/composerContext";
 import { prepareTurnAttachments, type PreparedTurnAttachments } from "../lib/attachmentUpload";
 import { randomHex } from "../lib/uuid";
+import { isModelSelectionUnavailable } from "../lib/modelOptions";
+import {
+  retainAcknowledgedThreadMessage,
+  forgetAcknowledgedThreadMessage,
+} from "./acknowledged-thread-messages";
 import { appAtomRegistry } from "./atom-registry";
+import { restoredNewTaskDraftKey } from "./new-task-draft-key";
 import { useProjects, useServerConfigs, useThreadShells } from "./entities";
 import {
+  clearPendingThreadCreationOutcome,
+  pendingThreadCreationOutcomesAtom,
+  recordPendingThreadCreationOutcome,
+} from "./pending-thread-creation";
+import { serverEnvironment } from "./server";
+import { readEnvironmentScope, useEnvironmentsWithScope } from "./session";
+import {
   confirmThreadOutboxMessageQueued,
-  ensureThreadOutboxLoaded,
   threadOutboxManager,
   threadOutboxRevision,
   updateThreadOutboxMessage,
@@ -32,7 +50,6 @@ import {
 import { removeThreadOutboxMessage } from "./thread-outbox-removal";
 import {
   isQueuedThreadCreationSendable,
-  modelSelectionsEqual,
   resolveThreadOutboxDeliveryAction,
   resolveThreadOutboxDispatchStep,
   resolveThreadOutboxFailureAction,
@@ -42,6 +59,7 @@ import {
   type QueuedThreadCreation,
   type QueuedThreadMessage,
   type ThreadOutboxCommandStage,
+  type ThreadOutboxFailureAction,
 } from "./thread-outbox-model";
 import { environmentThreadShells, threadEnvironment } from "./threads";
 import {
@@ -52,25 +70,106 @@ import {
   getComposerDraftSnapshot,
   mergeComposerDraftContent,
   replaceComposerDraftAttachments,
+  removeDeliveredCloudQueuedMessage,
   undoComposerDraftMerge,
   updateComposerDraftSettings,
   waitForComposerDraftsLoaded,
 } from "./use-composer-drafts";
 import { useAtomCommand } from "./use-atom-command";
 import {
+  dispatchingQueuedMessageIdAtom,
   editingQueuedMessageIdsAtom,
   useThreadOutboxMessages,
   useThreadOutboxShellStatuses,
 } from "./use-thread-outbox";
-import {
-  setPendingConnectionError,
-  useRemoteConnectionStatus,
-} from "./use-remote-environment-registry";
+import { clearThreadComposerError, setThreadComposerError } from "./thread-composer-error";
+import { useRemoteConnectionStatus } from "./use-remote-environment-registry";
 
-export const dispatchingQueuedMessageIdAtom = Atom.make<MessageId | null>(null).pipe(
-  Atom.keepAlive,
-  Atom.withLabel("mobile:thread-outbox:dispatching-message-id"),
-);
+// Ordinary offline behavior (a socket dropping mid-request, a retryable
+// attachment upload failure) must not spam `console.warn` on every backoff
+// retry; it goes to the filterable `[t3-thread-outbox]` debug log instead.
+// Failures the server decided stay on `console.warn`.
+const threadOutboxDebug = createDebugLogger("thread-outbox");
+
+/**
+ * On the queued-request path (settings sync, startTurn) the RPC client
+ * reports ordinary transport drops as the raw socket/worker reason tags, and
+ * reserves `RpcClientDefect` for client-side protocol violations and decoding
+ * failures — unlike the shared config-subscription stream, which
+ * deliberately re-wraps transport causes under that tag. Defects still retry,
+ * but they are not ordinary offline behavior and must not hide behind the
+ * offline debug log.
+ */
+function isRpcClientDecodeDefect(error: unknown): boolean {
+  if (
+    typeof error !== "object" ||
+    error === null ||
+    !("_tag" in error) ||
+    error._tag !== "RpcClientError"
+  ) {
+    return false;
+  }
+  const reason: unknown = (error as { readonly reason?: unknown }).reason;
+  return (
+    typeof reason === "object" &&
+    reason !== null &&
+    "_tag" in reason &&
+    reason._tag === "RpcClientDefect"
+  );
+}
+
+function isOrdinaryThreadOutboxTransportFailure(error: unknown): boolean {
+  return shouldRetryThreadOutboxDelivery(error) && !isRpcClientDecodeDefect(error);
+}
+
+/**
+ * Logs one queued-message delivery failure and returns the retry-or-restore
+ * decision for the caller. Ordinary transport retries — what an offline
+ * device or a flapping socket produces on every backoff attempt — go to the
+ * debug log. Server-decided failures warn. Settings-sync failures always
+ * resolve to a retry even when the server rejected the command, so the
+ * error, not the resolved action, must decide the log level there; routing
+ * every retry to debug could hide a permanently rejected update forever.
+ */
+function logThreadOutboxDeliveryFailure(input: {
+  readonly stage: ThreadOutboxCommandStage;
+  readonly error: unknown;
+  readonly interrupted: boolean;
+  readonly context: Record<string, unknown>;
+}): ThreadOutboxFailureAction {
+  const action = resolveThreadOutboxFailureAction({
+    stage: input.stage,
+    error: input.error,
+    interrupted: input.interrupted,
+  });
+  const details = { ...input.context, stage: input.stage, action };
+  const ordinaryTransportRetry =
+    action === "retry" &&
+    !isRpcClientDecodeDefect(input.error) &&
+    (input.interrupted ||
+      input.stage !== "settings-sync" ||
+      shouldRetryThreadOutboxDelivery(input.error));
+  if (ordinaryTransportRetry) {
+    threadOutboxDebug.log("queued message delivery failed", details);
+  } else {
+    console.warn("[thread-outbox] queued message delivery failed", details);
+  }
+  return action;
+}
+
+/** Attachment uploads retry like delivery: transport failures are ordinary offline noise. */
+function logThreadOutboxUploadFailure(queuedMessage: QueuedThreadMessage, error: unknown): void {
+  const context = {
+    environmentId: queuedMessage.environmentId,
+    threadId: queuedMessage.threadId,
+    messageId: queuedMessage.messageId,
+  };
+  if (isOrdinaryThreadOutboxTransportFailure(error)) {
+    threadOutboxDebug.log("attachment upload failed; retrying", { ...context, error });
+  } else {
+    console.warn("[thread-outbox] failed to upload attachments", { ...context, error });
+  }
+}
 
 function beginDispatchingQueuedMessage(queuedMessageId: MessageId): void {
   appAtomRegistry.set(dispatchingQueuedMessageIdAtom, queuedMessageId);
@@ -114,7 +213,10 @@ function settingsCommandId(message: QueuedThreadMessage, setting: string): Comma
  * `deliveryRevision` is the revision of the payload this attempt will send,
  * used for the delivery removal's compare-and-set.
  */
-export async function prepareQueuedMessageAttachments(queuedMessage: QueuedThreadMessage): Promise<
+export async function prepareQueuedMessageAttachments(
+  queuedMessage: QueuedThreadMessage,
+  supportsImageUploads = false,
+): Promise<
   | {
       readonly status: "ready";
       readonly prepared: PreparedTurnAttachments;
@@ -126,6 +228,9 @@ export async function prepareQueuedMessageAttachments(queuedMessage: QueuedThrea
   if (!(await confirmThreadOutboxMessageQueued(queuedMessage))) {
     return { status: "abandoned" };
   }
+  if (!readEnvironmentScope(queuedMessage.environmentId, AuthOrchestrationOperateScope)) {
+    return { status: "abandoned" };
+  }
   const revision = threadOutboxRevision(queuedMessage.messageId);
   if (!isQueuedMessagePayloadCurrent(queuedMessage, revision)) {
     return { status: "abandoned" };
@@ -135,6 +240,7 @@ export async function prepareQueuedMessageAttachments(queuedMessage: QueuedThrea
   const result = await prepareTurnAttachments({
     environmentId: queuedMessage.environmentId,
     attachments: queuedMessage.attachments,
+    supportsImageUploads,
     persistUploadedReferences: async (draftAttachments) => {
       if (appAtomRegistry.get(editingQueuedMessageIdsAtom)[queuedMessage.messageId]) {
         return "abandon";
@@ -179,13 +285,26 @@ export async function completeQueuedMessageDelivery(
   queuedMessage: QueuedThreadMessage,
   deliveryRevision: number,
 ): Promise<"removed" | "edited" | "failed"> {
-  // The editor may have taken the entry while startTurn was in flight; its
-  // unsaved edits have not bumped the revision yet, so the CAS alone would
-  // let removal win and the editor would lose them once it saves.
-  if (appAtomRegistry.get(editingQueuedMessageIdsAtom)[queuedMessage.messageId]) {
-    return "edited";
-  }
+  // The server took it after all: an error left by an earlier failed recovery
+  // of this same message no longer applies.
+  clearThreadComposerError(
+    scopedThreadKey(queuedMessage.environmentId, queuedMessage.threadId),
+    queuedMessage.messageId,
+  );
   try {
+    await removeDeliveredCloudQueuedMessage(queuedMessage).catch((error) => {
+      console.warn("[thread-outbox] could not update sign-out snapshot after delivery", {
+        messageId: queuedMessage.messageId,
+        error,
+      });
+    });
+    // The editor may have taken the entry while startTurn was in flight; its
+    // unsaved edits have not bumped the revision yet, so the CAS alone would
+    // let removal win and the editor would lose them once it saves.
+    if (appAtomRegistry.get(editingQueuedMessageIdsAtom)[queuedMessage.messageId]) {
+      return "edited";
+    }
+    retainAcknowledgedThreadMessage(queuedMessage);
     // Removal also releases the message's local attachment files.
     const removed = await removeThreadOutboxMessage(
       queuedMessage,
@@ -193,18 +312,19 @@ export async function completeQueuedMessageDelivery(
       () => !appAtomRegistry.get(editingQueuedMessageIdsAtom)[queuedMessage.messageId],
     );
     if (!removed) {
-      console.warn(
-        "[thread-outbox] delivered message was edited before cleanup; keeping the newer message",
-        {
-          environmentId: queuedMessage.environmentId,
-          threadId: queuedMessage.threadId,
-          messageId: queuedMessage.messageId,
-        },
-      );
+      forgetAcknowledgedThreadMessage(queuedMessage);
+      // Losing the cleanup race to a user edit is an expected outcome the
+      // caller handles by keeping the newer message; it is not a warning.
+      threadOutboxDebug.log("delivered message was edited before cleanup", {
+        environmentId: queuedMessage.environmentId,
+        threadId: queuedMessage.threadId,
+        messageId: queuedMessage.messageId,
+      });
       return "edited";
     }
     return "removed";
   } catch (error) {
+    forgetAcknowledgedThreadMessage(queuedMessage);
     console.warn("[thread-outbox] failed to remove delivered queued message", {
       environmentId: queuedMessage.environmentId,
       threadId: queuedMessage.threadId,
@@ -221,6 +341,12 @@ export async function removeAcknowledgedExistingThreadMessage(
   acknowledgedMessageIds: Set<MessageId>,
 ): Promise<boolean> {
   try {
+    await removeDeliveredCloudQueuedMessage(queuedMessage).catch((error) => {
+      console.warn("[thread-outbox] could not update sign-out snapshot after delivery", {
+        messageId: queuedMessage.messageId,
+        error,
+      });
+    });
     const removed = await removeThreadOutboxMessage(queuedMessage);
     if (removed) {
       acknowledgedMessageIds.delete(queuedMessage.messageId);
@@ -265,7 +391,11 @@ export async function recoverEditedCreationAfterDelivery(
     // from deleting the attachment files. allowOverflow mirrors the
     // send-failure restore; the send path refuses over-cap drafts, so the
     // state stays recoverable.
-    await mergeComposerDraftContent(draftKey, { text: kept.text, attachments: [] });
+    await mergeComposerDraftContent(draftKey, {
+      text: kept.text,
+      context: kept.context,
+      attachments: [],
+    });
     if (appAtomRegistry.get(editingQueuedMessageIdsAtom)[kept.messageId]) {
       return true;
     }
@@ -317,6 +447,7 @@ export async function restoreRejectedQueuedMessage(
   message: string,
 ): Promise<"restored" | "deferred" | "blocked" | "retry"> {
   const draftKey = recoveryDraftKey(queuedMessage);
+  const threadKey = scopedThreadKey(queuedMessage.environmentId, queuedMessage.threadId);
   // Set once the merge publishes, cleared once the queued message is removed.
   // The catch below uses it to take the merged content back out, so a retry
   // after a mid-recovery failure cannot append the recovered text again.
@@ -346,16 +477,27 @@ export async function restoreRejectedQueuedMessage(
       (attachment) => !existingAttachmentIds.has(attachment.id),
     ).length;
     if (existingAttachmentIds.size + addedAttachmentCount > PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
-      setPendingConnectionError(
+      setThreadComposerError(
+        threadKey,
         `Remove attachments from the draft before restoring this message. Messages can contain at most ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} attachments.`,
+        queuedMessage.messageId,
       );
       return "blocked";
     }
 
+    // Shown before the merge publishes the text, so a resend of that text,
+    // which can happen while this recovery still awaits persistence, clears
+    // it. Withdrawn below wherever the recovery backs out.
+    const withdrawError = () => clearThreadComposerError(threadKey, queuedMessage.messageId);
+    if (!queuedMessage.creation) {
+      setThreadComposerError(threadKey, message, queuedMessage.messageId);
+    }
     let mergedDraft: ComposerDraft;
     try {
+      stampRecoveryDraftProject(queuedMessage, draftKey);
       await mergeComposerDraftContent(draftKey, {
         text: queuedMessage.text,
+        context: queuedMessage.context,
         attachments: queuedMessage.attachments,
       });
     } finally {
@@ -369,6 +511,7 @@ export async function restoreRejectedQueuedMessage(
       rollback = { snapshot: originalDraft, merged: mergedDraft };
     }
     if (appAtomRegistry.get(editingQueuedMessageIdsAtom)[queuedMessage.messageId]) {
+      withdrawError();
       await undoComposerDraftMerge(draftKey, originalDraft, mergedDraft);
       return "deferred";
     }
@@ -397,6 +540,7 @@ export async function restoreRejectedQueuedMessage(
       !(await confirmThreadOutboxMessageQueued(queuedMessage)) ||
       appAtomRegistry.get(editingQueuedMessageIdsAtom)[queuedMessage.messageId]
     ) {
+      withdrawError();
       await undoComposerDraftMerge(draftKey, originalDraft, restoredDraft);
       return "deferred";
     }
@@ -409,13 +553,25 @@ export async function restoreRejectedQueuedMessage(
         () => !appAtomRegistry.get(editingQueuedMessageIdsAtom)[queuedMessage.messageId],
       ))
     ) {
+      withdrawError();
       await undoComposerDraftMerge(draftKey, originalDraft, restoredDraft);
       return "deferred";
     }
     // The queued message is gone; from here the draft owns the content and
     // must never be rolled back.
     rollback = null;
-    setPendingConnectionError(message);
+    if (queuedMessage.creation) {
+      // The failure card shows the reason, so an error left by an earlier
+      // failed attempt at this recovery no longer applies.
+      withdrawError();
+      // The thread screen for this creation is likely open; it reads the
+      // outcome to offer reopening the restored draft, and shows the reason.
+      recordPendingThreadCreationOutcome({
+        kind: "failed",
+        message: queuedMessage,
+        reason: message,
+      });
+    }
     return "restored";
   } catch (error) {
     if (rollback !== null) {
@@ -429,17 +585,38 @@ export async function restoreRejectedQueuedMessage(
       );
     }
     console.warn("[thread-outbox] failed to restore an undeliverable message", error);
-    setPendingConnectionError(
+    setThreadComposerError(
+      threadKey,
       error instanceof Error ? error.message : "The unsent message could not be restored.",
+      queuedMessage.messageId,
     );
     return "retry";
   }
 }
 
+/**
+ * A rejected creation becomes its own new-task draft rather than merging into
+ * whatever the user is typing for that project. The key derives from the
+ * message id so a retry after a mid-recovery failure lands on the same draft
+ * instead of minting another.
+ */
 function recoveryDraftKey(queuedMessage: QueuedThreadMessage): string {
   return queuedMessage.creation
-    ? `new-task:${scopedProjectKey(queuedMessage.environmentId, queuedMessage.creation.projectId)}`
+    ? restoredNewTaskDraftKey(queuedMessage.messageId)
     : scopedThreadKey(queuedMessage.environmentId, queuedMessage.threadId);
+}
+
+function stampRecoveryDraftProject(queuedMessage: QueuedThreadMessage, draftKey: string): void {
+  if (!queuedMessage.creation) {
+    return;
+  }
+  updateComposerDraftSettings(draftKey, {
+    project: {
+      environmentId: queuedMessage.environmentId,
+      projectId: queuedMessage.creation.projectId,
+      createdAt: queuedMessage.createdAt,
+    },
+  });
 }
 
 async function preserveUploadedAttachmentsForEditor(
@@ -453,15 +630,10 @@ async function preserveUploadedAttachmentsForEditor(
   const draftKey = `pending-task:${originalMessage.messageId}`;
   const draft = getComposerDraftSnapshot(draftKey);
   const uploadedById = new Map(
-    uploadedMessage.attachments
-      .filter((attachment) => attachment.type === "file")
-      .map((attachment) => [attachment.id, attachment] as const),
+    uploadedMessage.attachments.map((attachment) => [attachment.id, attachment] as const),
   );
   let changed = false;
   const nextAttachments = draft.attachments.map((attachment) => {
-    if (attachment.type !== "file") {
-      return attachment;
-    }
     const uploaded = uploadedById.get(attachment.id);
     if (
       !uploaded?.uploadedAttachmentId ||
@@ -486,9 +658,6 @@ async function preserveUploadedAttachmentsForEditor(
 
 export function useThreadOutboxDrain(): void {
   const startTurn = useAtomCommand(threadEnvironment.startTurn, { reportFailure: false });
-  const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
-    reportFailure: false,
-  });
   const setThreadRuntimeMode = useAtomCommand(threadEnvironment.setRuntimeMode, {
     reportFailure: false,
   });
@@ -500,9 +669,14 @@ export function useThreadOutboxDrain(): void {
   const queuedMessagesByThreadKey = useThreadOutboxMessages();
   const shellStatuses = useThreadOutboxShellStatuses();
   const threads = useThreadShells();
+  const creationOutcomes = useAtomValue(pendingThreadCreationOutcomesAtom);
   const projects = useProjects();
   const serverConfigs = useServerConfigs();
   const { connectedEnvironments } = useRemoteConnectionStatus();
+  const operableEnvironments = useEnvironmentsWithScope(
+    connectedEnvironments,
+    AuthOrchestrationOperateScope,
+  );
   const [retryTick, setRetryTick] = useState(0);
   const retryAttemptRef = useRef(new Map<MessageId, number>());
   const retryNotBeforeRef = useRef(new Map<MessageId, number>());
@@ -573,8 +747,21 @@ export function useThreadOutboxDrain(): void {
   );
 
   useEffect(() => {
-    ensureThreadOutboxLoaded();
+    let mounted = true;
+    const load = async () => {
+      if ((await threadOutboxManager.load()) || !mounted) return;
+      Alert.alert(
+        "Some queued messages could not be loaded",
+        "Unreadable records and attachment files are still saved. Other messages can still be sent.",
+        [
+          { text: "Dismiss", style: "cancel" },
+          { text: "Retry", onPress: () => void load() },
+        ],
+      );
+    };
+    void load();
     return () => {
+      mounted = false;
       for (const timer of retryTimersRef.current.values()) {
         clearTimeout(timer);
       }
@@ -595,18 +782,16 @@ export function useThreadOutboxDrain(): void {
         return null;
       }
       const error = Cause.squash(commandResult.cause);
-      const action = resolveThreadOutboxFailureAction({
+      const action = logThreadOutboxDeliveryFailure({
         stage,
         error,
         interrupted: Cause.hasInterruptsOnly(commandResult.cause),
-      });
-      console.warn("[thread-outbox] queued message delivery failed", {
-        environmentId: queuedMessage.environmentId,
-        threadId: queuedMessage.threadId,
-        messageId: queuedMessage.messageId,
-        stage,
-        cause: commandResult.cause,
-        action,
+        context: {
+          environmentId: queuedMessage.environmentId,
+          threadId: queuedMessage.threadId,
+          messageId: queuedMessage.messageId,
+          cause: commandResult.cause,
+        },
       });
       return {
         action,
@@ -618,25 +803,24 @@ export function useThreadOutboxDrain(): void {
 
   const sendQueuedMessage = useCallback(
     async (queuedMessage: QueuedThreadMessage, thread: EnvironmentThreadShell) => {
-      const settings = resolveQueuedThreadSettings(queuedMessage, thread);
+      const hasAccess = () =>
+        readEnvironmentScope(queuedMessage.environmentId, AuthOrchestrationOperateScope);
+      if (!hasAccess()) return true;
+      const serverConfig = appAtomRegistry.get(
+        serverEnvironment.configValueAtom(queuedMessage.environmentId),
+      );
+      if (!serverConfig) return false;
+      const settings = resolveQueuedThreadSettings(queuedMessage, thread, serverConfig.providers);
+      if (isModelSelectionUnavailable(serverConfig, settings.modelSelection)) {
+        return restoreQueuedMessage(
+          queuedMessage,
+          "Antigravity model unavailable. Set it up on web or desktop, or choose another model.",
+        );
+      }
       const { reportFailure } = makeDeliveryHelpers(queuedMessage);
 
-      if (!modelSelectionsEqual(settings.modelSelection, thread.modelSelection)) {
-        const updateResult = await updateThreadMetadata({
-          environmentId: queuedMessage.environmentId,
-          input: {
-            commandId: settingsCommandId(queuedMessage, "model-selection"),
-            threadId: queuedMessage.threadId,
-            modelSelection: settings.modelSelection,
-          },
-        });
-        if (AsyncResult.isFailure(updateResult)) {
-          reportFailure(updateResult, "settings-sync");
-          return false;
-        }
-      }
-
       if (settings.runtimeMode !== thread.runtimeMode) {
+        if (!hasAccess()) return true;
         const runtimeResult = await setThreadRuntimeMode({
           environmentId: queuedMessage.environmentId,
           input: {
@@ -653,6 +837,7 @@ export function useThreadOutboxDrain(): void {
       }
 
       if (settings.interactionMode !== thread.interactionMode) {
+        if (!hasAccess()) return true;
         const interactionResult = await setThreadInteractionMode({
           environmentId: queuedMessage.environmentId,
           input: {
@@ -671,8 +856,12 @@ export function useThreadOutboxDrain(): void {
       let prepared: PreparedTurnAttachments;
       let persistedMessage: QueuedThreadMessage;
       let deliveryRevision: number;
+      if (!hasAccess()) return true;
       try {
-        const preparedResult = await prepareQueuedMessageAttachments(queuedMessage);
+        const preparedResult = await prepareQueuedMessageAttachments(
+          queuedMessage,
+          serverConfig.environment.capabilities.attachmentUploads === true,
+        );
         if (preparedResult.status === "abandoned") {
           return true;
         }
@@ -687,7 +876,8 @@ export function useThreadOutboxDrain(): void {
           return true;
         }
       } catch (error) {
-        console.warn("[thread-outbox] failed to upload attachments", error);
+        if (!hasAccess()) return true;
+        logThreadOutboxUploadFailure(queuedMessage, error);
         if (!shouldRetryThreadOutboxDelivery(error)) {
           return restoreQueuedMessage(
             queuedMessage,
@@ -699,23 +889,57 @@ export function useThreadOutboxDrain(): void {
       if (!isQueuedMessagePayloadCurrent(persistedMessage, deliveryRevision)) {
         return true;
       }
+      const currentConfig = appAtomRegistry.get(
+        serverEnvironment.configValueAtom(queuedMessage.environmentId),
+      );
+      if (!currentConfig) return false;
+      if (isModelSelectionUnavailable(currentConfig, settings.modelSelection)) {
+        return restoreQueuedMessage(
+          persistedMessage,
+          "Antigravity model unavailable. Set it up on web or desktop, or choose another model.",
+        );
+      }
+      const sendSettings = resolveQueuedThreadSettings(
+        queuedMessage,
+        settings,
+        currentConfig.providers,
+      );
+      if (!hasAccess()) return true;
       const deliveryResult = await startTurn({
         environmentId: queuedMessage.environmentId,
         input: {
           commandId: queuedMessage.commandId,
+          creationSource: "mobile",
           threadId: queuedMessage.threadId,
           message: {
             messageId: queuedMessage.messageId,
             role: "user",
-            text: queuedMessage.text,
+            ...serializeComposerMessageForServer(
+              queuedMessage.text,
+              uploadedComposerContext(
+                queuedMessage.context,
+                queuedMessage.attachments,
+                prepared.attachments,
+              ),
+              currentConfig.environment.capabilities.inlineMessageContext === true,
+            ),
             attachments: prepared.attachments,
           },
-          modelSelection: settings.modelSelection,
-          runtimeMode: settings.runtimeMode,
-          interactionMode: settings.interactionMode,
+          modelSelection: sendSettings.modelSelection,
+          titleSeed: deriveThreadTitleSeed({
+            text: queuedMessage.text,
+            attachments: queuedMessage.attachments,
+          }),
+          runtimeMode: sendSettings.runtimeMode,
+          interactionMode: sendSettings.interactionMode,
           createdAt: queuedMessage.createdAt,
+          // Rows written before follow-up behavior existed keep the previous
+          // delivery, which the server turns into a queued run when a turn is
+          // already active.
+          dispatchMode: queuedMessage.dispatchMode ?? "start",
         },
       });
+      if (AsyncResult.isFailure(deliveryResult) && !hasAccess()) return true;
       const failure = reportFailure(deliveryResult, "start-turn");
       if (failure?.action === "retry") {
         return false;
@@ -728,12 +952,6 @@ export function useThreadOutboxDrain(): void {
         (await completeQueuedMessageDelivery(persistedMessage, deliveryRevision)) === "removed";
       if (delivered) {
         acknowledgedExistingThreadMessageIdsRef.current.delete(persistedMessage.messageId);
-        // The delivered turn holds its own copy of the bytes. A failed delete
-        // is surfaced (never fails the delivered turn); the server also
-        // expires leaked pending uploads.
-        await prepared.releaseUploads().catch((error) => {
-          console.warn("[thread-outbox] could not delete consumed pending uploads", error);
-        });
       }
       return delivered;
     },
@@ -742,7 +960,6 @@ export function useThreadOutboxDrain(): void {
       setThreadInteractionMode,
       setThreadRuntimeMode,
       startTurn,
-      updateThreadMetadata,
       restoreQueuedMessage,
     ],
   );
@@ -753,15 +970,40 @@ export function useThreadOutboxDrain(): void {
       creation: QueuedThreadCreation,
       projectCwd: string,
     ) => {
+      const hasAccess = () =>
+        readEnvironmentScope(queuedMessage.environmentId, AuthOrchestrationOperateScope);
+      if (!hasAccess()) return true;
       const modelSelection = queuedMessage.modelSelection;
       if (modelSelection === undefined) {
         return false;
+      }
+      const serverConfig = appAtomRegistry.get(
+        serverEnvironment.configValueAtom(queuedMessage.environmentId),
+      );
+      if (!serverConfig) return false;
+      const settings = resolveQueuedThreadSettings(
+        queuedMessage,
+        {
+          modelSelection,
+          runtimeMode: DEFAULT_RUNTIME_MODE,
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        },
+        serverConfig.providers,
+      );
+      if (isModelSelectionUnavailable(serverConfig, settings.modelSelection)) {
+        return restoreQueuedMessage(
+          queuedMessage,
+          "Antigravity model unavailable. Set it up on web or desktop, or choose another model.",
+        );
       }
       let prepared: PreparedTurnAttachments;
       let persistedMessage: QueuedThreadMessage;
       let deliveryRevision: number;
       try {
-        const preparedResult = await prepareQueuedMessageAttachments(queuedMessage);
+        const preparedResult = await prepareQueuedMessageAttachments(
+          queuedMessage,
+          serverConfig.environment.capabilities.attachmentUploads === true,
+        );
         if (preparedResult.status === "abandoned") {
           return true;
         }
@@ -776,7 +1018,8 @@ export function useThreadOutboxDrain(): void {
           return true;
         }
       } catch (error) {
-        console.warn("[thread-outbox] failed to upload attachments", error);
+        if (!hasAccess()) return true;
+        logThreadOutboxUploadFailure(queuedMessage, error);
         if (!shouldRetryThreadOutboxDelivery(error)) {
           return restoreQueuedMessage(
             queuedMessage,
@@ -788,6 +1031,22 @@ export function useThreadOutboxDrain(): void {
       if (!isQueuedMessagePayloadCurrent(persistedMessage, deliveryRevision)) {
         return true;
       }
+      const currentConfig = appAtomRegistry.get(
+        serverEnvironment.configValueAtom(queuedMessage.environmentId),
+      );
+      if (!currentConfig) return false;
+      if (isModelSelectionUnavailable(currentConfig, settings.modelSelection)) {
+        return restoreQueuedMessage(
+          persistedMessage,
+          "Antigravity model unavailable. Set it up on web or desktop, or choose another model.",
+        );
+      }
+      const sendSettings = resolveQueuedThreadSettings(
+        queuedMessage,
+        settings,
+        currentConfig.providers,
+      );
+      if (!hasAccess()) return true;
       const deliveryResult = await startTurn({
         environmentId: queuedMessage.environmentId,
         input: buildProjectThreadStartTurnInput({
@@ -797,12 +1056,19 @@ export function useThreadOutboxDrain(): void {
           commandId: queuedMessage.commandId,
           messageId: queuedMessage.messageId,
           createdAt: queuedMessage.createdAt,
-          text: queuedMessage.text.trim(),
-          attachments: queuedMessage.attachments,
+          ...serializeComposerMessageForServer(
+            queuedMessage.text.trim(),
+            uploadedComposerContext(
+              queuedMessage.context,
+              queuedMessage.attachments,
+              prepared.attachments,
+            ),
+            currentConfig.environment.capabilities.inlineMessageContext === true,
+          ),
           uploadedAttachments: prepared.attachments,
-          modelSelection,
-          runtimeMode: queuedMessage.runtimeMode ?? DEFAULT_RUNTIME_MODE,
-          interactionMode: queuedMessage.interactionMode ?? DEFAULT_PROVIDER_INTERACTION_MODE,
+          modelSelection: sendSettings.modelSelection,
+          runtimeMode: sendSettings.runtimeMode,
+          interactionMode: sendSettings.interactionMode,
           workspaceMode: creation.workspaceMode,
           branch: creation.branch,
           worktreePath: creation.worktreePath,
@@ -811,6 +1077,7 @@ export function useThreadOutboxDrain(): void {
         }),
       });
       const { reportFailure } = makeDeliveryHelpers(queuedMessage);
+      if (AsyncResult.isFailure(deliveryResult) && !hasAccess()) return true;
       const failure = reportFailure(deliveryResult, "start-turn");
       if (failure?.action === "retry") {
         return false;
@@ -818,6 +1085,9 @@ export function useThreadOutboxDrain(): void {
       if (failure?.action === "restore") {
         return restoreQueuedMessage(persistedMessage, failure.message);
       }
+      // Recorded before the queue entry goes so the thread screen never sees a
+      // gap between the queued creation and the server's shell.
+      recordPendingThreadCreationOutcome({ kind: "delivered", message: persistedMessage });
       const outcome = await completeQueuedMessageDelivery(persistedMessage, deliveryRevision);
       if (outcome === "edited") {
         if (appAtomRegistry.get(editingQueuedMessageIdsAtom)[queuedMessage.messageId]) {
@@ -830,16 +1100,34 @@ export function useThreadOutboxDrain(): void {
         // payload as a duplicate creation. Hand it to the thread's composer.
         return recoverEditedCreationAfterDelivery(persistedMessage);
       }
-      if (outcome === "removed") {
-        await prepared.releaseUploads().catch((error) => {
-          console.warn("[thread-outbox] could not delete consumed pending uploads", error);
-        });
-        return true;
-      }
-      return false;
+      return outcome === "removed";
     },
     [makeDeliveryHelpers, restoreQueuedMessage, startTurn],
   );
+
+  // A creation outcome bridges setup until the server's shell has a turn.
+  // Drop it once that happens so the map cannot grow for a whole session; a
+  // failed outcome stays until its thread screen consumes it.
+  // Subscribed, not read once: the shell often lands before the outcome is
+  // recorded, and a non-reactive read would leave that entry uncollected
+  // because `threads` never changes again.
+  useEffect(() => {
+    for (const [threadKey, outcome] of Object.entries(creationOutcomes)) {
+      if (
+        outcome.kind === "delivered" &&
+        threads.some(
+          (thread) =>
+            scopedThreadKey(thread.environmentId, thread.id) === threadKey &&
+            (thread.latestRun !== null ||
+              thread.runtime?.status === "failed" ||
+              thread.runtime?.status === "cancelled" ||
+              thread.runtime?.status === "interrupted"),
+        )
+      ) {
+        clearPendingThreadCreationOutcome(threadKey);
+      }
+    }
+  }, [creationOutcomes, threads]);
 
   useEffect(() => {
     if (dispatchingQueuedMessageId !== null) {
@@ -922,10 +1210,13 @@ export function useThreadOutboxDrain(): void {
         threadExists: thread !== undefined,
         shellStatus,
         environmentConnected: environment?.connectionState === "connected",
-        threadBusy: thread?.session?.status === "running" || thread?.session?.status === "starting",
+        threadBusy: threadRuntimeIsActive(thread?.runtime),
       });
-      // The delivery action resolves first; the file-capability gate applies
-      // only to a message that will send. Gating earlier would restore a
+      if (deliveryAction === "send" && !operableEnvironments.has(nextQueuedMessage.environmentId)) {
+        continue;
+      }
+      // The delivery action resolves first; capability checks apply only to
+      // a message that will send. Checking earlier would restore a
       // creation whose startTurn already made the thread as a duplicate draft
       // instead of removing it.
       const serverConfig = serverConfigs.get(nextQueuedMessage.environmentId);
@@ -1028,8 +1319,7 @@ export function useThreadOutboxDrain(): void {
             appAtomRegistry.get(environmentThreadShells.threadShellsAtom),
             nextQueuedMessage,
           );
-          const liveThreadBusy =
-            liveThread?.session?.status === "running" || liveThread?.session?.status === "starting";
+          const liveThreadBusy = threadRuntimeIsActive(liveThread?.runtime);
           const liveDeliveryAction = resolveThreadOutboxDeliveryAction({
             isCreation: creation !== undefined,
             threadExists: liveThread !== undefined,
@@ -1082,6 +1372,7 @@ export function useThreadOutboxDrain(): void {
     connectedEnvironments,
     dispatchingQueuedMessageId,
     editingQueuedMessageIds,
+    operableEnvironments,
     projects,
     queuedMessagesByThreadKey,
     retryTick,
