@@ -1,4 +1,8 @@
 import type { ContextMenuItem } from "@t3tools/contracts";
+import {
+  type SourceControlClientDefinition,
+  UNKNOWN_SOURCE_CONTROL_CLIENT,
+} from "@t3tools/client-runtime/source-control-clients";
 
 import { writeTextToClipboard } from "~/hooks/useCopyToClipboard";
 import { readLocalApi } from "~/localApi";
@@ -8,18 +12,11 @@ import { toastManager } from "../ui/toast";
 export type PullRequestLinkContextMenuAction = "copy-link" | "open-external";
 
 /** Named for the host rather than "externally": the point is where you will land. */
-export const OPEN_ON_HOST_LABELS: Partial<Record<string, string>> = {
-  github: "Open on GitHub",
-  gitlab: "Open on GitLab",
-  bitbucket: "Open on Bitbucket",
-  "azure-devops": "Open on Azure DevOps",
-};
-
-export const openOnHostLabel = (provider: string): string =>
-  OPEN_ON_HOST_LABELS[provider] ?? "Open on host";
+export const openOnHostLabel = (host: SourceControlClientDefinition): string =>
+  host === UNKNOWN_SOURCE_CONTROL_CLIENT ? "Open on host" : `Open on ${host.label}`;
 
 /** Copy first: it is the reason to right-click a number rather than click it. */
-export function pullRequestLinkContextMenuItems(
+function pullRequestLinkContextMenuItems(
   openLabel: string,
 ): readonly ContextMenuItem<PullRequestLinkContextMenuAction>[] {
   return [
