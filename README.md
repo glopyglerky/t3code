@@ -1,4 +1,8 @@
-# t3 code ls: T3 Code being ported to Lust
+# Lust Port Info
+
+This is a port of [t3-code](https://github.com/pingdotgg/t3code) in their [lust-lang](https://github.com/t3dotgg/lust-lang). [Theo](https://github.com/t3dotgg) recently mentioned in a video that ChatGPT Chat wasn’t useful for serious coding work, so I made this fork using only [ChatGPT.com](https://chatgpt.com/) hosted chat and the [github connection](https://help.openai.com/en/articles/11145903-connecting-github-to-chatgpt) for fun.
+
+*Port in progress — [status, build instructions, and methods](./native/t3-code-ls/README.md) · [customizations and divergence decisions](./docs/internals/t3-code-ls.md).*
 
 <!-- t3-code-ls:upstream-readme:start -->
 
@@ -157,79 +161,3 @@ Have a feature request? Start an [Ideas discussion](https://github.com/pingdotgg
 Need support? Join the [Discord](https://discord.gg/jn4EGJjrvv).
 
 <!-- t3-code-ls:upstream-readme:end -->
-
-## t3 code ls customizations
-
-t3 code luxury sport addition
-
-This is glopyglerky's fork of T3 Code. The goal is to recreate the server,
-web and desktop clients, and iOS and Android apps in
-[Theo Browne's Lust](https://github.com/t3dotgg/lust-lang), with the same behavior
-and UI as the current published T3 Code nightly. **The recreation is incomplete.**
-The working user interfaces still use upstream React and React Native code, and
-the server still uses TypeScript and Node.
-
-The upstream README above is preserved byte for byte from the published nightly
-commit recorded in [upstream.lock.json](./native/t3-code-ls/upstream.lock.json).
-Its installation commands, package names, store links, support links, and release
-links refer to upstream T3 Code. They do not install a completed Lust edition.
-Build and verification instructions for this fork's native code are in
-[native/t3-code-ls](./native/t3-code-ls/README.md).
-
-### Customizations and divergence decisions
-
-| Area                        | Fork decision and current boundary                                                                                                                                                                                                                                                                                                     |
-| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Language                    | Port application logic into dependency-free source accepted by the pinned Lust compiler. Execute it with Lust and compare its behavior with the original TypeScript. Cargo compilation alone does not count as a Lust port.                                                                                                            |
-| Native builds               | Cargo and rustc currently build the native release artifacts. The Iroh adapter requires async Rust, Tokio, and dependencies beyond current Lust support. These boundaries remain explicit until the compiler and target builds support their replacement.                                                                              |
-| Connect transport           | Carry the configured T3 service's HTTP and WebSocket traffic over authenticated Iroh connections. Peer admission and revocation apply in addition to existing T3 pairing, sessions, and permissions. The bridge is not a completed replacement for Connect's discovery, account, session, notification, and mobile lifecycle behavior. |
-| Iroh protocols              | Use blobs for authorized artifacts, gossip for bounded presence hints, and docs only for explicitly shared metadata where they fit T3 behavior. These integrations remain incomplete. Neither an address nor a content hash grants access.                                                                                             |
-| UI and application behavior | Preserve the upstream application as the reference while replacing implementations. A retained TypeScript screen does not count as a Lust implementation of that screen. Platform builds, accessibility, reconnects, and signed packages need their own evidence.                                                                      |
-| Upstream updates            | Check published nightlies and upstream activity every two hours. Review complete source changes and port adaptations before advancing qualification. Unmerged PRs and a newer source pin do not establish compatibility.                                                                                                               |
-
-[Architecture decisions](./docs/internals/t3-code-ls.md) explain the compiler,
-transport, authority, mobile, and storage boundaries. The native README records
-current usage limits and verification commands.
-
-### Methods used for the port
-
-This is an attributed port. We inspect upstream source, tests, and published
-artifacts, so this is not a clean-room implementation. The upstream MIT license
-and copyright notice remain in [LICENSE](./LICENSE).
-
-1. Pin the published nightly to its immutable commit and Git tree. Keep a complete
-   inventory of server, contracts, providers, shared client logic, Connect, web,
-   desktop, and mobile sources.
-2. Port behavior at defined interfaces. Run the actual upstream implementation
-   and the Lust-compiled implementation on the same cases, comparing outputs and
-   errors. Permission tests include the distinction between absent and explicitly
-   empty grants, legacy client compatibility, and exact server grants.
-3. Check the compiler itself against the immutable revision in
-   [lust-toolchain.json](./native/t3-code-ls/lust-toolchain.json). The Lust gate
-   rejects dirty or mismatched compiler sources, failed or ignored tests, source
-   changes during verification, and behavior mismatches. It does not fall back
-   to Cargo when Lust fails.
-4. Exercise actual application paths. The native transport tests cover endpoint
-   admission and revocation; the official-nightly verifier checks application
-   authentication and WebSocket requests through the bridge with disposable
-   state. These checks do not establish full application or UI parity.
-5. Require parity evidence before declaring completion. Compare command results,
-   persisted state, ordered events, permissions, errors, cancellation, and recovery
-   across supported providers and connection modes. Compare all corresponding
-   screens and interactions on web, desktop, iOS, and Android using fixed viewports,
-   fonts, themes, and device settings, with screenshot differences and accessibility
-   checks. Qualify installation, updates, rollback, and platform lifecycle behavior
-   on their actual targets. The lock's qualification remains unqualified until
-   the full application satisfies these checks.
-
-To verify that the upstream README section still matches the pinned source, run
-from the repository root:
-
-```sh
-python3 native/t3-code-ls/tools/sync-readme.py
-```
-
-After an intentional upstream pin change, fetch that exact commit and run the
-same command with `--write`. It replaces only the marked upstream section and
-preserves this fork's heading and additions. It rejects missing or ambiguous
-markers, an unavailable source commit, and a mismatched root tree.
