@@ -312,8 +312,6 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_INCREMENTAL: "0"
-      T3_CODE_LS_SURREAL_EXECUTABLE: ${{ runner.temp }}/surreal/surreal
-      T3_CODE_LS_TEST_TMPDIR: ${{ runner.temp }}
     steps:
       - name: Check out the exact public source
         working-directory: ${{ github.workspace }}
@@ -350,7 +348,9 @@ jobs:
           echo "$database_sha  $RUNNER_TEMP/surreal.tgz" | sha256sum --check --
           mkdir -p "$RUNNER_TEMP/surreal"
           tar -xzf "$RUNNER_TEMP/surreal.tgz" -C "$RUNNER_TEMP/surreal"
-          "$T3_CODE_LS_SURREAL_EXECUTABLE" version
+          "$RUNNER_TEMP/surreal/surreal" version
+          echo "T3_CODE_LS_SURREAL_EXECUTABLE=$RUNNER_TEMP/surreal/surreal" >> "$GITHUB_ENV"
+          echo "T3_CODE_LS_TEST_TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
       - name: Check database code
         run: cargo clippy --locked -p t3-code-ls-storage --all-targets -- -D warnings
       - name: Test real database transactions and recovery
