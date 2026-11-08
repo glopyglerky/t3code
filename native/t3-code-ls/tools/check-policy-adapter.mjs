@@ -9,6 +9,7 @@ import {
   CommandPolicyCapabilityUnsupportedError,
   layer,
 } from "../../../apps/server/src/orchestration-v2/CommandPolicy.ts";
+import { makeNativeCommandPolicy } from "../../../apps/server/src/orchestration-v2/NativeCommandPolicy.ts";
 
 const executable = process.argv[2];
 assert.ok(executable, "Pass the Lust-built policy executable");
@@ -91,20 +92,34 @@ for (const strength of ["none", "weak", "strong"]) {
   }
 }
 await Promise.all(masks.slice(0, 16).map((mask) => compare("ensureQueuedMessages", input(mask))));
-for (const path of ["relative-policy", "", "/invalid\0path"]) {
-  await assert.rejects(select(path));
+for (const path of ["relative-policy", ""]) {
+  await assert.rejects(select(path), undefined, `Invalid configured path was accepted: ${JSON.stringify(path)}`);
   assertions++;
 }
+// OS environment values cannot carry NUL; exercise the factory boundary directly.
+assert.throws(() => makeNativeCommandPolicy("/invalid\0path", () => {
+  throw new Error("A rejected path must not construct a provider refusal");
+}));
+assertions++;
 const directory = await mkdtemp(join(tmpdir(), "t3ls-policy-adapter-"));
 try {
+  const selectionFixture = join(directory, "selection-witness");
+  await writeFile(selectionFixture, `#!${process.execPath}\nconst expected = ["t3ls-policy-v1", "queued", "16383"];\nif (JSON.stringify(process.argv.slice(2)) !== JSON.stringify(expected)) process.exit(2);\nprocess.stdout.write("unsupported\\tqueued_messages\\tsynthetic native selection witness\\n");\n`, { mode: 0o700 });
+  const selected = await select(selectionFixture);
+  const witnessed = await outcome(selected.ensureQueuedMessages(input(all)));
+  assert.equal(witnessed.ok, false);
+  assert.equal(witnessed.detail, "synthetic native selection witness");
+  assertions++;
+
   const missing = await select(join(directory, "does-not-exist"));
-  // Infrastructure defects must not become provider refusals or fall back to upstream.
-  await assert.rejects(Effect.runPromise(Effect.flip(missing.ensureQueuedMessages(input(all)))));
+  // outcome resolves both success and typed refusal; only an infrastructure defect rejects.
+  await assert.rejects(outcome(missing.ensureQueuedMessages(input(all))));
   assertions++;
   const bodies = [
     ...["", "ok\t-", "ok\t-\nok\t-\n", "ok\tunknown\n", "ok\t-\r\n",
       "ok\t-\n\n", "unsupported\tbogus\tdetail\n", "unsupported\tqueued_messages\t\n",
       "unsupported\tinterrupt\twrong operation\n", "unsupported\tqueued_messages\tbad\0text\n",
+      "unsupported\tqueued_messages\tdetail\n\n",
     ].map((value) => `process.stdout.write(${JSON.stringify(value)});`),
     'process.stdout.write("ok\\t-\\n"); process.exitCode = 2;',
     'process.stdout.write("ok\\t-\\n"); process.stderr.write("unexpected stderr");',
@@ -114,7 +129,7 @@ try {
     const fixture = join(directory, "invalid-response");
     await writeFile(fixture, `#!${process.execPath}\n${body}\n`, { mode: 0o700 });
     const broken = await select(fixture);
-    await assert.rejects(Effect.runPromise(Effect.flip(broken.ensureQueuedMessages(input(all)))));
+    await assert.rejects(outcome(broken.ensureQueuedMessages(input(all))), undefined, body);
     assertions++;
   }
   const fixture = join(directory, "private-environment");
