@@ -350,7 +350,7 @@ repository root:
 
 ```sh
 python3 native/t3-code-ls/tools/verify-upstream.py \
-  --archive /absolute/path/to/t3-0.1.8-nightly.20261108.4367-linux-x64.tar.gz \
+  --archive /absolute/path/to/t3-0.1.8-nightly.20261108.4380-linux-x64.tar.gz \
   --output /tmp/t3-code-ls-upstream-verification.json
 ```
 

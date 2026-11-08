@@ -134,8 +134,9 @@ jobs:
       - name: Verify against the official nightly runtime
         run: |
           curl --fail --location --retry 3 \
-            https://github.com/pingdotgg/t3code/releases/download/v0.1.8-nightly.20261108.4367/t3-0.1.8-nightly.20261108.4367-linux-x64.tar.gz \
+            https://github.com/pingdotgg/t3code/releases/download/v0.1.8-nightly.20261108.4380/t3-0.1.8-nightly.20261108.4380-linux-x64.tar.gz \
             --output "$RUNNER_TEMP/t3-nightly-linux-x64.tar.gz"
+          echo "f74b9d7157a7aa9468be39f06951e30669fb2ea36e4ad118449109e409b8d74e  $RUNNER_TEMP/t3-nightly-linux-x64.tar.gz" | sha256sum --check --
           python3 tools/verify-upstream.py \
             --archive "$RUNNER_TEMP/t3-nightly-linux-x64.tar.gz" \
             --output "$RUNNER_TEMP/t3-code-ls-upstream-verification.json"

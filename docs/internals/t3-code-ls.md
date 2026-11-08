@@ -223,6 +223,8 @@ since the last published nightly, and skips releases without new commits. A
 two-hour poll follows the requested cadence, but is not an exact release event
 trigger. Only a published nightly advances the source baseline.
 
+The 2026-11-08 `v0.1.8-nightly.20261108.4380` source sync brings [upstream's merged mise provider update behavior](https://github.com/pingdotgg/t3code/pull/21524) and its tests into the existing TypeScript application. It is **not** a Lust implementation. The next provider port slice must move verified mise ownership, pinned-tool refusal, command-wrapper restrictions, and safe `mise upgrade` selection into a Lust-built executable and connect the live maintenance service to it. Compare that executable with the immutable `ade473018d32003658b7d38693e083ee2e314bd8` resolver and test a controlled mise installation without user credentials. Full server, provider orchestration, Connect, Iroh blobs/docs/gossip, web, desktop, iOS, and Android acceptance remains open.
+
 PRs and issues provide advance notice and regression evidence. Track their
 updates with an overlapping cursor window and complete pagination. Do not
 advance after a failed or truncated scan. Deferred items must retain their own
