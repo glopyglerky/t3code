@@ -827,7 +827,10 @@ mod server_request_id_tests {
     fn request(id: Value) -> Message {
         Message::decode(Value::Object(vec![
             ("id".to_owned(), id),
-            ("method".to_owned(), Value::String("item/tool/requestUserInput".to_owned())),
+            (
+                "method".to_owned(),
+                Value::String("item/tool/requestUserInput".to_owned()),
+            ),
         ]))
         .unwrap()
     }
