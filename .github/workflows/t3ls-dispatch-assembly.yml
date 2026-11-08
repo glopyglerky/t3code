@@ -1,0 +1,42 @@
+name: Assemble Lust dispatch candidate
+
+on:
+  push:
+    branches: [work/ls-dispatch-assembly-20261108]
+
+permissions:
+  contents: read
+
+jobs:
+  assemble:
+    if: github.repository_id == '1352693431' && github.ref == 'refs/heads/work/ls-dispatch-assembly-20261108'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Read the exact candidate and pinned base
+        env:
+          SOURCE_REPOSITORY: ${{ github.repository }}
+          SOURCE_REVISION: ${{ github.sha }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          git init .
+          git remote add origin "https://github.com/${SOURCE_REPOSITORY}.git"
+          git -c credential.helper= fetch --no-tags --depth=1 origin "$SOURCE_REVISION" 8af51f3a0ad4f53dc636c907a86cd8310b992b11
+          git sparse-checkout set --cone .github native/t3-code-ls apps/server/src/orchestration-v2
+          git checkout --detach "$SOURCE_REVISION"
+      - name: Assemble bounded edits
+        run: python3 .github/t3ls-dispatch-assembly.py
+      - name: Install pinned formatter and compiler
+        run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt,clippy
+      - name: Format and test the native core
+        working-directory: native/t3-code-ls
+        run: |
+          cargo fmt --all
+          cargo clippy --locked -p t3-code-ls-core --all-targets -- -D warnings
+          cargo test --locked -p t3-code-ls-core --all-targets
+      - name: Store candidate objects without moving any branch
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 .github/t3ls-dispatch-assembly.py --publish
