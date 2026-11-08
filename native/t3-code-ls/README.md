@@ -20,6 +20,13 @@ permission decisions, 50,025 retry delay cases, 2,001 first-session-loss delays,
 Client compatibility rules and exact server grants have separate APIs so an
 old-client fallback cannot broaden server authority.
 
+The core also ports provider capability policy decisions for queued turns,
+steering, interruption, native forks, rollback, and context handoff. The
+frame-bounded `t3-code-ls-policy` executable has a fail-stop subprocess protocol;
+688,128 decisions are checked against the pinned upstream TypeScript functions.
+This provides a real callable policy boundary for future provider integrations,
+but it does not yet execute provider sessions or replace the upstream server.
+
 The native transport carries a fixed loopback service's HTTP, WebSocket, and
 binary traffic over authenticated Iroh connections. Each host explicitly admits
 client endpoint identities. Admitting a peer does not issue a T3 application
@@ -115,6 +122,7 @@ cargo test --locked --all-targets
 cargo clippy --locked --all-targets -- -D warnings
 node --disable-warning=ExperimentalWarning tools/check-permissions.mjs
 node --disable-warning=ExperimentalWarning tools/check-connection.mjs
+node --disable-warning=ExperimentalWarning tools/check-policy.mjs
 python3 -B -m unittest discover -s tools -p 'test_*.py'
 ```
 
@@ -126,9 +134,9 @@ python3 tools/check-lust.py --source /absolute/path/to/lust-lang
 ```
 
 The gate builds the pinned compiler and TinyCC, checks the unchanged core, runs
-13 unit tests through Lust, and compiles and executes the permission and connection
-matrices through Lust. It compares both outputs to the pinned upstream TypeScript
-functions. It rejects a dirty or wrong compiler checkout, ignored tests, source
+all inline core unit tests through Lust, and compiles and executes the
+permission, connection, and provider-policy oracles through Lust. It compares
+their outputs to the pinned upstream TypeScript functions. It rejects a dirty or wrong compiler checkout, ignored tests, source
 changes during verification, and mismatched behavior. The receipt records hashes
 of the exact Git blobs and command results at `target/lust-proof.json`. There is
 no Cargo fallback for these Lust checks.
