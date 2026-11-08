@@ -34,8 +34,9 @@ import {
   createModelCapabilities,
   formatCodexModelName,
 } from "@t3tools/shared/model";
-import { resolveSpawnCommand } from "@t3tools/shared/shell";
+import { resolveCommandPath, resolveSpawnCommand } from "@t3tools/shared/shell";
 import { codexAppServerArgs, resolveCodexLaunchArgs } from "./codexLaunchArgs.ts";
+import { NATIVE_CODEX_PROVIDER_EXECUTABLE, selectNativeCodexProcess } from "./nativeCodexProcess.ts";
 import {
   buildServerProvider,
   COMPACT_SLASH_COMMAND,
@@ -497,14 +498,35 @@ export const withCodexAppServerClient = Effect.fn("withCodexAppServerClient")(fu
     codexAppServerArgs(input.launchArgs),
     { env: environment, extendEnv: true },
   );
+  // The same factory drives provider discovery and real Codex sessions.
+  // An explicitly selected Lust runtime must never silently fall back.
+  const nativeExecutable = environment[NATIVE_CODEX_PROVIDER_EXECUTABLE] ??
+    process.env[NATIVE_CODEX_PROVIDER_EXECUTABLE];
+  const codexCommand = nativeExecutable !== undefined && !spawnCommand.shell
+    ? (yield* resolveCommandPath(spawnCommand.command, { env: environment, extendEnv: true })) ??
+      spawnCommand.command
+    : spawnCommand.command;
+  const selected = yield* Effect.try({
+    try: () => selectNativeCodexProcess(
+      nativeExecutable,
+      { ...spawnCommand, command: codexCommand },
+      input.cwd,
+      environment.HOME ?? process.env.HOME ?? "",
+      process.platform,
+    ),
+    catch: (cause) => new CodexErrors.CodexAppServerSpawnError({
+      command: `${input.binaryPath} app-server`,
+      cause,
+    }),
+  });
   const child = yield* spawner
     .spawn(
-      ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+      ChildProcess.make(selected.command, selected.args, {
         cwd: input.cwd,
         env: environment,
         extendEnv: true,
         forceKillAfter: CODEX_APP_SERVER_PROBE_FORCE_KILL_AFTER,
-        shell: spawnCommand.shell,
+        shell: selected.shell,
       }),
     )
     .pipe(
@@ -791,7 +813,10 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
   if (Result.isFailure(probeResult)) {
     const error = probeResult.failure;
     const installed = !isCodexAppServerSpawnError(error);
-    const version = installed
+    // A broken native runtime cannot trigger the raw CLI version fallback.
+    const nativeSelected = resolvedEnvironment[NATIVE_CODEX_PROVIDER_EXECUTABLE] !== undefined ||
+      process.env[NATIVE_CODEX_PROVIDER_EXECUTABLE] !== undefined;
+    const version = installed && !nativeSelected
       ? yield* probeCodexCliVersion({
           binaryPath: codexSettings.binaryPath,
           homePath: codexSettings.homePath,
