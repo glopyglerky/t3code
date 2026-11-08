@@ -206,7 +206,7 @@ const layerProjectServiceDependencies = Layer.mergeAll(
   Layer.provideMerge(SqlitePersistence.layerMemory),
   Layer.provideMerge(ServerSettings.layerTest()),
   Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "project-service-race-" })),
-  Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+  Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
 );
 
 const waitForProject = Effect.fn("ProjectServiceTest.waitForProject")(function* (
@@ -544,8 +544,18 @@ it.layer(layerTest)("ProjectService", (it) => {
         workspaceRoot: "/work/delete-retry",
       });
       const input = { commandId: CommandId.make("command:delete-retry:delete"), projectId };
-      const deleted = yield* service.delete(input);
-      assert.deepEqual(yield* service.delete(input), deleted);
+      // Optional enrichment can finish between calls; receipt replay preserves durable state.
+      const {
+        repositoryIdentity: _deletedRepository,
+        faviconPath: _deletedFavicon,
+        ...deleted
+      } = yield* service.delete(input);
+      const {
+        repositoryIdentity: _replayedRepository,
+        faviconPath: _replayedFavicon,
+        ...replayed
+      } = yield* service.delete(input);
+      assert.deepEqual(replayed, deleted);
       const events = yield* sql<{ readonly command_id: string }>`
         SELECT command_id FROM orchestration_events
         WHERE stream_id = ${projectId} AND event_type = 'project.deleted'

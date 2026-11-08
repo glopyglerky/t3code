@@ -71,6 +71,15 @@ and stop flows. The existing event sink still owns the SQLite transaction,
 projection updates, command receipt, and outbox. The integration checks cover
 durable replay, repeated recovery, failure rollback, and child cleanup.
 
+Project creation, metadata updates, and deletion planning run in the Lust
+`t3-code-ls-project` executable when selected through
+`T3_CODE_LS_PROJECT_EXECUTABLE`. The port preserves workspace conflicts, exact
+domain rejections, legacy script IDs, optional and null metadata, and pin/archive
+timestamps. Its oracle executes the immutable nightly planner and its real
+contract validators. The production project service still owns locks, enrichment,
+SQLite events, projections, and command receipts. Unicode grapheme segmentation
+remains an explicit adapter input for the monogram-length rule.
+
 The native transport carries a fixed loopback service's HTTP, WebSocket, and
 binary traffic over authenticated Iroh connections. Each host explicitly admits
 client endpoint identities. Admitting a peer does not issue a T3 application
@@ -220,6 +229,36 @@ component preserves the existing guest link and provider behavior; links still
 use the existing Connect host and guest service. The verified executable is
 Linux x86-64, and is independent of the other native selectors.
 
+## Use the Lust project planner
+
+Build the verified Linux components, then select the project executable in the
+server's environment. From the repository root:
+
+```sh
+T3CODE_DEV_SEED=0 \
+T3_CODE_LS_PROJECT_EXECUTABLE="$PWD/native/t3-code-ls/target/lust-bin/t3-code-ls-project" \
+vp run dev
+```
+
+Only an unset selector keeps the upstream planner. A failed selected executable
+fails the operation. The adapter validates the response schema, command and
+project identity, event payload, timestamps, and rejection association before
+the existing service commits it. Accepted and rejected receipts keep the
+upstream retry behavior. The process receives bounded JSON on standard input,
+an empty environment, and no shell; each request and response is limited to
+128 MiB and execution to 30 seconds.
+
+Forced project deletion preserves upstream's durable sequence: child thread
+deletions commit before the project deletion is planned. A native planning
+failure can therefore leave already-deleted children while the project remains.
+Retry continues from that state without repeating their events or cleanup
+requests. It does not roll back the entire deletion cascade.
+
+The service integration gate exercises the real production layer, SQLite event
+sink, project store, command receipts, and thread deletion path. Storage,
+workspace normalization, repository enrichment, and client UI remain upstream
+implementations. The verified executable is Linux x86-64.
+
 ## Connect two machines
 
 The bridge currently makes every backend connection from loopback. Upstream
@@ -291,6 +330,9 @@ node --disable-warning=ExperimentalWarning tools/check-dispatch.mjs
 node --disable-warning=ExperimentalWarning tools/check-guest-share.mjs
 cargo build --locked -p t3-code-ls-core --bin t3-code-ls-guest-share
 node --disable-warning=ExperimentalWarning tools/check-guest-share-runtime.mjs target/debug/t3-code-ls-guest-share
+node --disable-warning=ExperimentalWarning tools/check-project-commands.mjs
+cargo build --locked -p t3-code-ls-core --bin t3-code-ls-project
+node --disable-warning=ExperimentalWarning tools/check-project-runtime.mjs target/debug/t3-code-ls-project
 cargo build --locked -p t3-code-ls-core --example provider_recovery_matrix
 node --disable-warning=ExperimentalWarning tools/check-provider-recovery.mjs target/debug/examples/provider_recovery_matrix
 cargo build --locked -p t3-code-ls-core --bin t3-code-ls-recovery
@@ -312,6 +354,8 @@ tools/server-test-runtime/node_modules/.bin/effect-tsgo tsrs --noEmit --project 
 node tools/check-recovery-adapter.mjs "$PWD/target/lust-bin/t3-code-ls-recovery"
 tools/server-test-runtime/node_modules/.bin/effect-tsgo tsrs --noEmit --project tools/guest-share-tsconfig.json
 node tools/check-guest-share-adapter.mjs "$PWD/target/lust-bin/t3-code-ls-guest-share"
+tools/server-test-runtime/node_modules/.bin/effect-tsgo tsrs --noEmit --project tools/project-tsconfig.json
+node tools/check-project-adapter.mjs "$PWD/target/lust-bin/t3-code-ls-project"
 ```
 
 The gate builds the pinned compiler and TinyCC, checks the unchanged core, runs
@@ -331,8 +375,8 @@ are service and call-site integration checks, not a complete orchestrator,
 application, provider-session, browser, or mobile qualification.
 
 After a successful run, `target/lust-bin` contains the standalone Linux x86-64
-`t3-code-ls-policy`, `t3-code-ls-provider`, `t3-code-ls-recovery`, and
-`t3-code-ls-guest-share` executables.
+`t3-code-ls-policy`, `t3-code-ls-provider`, `t3-code-ls-recovery`,
+`t3-code-ls-guest-share`, and `t3-code-ls-project` executables.
 CI retains these verified components and their proof receipts as an artifact,
 including the dispatch, SQLite recovery, and guest-share integration receipts.
 They are development components, not desktop or mobile installers.

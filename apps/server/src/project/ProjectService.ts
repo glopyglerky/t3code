@@ -25,9 +25,9 @@ import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import {
   decodeProjectCommandRejection,
   encodeProjectCommandRejection,
-  planProjectCommand,
   type ProjectCommand,
 } from "../orchestration-v2/ProjectCommands.ts";
+import * as NativeProjectCommands from "../orchestration-v2/NativeProjectCommands.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
 import { planThreadDeletion } from "../orchestration-v2/ThreadDeletion.ts";
@@ -173,6 +173,7 @@ export const make = Effect.gen(function* () {
   const legacyImporter = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
   const threadCommands = yield* ThreadCommandExecutor.ThreadCommandExecutor;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
+  const commandPlanner = yield* NativeProjectCommands.make();
   const projectLocks = yield* KeyedLock.make<ProjectId>();
   const workspaceLocks = yield* KeyedLock.make<string>();
 
@@ -254,7 +255,7 @@ export const make = Effect.gen(function* () {
       const eventId = yield* idAllocator.allocate
         .event({ commandId: command.commandId })
         .pipe(Effect.mapError(dispatchError));
-      const planned = planProjectCommand({
+      const planned = yield* commandPlanner.planProjectCommand({
         command,
         state: { project, workspaceOwner },
         eventId,

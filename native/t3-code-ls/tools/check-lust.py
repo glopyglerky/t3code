@@ -78,6 +78,14 @@ def source_hashes() -> dict[str, str]:
               REPO / "apps/server/src/orchestration-v2/NativeCommandPolicy.ts",
               REPO / "apps/server/src/orchestration-v2/NativeGuestShare.ts",
               REPO / "apps/server/src/orchestration-v2/GuestShareDecider.ts",
+              REPO / "apps/server/src/orchestration-v2/NativeProjectCommands.ts",
+              REPO / "apps/server/src/orchestration-v2/ProjectCommands.ts",
+              REPO / "apps/server/src/orchestration-v2/ProjectStore.ts",
+              REPO / "apps/server/src/project/ProjectService.ts",
+              REPO / "packages/contracts/src/applicationEvent.ts",
+              REPO / "packages/contracts/src/baseSchemas.ts",
+              REPO / "packages/contracts/src/keybindings.ts",
+              REPO / "packages/contracts/src/project.ts",
               REPO / "apps/server/src/orchestration-v2/CommandPolicy.ts",
               REPO / "apps/server/src/orchestration-v2/ProviderRecoveryPlanner.ts",
               REPO / "apps/server/src/orchestration-v2/ProviderRuntimeRecoveryService.ts",
@@ -95,6 +103,9 @@ def source_hashes() -> dict[str, str]:
                  "packages/client-runtime/src/connection/wakeups.ts",
                  "apps/server/src/orchestration-v2/CommandPolicy.ts",
                  "apps/server/src/orchestration-v2/GuestShareDecider.ts",
+                 "apps/server/src/orchestration-v2/ProjectCommands.ts",
+                 "packages/contracts/src/baseSchemas.ts",
+                 "packages/contracts/src/keybindings.ts",
                  "packages/contracts/src/guestShare.ts",
                  "packages/provider-core/src/server/subagentProjection.ts",
                  "packages/contracts/src/orchestrationV2.ts",
@@ -203,6 +214,7 @@ def main() -> int:
                     ("permission", "permission_matrix", "check-permissions.mjs"),
                     ("connection", "connection_matrix", "check-connection.mjs"),
                     ("guest_share", "guest_share_matrix", "check-guest-share.mjs"),
+                    ("project_commands", "project_commands_matrix", "check-project-commands.mjs"),
                     ("provider_recovery", "provider_recovery_matrix", "check-provider-recovery.mjs"),
                     ("json", "json_round_trip", "check-json.mjs")):
                 executable = work / f"{surface}-matrix-lust"
@@ -220,7 +232,8 @@ def main() -> int:
             for component, verifier in (("policy", "check-policy.mjs"),
                                         ("provider", "check-provider.mjs"),
                                         ("recovery", "check-recovery-runtime.mjs"),
-                                        ("guest-share", "check-guest-share-runtime.mjs")):
+                                        ("guest-share", "check-guest-share-runtime.mjs"),
+                                        ("project", "check-project-runtime.mjs")):
                 name = f"t3-code-ls-{component}"
                 executable = work / name
                 run([str(lust), "build", f"crates/core/src/bin/{name}.rs",

@@ -106,6 +106,24 @@ result, including invalid dates, while conversion of DateTime fields is explicit
 This ports decisions; credentials, HTTP/SSE, file storage, and Connect hostname
 acquisition remain in the existing guest service.
 
+`T3_CODE_LS_PROJECT_EXECUTABLE` moves project command eligibility and event
+planning into Lust under the project service's existing project/workspace locks.
+The service still allocates an event ID before planning and stores domain
+rejections through its original command-receipt path. Replayed commands retain
+their first durable outcome. Process and protocol failures remain infrastructure
+errors and never trigger the TypeScript planner as a fallback. Complete response
+validation checks command association and copied payload data before persistence;
+it does not replace native eligibility with a second TypeScript planner.
+
+Monogram length uses the host's actual `Intl.Segmenter` result as an explicit
+input because the pinned Lust core has no equivalent Unicode grapheme library.
+Script IDs use the nightly contract's rules and JavaScript UTF-16 length in
+rejection text. Optional fields, explicit nulls, and nested JSON extensions
+survive the boundary. The service's forced deletion path remains a sequence of
+durable child deletions followed by project deletion, so a native project-plan
+failure preserves partial progress for retry. Claiming one transaction for the
+whole cascade would change upstream behavior and hide lost cleanup work.
+
 Source basis: [Lust's implementation contract](https://github.com/t3dotgg/lust-lang/blob/240e08d91d4aed0299639f6f11fd522912b248f9/README.md),
 [release target allowlist](https://github.com/t3dotgg/lust-lang/blob/240e08d91d4aed0299639f6f11fd522912b248f9/src/resolve/cfg.rs),
 and [C/zig release driver](https://github.com/t3dotgg/lust-lang/blob/240e08d91d4aed0299639f6f11fd522912b248f9/src/cc.rs).
