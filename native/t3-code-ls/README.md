@@ -330,7 +330,8 @@ node --disable-warning=ExperimentalWarning tools/check-dispatch.mjs
 node --disable-warning=ExperimentalWarning tools/check-guest-share.mjs
 cargo build --locked -p t3-code-ls-core --bin t3-code-ls-guest-share
 node --disable-warning=ExperimentalWarning tools/check-guest-share-runtime.mjs target/debug/t3-code-ls-guest-share
-node --disable-warning=ExperimentalWarning tools/check-project-commands.mjs
+cargo build --locked -p t3-code-ls-core --example project_commands_matrix
+node --disable-warning=ExperimentalWarning tools/check-project-commands.mjs target/debug/examples/project_commands_matrix
 cargo build --locked -p t3-code-ls-core --bin t3-code-ls-project
 node --disable-warning=ExperimentalWarning tools/check-project-runtime.mjs target/debug/t3-code-ls-project
 cargo build --locked -p t3-code-ls-core --example provider_recovery_matrix
