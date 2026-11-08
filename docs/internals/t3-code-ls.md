@@ -229,6 +229,19 @@ since the last published nightly, and skips releases without new commits. A
 two-hour poll follows the requested cadence, but is not an exact release event
 trigger. Only a published nightly advances the source baseline.
 
+For nightly `v0.1.8-nightly.20261108.4380` at immutable commit
+`ade473018d32003658b7d38693e083ee2e314bd8`, source integration included
+[merged upstream #21524](https://github.com/pingdotgg/t3code/pull/21524):
+`mise`-installed provider upgrades must use the verified owning `mise` tool;
+pinned versions, fixed installations and ambiguous wrappers must remain manual.
+This provider-maintenance resolver and its tests are upstream TypeScript, not
+Lust-compiled application code. Next implement the same ownership and upgrade
+policy as a pinned-Lust executable with comparisons against the immutable
+upstream function and an injected production maintenance service boundary.
+Full server, all provider sessions, Connect authorization and control plane,
+trusted Iroh remote-client metadata, Iroh blobs/docs/gossip, UI, desktop,
+iOS and Android remain unqualified until their actual app/platform gates run.
+
 PRs and issues provide advance notice and regression evidence. Track their
 updates with an overlapping cursor window and complete pagination. Do not
 advance after a failed or truncated scan. Deferred items must retain their own
