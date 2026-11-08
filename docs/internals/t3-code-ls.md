@@ -147,8 +147,9 @@ two-hour poll follows the requested cadence, but is not an exact release event
 trigger. Only a published nightly advances the source baseline.
 
 PRs and issues provide advance notice and regression evidence. Track their
-updates with an overlapping cursor window and complete pagination; do not
-advance the cursor after a partial scan. An unmerged PR, an issue report, or a
+updates with an overlapping cursor window and complete pagination. Do not
+advance after a failed or truncated scan. Deferred items must retain their own
+earlier event boundaries while other items progress. An unmerged PR, an issue report, or a
 passing PR check is not a released compatibility contract. Review relevant code,
 tests, discussions, and eventual release inclusion before incorporating changes.
 Prepare updates on candidate branches and merge into `main` only after the

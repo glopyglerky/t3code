@@ -30,9 +30,18 @@ jobs:
       run:
         working-directory: native/t3-code-ls
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          persist-credentials: false
+      - name: Check out the exact public source
+        working-directory: ${{ github.workspace }}
+        env:
+          SOURCE_REPOSITORY: ${{ github.repository }}
+          SOURCE_REVISION: ${{ github.sha }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          git init .
+          git remote add origin "https://github.com/${SOURCE_REPOSITORY}.git"
+          git -c credential.helper= fetch --no-tags --depth=1 origin "$SOURCE_REVISION"
+          git sparse-checkout set --cone native/t3-code-ls packages/contracts
+          git checkout --detach FETCH_HEAD
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24
@@ -75,9 +84,18 @@ jobs:
       run:
         working-directory: native/t3-code-ls
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          persist-credentials: false
+      - name: Check out the exact public source
+        working-directory: ${{ github.workspace }}
+        env:
+          SOURCE_REPOSITORY: ${{ github.repository }}
+          SOURCE_REVISION: ${{ github.sha }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          git init .
+          git remote add origin "https://github.com/${SOURCE_REPOSITORY}.git"
+          git -c credential.helper= fetch --no-tags --depth=1 origin "$SOURCE_REVISION"
+          git sparse-checkout set --cone native/t3-code-ls packages/contracts
+          git checkout --detach FETCH_HEAD
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24
@@ -100,9 +118,18 @@ jobs:
       run:
         working-directory: native/t3-code-ls
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          persist-credentials: false
+      - name: Check out the exact public source
+        working-directory: ${{ github.workspace }}
+        env:
+          SOURCE_REPOSITORY: ${{ github.repository }}
+          SOURCE_REVISION: ${{ github.sha }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          git init .
+          git remote add origin "https://github.com/${SOURCE_REPOSITORY}.git"
+          git -c credential.helper= fetch --no-tags --depth=1 origin "$SOURCE_REVISION"
+          git sparse-checkout set --cone native/t3-code-ls packages/contracts
+          git checkout --detach FETCH_HEAD
       - name: Install mobile, Windows, and WebAssembly standard libraries
         run: |
           rustup toolchain install 1.99.1 --profile minimal

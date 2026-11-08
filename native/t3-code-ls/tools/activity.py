@@ -424,6 +424,13 @@ def read_state(path: Path) -> dict | None:
         if not NUMBER.fullmatch(identifier):
             raise TrackingError("Invalid event identity in saved state.")
         timestamp(created)
+    pending = object_value(value.get("pending", {}), "saved pending windows")
+    for number, window in pending.items():
+        window = object_value(window, "saved pending window")
+        if not NUMBER.fullmatch(number) or window.get("kind") not in ("issue", "pull_request"):
+            raise TrackingError("Invalid pending activity identity.")
+        if timestamp(window.get("since")) > timestamp(value["cursor"]):
+            raise TrackingError("A pending event window begins after the saved cursor.")
     return value
 
 
@@ -441,34 +448,44 @@ def scan(get: Callable, state: dict | None, *, through: datetime, lookback_hours
         if lookback_hours is None or not 1 <= lookback_hours <= 720:
             raise TrackingError("First run requires --lookback-hours between 1 and 720, plus --max-items.")
         since = through - timedelta(hours=lookback_hours)
-        old_items, seen = {}, {}
+        old_items, seen, old_pending = {}, {}, {}
     else:
         cursor = timestamp(state["cursor"])
         if cursor > through:
             raise TrackingError("Saved activity cursor is in the future; check the clock before retrying.")
         since = cursor - overlap
         old_items, seen = state["items"], state["seen_events"]
+        old_pending = state.get("pending", {})
     rows = pages(get, issue_query(since), identity="number", limit=max_items, max_pages=max_pages)
     discovered = {str(integer(row.get("number"), "issue number", 1)): row for row in rows}
     tracked_open = {number for number, item in old_items.items()
                     if details == "prs" and item["kind"] == "pull_request" and item["state"] == "open"}
-    numbers = set(discovered) | tracked_open
+    numbers = set(discovered) | tracked_open | set(old_pending)
     if len(numbers) > max_items:
-        raise TrackingError("Candidates plus tracked open PRs exceed --max-items; no cursor was advanced.")
+        raise TrackingError("Candidates, pending items, and tracked open PRs exceed --max-items; no cursor was advanced.")
     items, new_seen = dict(old_items), dict(seen)
+    pending = dict(old_pending)
     changes, deferred = [], []
     for number_text in sorted(numbers, key=int):
         number, old = int(number_text), old_items.get(number_text, {})
         item = discovered.get(number_text)
-        is_pr = number_text in tracked_open or isinstance((item or {}).get("pull_request"), dict)
+        saved_window = old_pending.get(number_text, {})
+        item_since = min(since, timestamp(saved_window["since"])) if saved_window else since
+        is_pr = (number_text in tracked_open or saved_window.get("kind") == "pull_request"
+                 or isinstance((item or {}).get("pull_request"), dict))
         if item is not None and timestamp(item.get("updated_at")) > through:
             deferred.append(number)
+            pending[number_text] = {"since": iso(item_since), "kind": "pull_request" if is_pr else "issue"}
             continue
-        if is_pr:
-            item, _ = get(f"{API}/pulls/{number}")
-            item = object_value(item, "pull request")
+        if is_pr or item is None:
+            route = "pulls" if is_pr else "issues"
+            item, _ = get(f"{API}/{route}/{number}")
+            item = object_value(item, "activity snapshot")
+            if integer(item.get("number"), "snapshot number", 1) != number:
+                raise TrackingError("GitHub returned a different pending issue or PR.")
             if timestamp(item.get("updated_at")) > through:
                 deferred.append(number)
+                pending[number_text] = {"since": iso(item_since), "kind": "pull_request" if is_pr else "issue"}
                 continue
         if item is None:
             raise TrackingError("An activity candidate has no snapshot.")
@@ -487,35 +504,40 @@ def scan(get: Callable, state: dict | None, *, through: datetime, lookback_hours
                 snapshot["surfaces"] = pr["files"]["surfaces"]
                 snapshot["surface_basis"] = "pull_request_file_paths"
             snapshot["pull_request"] = pr
-        fetch_events = number_text in discovered or old.get("updated_at") != snapshot["updated_at"]
-        events = issue_events(get, number, since, through, seen, max_pages) if fetch_events else []
+        fetch_events = number_text in discovered or number_text in old_pending or old.get("updated_at") != snapshot["updated_at"]
+        events = issue_events(get, number, item_since, through, seen, max_pages) if fetch_events else []
         for event in events:
             new_seen[event["id"]] = event["created_at"]
-        record = change_record(old, snapshot, events, since)
+        record = change_record(old, snapshot, events, item_since)
         if record is not None:
+            record["event_window"] = {"from": iso(item_since), "through": iso(through)}
             changes.append(record)
         items[number_text] = snapshot
+        pending.pop(number_text, None)
     retention = through - timedelta(days=RETENTION_DAYS)
     items = {number: item for number, item in items.items()
-             if item["state"] == "open" or timestamp(item["updated_at"]) >= retention}
+             if number in pending or item["state"] == "open" or timestamp(item["updated_at"]) >= retention}
+    seen_since = min([through - overlap, *[timestamp(window["since"]) for window in pending.values()]])
     new_seen = {identifier: created for identifier, created in new_seen.items()
-                if timestamp(created) >= through - overlap}
+                if timestamp(created) >= seen_since}
     changes.sort(key=lambda item: (item["updated_at"], item["number"]), reverse=True)
     report = {
-        "schema_version": 1, "repository": REPOSITORY, "complete": True, "advisory_only": True,
+        "schema_version": 1, "repository": REPOSITORY, "complete": not pending, "advisory_only": True,
         "window": {"from": iso(since), "through": iso(through),
                    "overlap_seconds": int(overlap.total_seconds()), "initial_scan": state is None},
         "counts": {"candidates": len(rows), "changes": len(changes),
                    "pull_requests": sum(row["kind"] == "pull_request" for row in changes),
                    "issues": sum(row["kind"] == "issue" for row in changes),
-                   "refreshed_pull_requests": len(tracked_open - set(discovered))},
+                   "refreshed_pull_requests": len(tracked_open - set(discovered)), "pending_items": len(pending)},
         "changes": changes, "deferred_after_window": sorted(deferred), "details": details,
-        "coverage": {"issue_and_pr_metadata": True, "issue_events": True,
-                     "pr_paths_reviews_head_ci": details == "prs", "complete_history": False},
+        "pending_event_windows": [{"number": int(number), **pending[number]} for number in sorted(pending, key=int)],
+        "coverage": {"updated_listing_complete": True, "issue_and_pr_metadata": not pending, "issue_events": not pending,
+                     "pr_paths_reviews_head_ci": details == "prs" and not pending, "complete_history": False},
         "limits": {"max_items": max_items, "max_pages_per_collection": max_pages},
         "limitations": [
             "A new or reset state (including lost CI cache) starts only the explicit lookback window, not complete historical coverage. Recover an archived state to preserve an earlier cursor.",
             "GitHub listings are mutable and eventually consistent; overlap reduces gaps but is not an audit-log guarantee.",
+            "Items updated after scan start retain their own pending event windows across cursor advances; complete remains false until those windows are processed.",
             "With details=prs, known open PRs refresh even without an issue update; details=none tracks changed issue/PR metadata and events only, so CI-only changes require enrichment followup.",
             "Older unobserved open PRs require a larger initial window or a separate targeted followup.",
             "Review and CI signals are observations, not evaluation of branch protection, required approvals, or merge readiness.",
@@ -530,7 +552,7 @@ def scan(get: Callable, state: dict | None, *, through: datetime, lookback_hours
         "bootstrap": state["bootstrap"] if state else {
             "from": iso(since), "through": iso(through), "lookback_hours": lookback_hours, "max_items": max_items,
         },
-        "items": items, "seen_events": new_seen,
+        "items": items, "seen_events": new_seen, "pending": pending,
     }
     return report, new_state
 
@@ -612,8 +634,9 @@ def main(argv: list[str] | None = None) -> int:
                                    overlap_minutes=args.overlap_minutes, details=args.details, max_pages=args.max_pages)
             report["counts"]["api_requests"] = client.requests
             commit_files(state_path, report_path, report, updated)
-        print(json.dumps({"state": "activity_reported", "cursor": updated["cursor"],
-                          "changes": report["counts"]["changes"], "output": str(report_path)}))
+        print(json.dumps({"state": "activity_reported" if report["complete"] else "activity_pending", "cursor": updated["cursor"],
+                          "changes": report["counts"]["changes"], "pending_items": report["counts"]["pending_items"],
+                          "output": str(report_path)}))
         return 0
     except (TrackingError, OSError) as error:
         print(f"upstream activity tracking failed: {error}", file=sys.stderr)

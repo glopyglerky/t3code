@@ -192,8 +192,12 @@ nightly. Relevant candidates need a follow-up review of their code, discussions,
 reviews, and CI; this broad scan does not download every discussion or patch.
 Omit `--details none` for PR file, review, and head-check enrichment.
 
-The activity cursor advances only after a complete successful scan and report
-write. The workflow caches it and archives it with the reports for recovery.
+State is saved only after the scan's required requests and report write succeed.
+An issue that changes during the scan retains its earlier pending event window;
+the next scan retries it even if the updated listing omits it. Reports remain
+explicitly incomplete while any pending windows remain. The workflow archives
+reports and state before caching the next cursor, so a failed upload cannot
+silently discard a scan. Candidate-branch pushes also exercise this watch.
 With no state, the report explicitly covers only the initial 24-hour window;
 restore the archived state after cache loss to retain older coverage. The watch
 has read-only repository permissions and does not merge proposals. Authorized

@@ -175,6 +175,59 @@ class ActivityChanges(unittest.TestCase):
         self.assertEqual(state["cursor"], "2026-11-08T12:00:00Z")
         self.assertEqual(len(api.calls), 1)
 
+    def test_deferred_item_retains_earlier_close_reopen_events_across_cursor_advance(self):
+        for kind, number in (("issue", 1), ("pull_request", 2)):
+            with self.subTest(kind=kind):
+                original = issue(number) if kind == "issue" else pull(number)
+                events_url = f"{activity.API}/issues/{number}/events?per_page=100"
+                initial = fixtures([original])
+                initial[events_url] = ([event()], {})
+                _, previous = run_scan(API(initial))
+
+                later = {**original, "updated_at": "2026-11-08T14:00:01Z"}
+                unrelated = issue(3, created_at="2026-11-08T12:45:00Z", updated_at="2026-11-08T13:00:00Z")
+                # Cover both a future list row and a PR changing during its detail fetch.
+                listed = later if kind == "issue" else {**original, "updated_at": "2026-11-08T13:00:00Z"}
+                first_data = fixtures([listed, unrelated], since=NOW - timedelta(hours=1))
+                if kind == "pull_request":
+                    first_data[f"{activity.API}/pulls/{number}"] = (later, {})
+                deferred, pending = run_scan(API(first_data), previous, through=NOW + timedelta(hours=2))
+                self.assertFalse(deferred["complete"])
+                self.assertEqual(pending["cursor"], "2026-11-08T14:00:00Z")
+                self.assertEqual(pending["pending"][str(number)]["since"], "2026-11-08T11:00:00Z")
+                self.assertEqual([row["number"] for row in deferred["changes"]], [3])
+                self.assertIn("100", pending["seen_events"])
+
+                with tempfile.TemporaryDirectory() as directory:
+                    state_path = Path(directory) / "state.json"
+                    activity.commit_files(state_path, Path(directory) / "report.json", deferred, pending)
+                    pending = activity.read_state(state_path)
+
+                route = "issues" if kind == "issue" else "pulls"
+                moving_again = {**later, "updated_at": "2026-11-08T16:00:01Z"}
+                repeated_data = fixtures([], since=NOW + timedelta(hours=1))
+                repeated_data[f"{activity.API}/{route}/{number}"] = (moving_again, {})
+                repeated, pending = run_scan(API(repeated_data), pending, through=NOW + timedelta(hours=4))
+                self.assertFalse(repeated["complete"])
+                self.assertEqual(pending["pending"][str(number)]["since"], "2026-11-08T11:00:00Z")
+                self.assertIn("100", pending["seen_events"])
+
+                # Even if the updated listing omits this item, its durable pending window is retried.
+                next_data = fixtures([], since=NOW + timedelta(hours=3))
+                next_data[f"{activity.API}/{route}/{number}"] = (moving_again, {})
+                next_data[events_url] = ([
+                    event(), event(101, "closed", "2026-11-08T12:15:00Z"),
+                    event(102, "reopened", "2026-11-08T12:30:00Z"),
+                ], {})
+                recovered, saved = run_scan(API(next_data), pending, through=NOW + timedelta(hours=6))
+                self.assertTrue(recovered["complete"])
+                self.assertEqual(saved["pending"], {})
+                changed = recovered["changes"][0]
+                self.assertEqual(changed["state"], "open")
+                self.assertTrue({"closed", "reopened"}.issubset(changed["actions"]))
+                self.assertNotIn("labeled", changed["actions"])
+                self.assertEqual(changed["event_window"]["from"], "2026-11-08T11:00:00Z")
+
     def test_merged_pr_and_metadata_mode_skip_files_reviews_and_ci(self):
         merged = pull(state="closed", closed_at="2026-11-08T11:00:00Z",
                       merged=True, merged_at="2026-11-08T11:00:00Z")
