@@ -7,6 +7,21 @@ pub const PROTOCOL: &str = "t3ls-policy-v1";
 pub const MAX_FRAME_BYTES: usize = 256;
 pub const CAPABILITY_BITS: u16 = (1 << 14) - 1;
 
+const QUEUED_MESSAGES: u32 = 0;
+const ACTIVE_STEERING: u32 = 1;
+const INTERRUPT: u32 = 2;
+const INTERRUPT_RESTART: u32 = 3;
+const NATIVE_FORK: u32 = 4;
+const FORK_FROM_TURN: u32 = 5;
+const STRONG_THREAD_IDS: u32 = 6;
+const ROLLBACK_THREAD: u32 = 7;
+const ROLLBACK_CONVERSATION: u32 = 8;
+const ROLLBACK_SNAPSHOT: u32 = 9;
+const HANDOFF_SUMMARIES: u32 = 10;
+const SYNTHETIC_CONTEXT: u32 = 11;
+const DELTA_HANDOFF: u32 = 12;
+const FULL_THREAD_HANDOFF: u32 = 13;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Capabilities {
     bits: u16,
@@ -55,7 +70,7 @@ impl Capabilities {
     }
 
     pub fn ensure_queued_messages(self) -> Decision {
-        if self.has(0) {
+        if self.has(QUEUED_MESSAGES) {
             Ok("")
         } else {
             unsupported(
@@ -66,14 +81,14 @@ impl Capabilities {
     }
 
     pub fn decide_steering(self, force_restart: bool) -> Decision {
-        if !force_restart && self.has(1) {
+        if !force_restart && self.has(ACTIVE_STEERING) {
             return Ok("active_steering");
         }
-        if self.has(2) && self.has(3) {
+        if self.has(INTERRUPT) && self.has(INTERRUPT_RESTART) {
             return Ok("interrupt_restart");
         }
         unsupported(
-            if force_restart || self.has(2) {
+            if force_restart || self.has(INTERRUPT) {
                 "interrupt_restart_steering"
             } else {
                 "active_steering"
@@ -87,27 +102,30 @@ impl Capabilities {
     }
 
     pub fn ensure_interrupt(self) -> Decision {
-        if self.has(2) {
+        if self.has(INTERRUPT) {
             Ok("")
         } else {
-            unsupported("interrupt", "providerInstanceId does not support turn interrupts")
+            unsupported(
+                "interrupt",
+                "providerInstanceId does not support turn interrupts",
+            )
         }
     }
 
     pub fn ensure_native_fork(self, from_specific_turn: bool) -> Decision {
-        if !self.has(4) {
+        if !self.has(NATIVE_FORK) {
             return unsupported(
                 "native_fork",
                 "providerInstanceId does not support native thread forks",
             );
         }
-        if from_specific_turn && !self.has(5) {
+        if from_specific_turn && !self.has(FORK_FROM_TURN) {
             return unsupported(
                 "fork_from_turn",
                 "providerInstanceId cannot fork from a specific completed turn",
             );
         }
-        if !self.has(6) {
+        if !self.has(STRONG_THREAD_IDS) {
             return unsupported(
                 "native_fork",
                 "providerInstanceId does not expose strong native thread ids",
@@ -117,13 +135,13 @@ impl Capabilities {
     }
 
     pub fn ensure_rollback(self) -> Decision {
-        if !self.has(7) || !self.has(8) {
+        if !self.has(ROLLBACK_THREAD) || !self.has(ROLLBACK_CONVERSATION) {
             return unsupported(
                 "rollback",
                 "providerInstanceId conversation rollback is unavailable",
             );
         }
-        if !self.has(9) {
+        if !self.has(ROLLBACK_SNAPSHOT) {
             return unsupported(
                 "rollback_snapshot",
                 "rollback must return a providerInstanceId thread snapshot",
@@ -133,25 +151,25 @@ impl Capabilities {
     }
 
     pub fn ensure_handoff(self, strategy: Handoff) -> Decision {
-        if !self.has(10) {
+        if !self.has(HANDOFF_SUMMARIES) {
             return unsupported(
                 "context_handoff",
                 "providerInstanceId cannot consume handoff summaries",
             );
         }
-        if !self.has(11) {
+        if !self.has(SYNTHETIC_CONTEXT) {
             return unsupported(
                 "context_handoff",
                 "providerInstanceId cannot receive synthetic user context",
             );
         }
-        if strategy != Handoff::FullThread && !self.has(12) {
+        if strategy != Handoff::FullThread && !self.has(DELTA_HANDOFF) {
             return unsupported(
                 "context_handoff",
                 "providerInstanceId does not support delta handoff",
             );
         }
-        if strategy == Handoff::FullThread && !self.has(13) {
+        if strategy == Handoff::FullThread && !self.has(FULL_THREAD_HANDOFF) {
             return unsupported(
                 "context_handoff",
                 "providerInstanceId does not support full-thread handoff",
@@ -165,9 +183,9 @@ impl Capabilities {
             && input.same_provider
             && input.has_strong_native_source
             && !input.source_busy
-            && self.has(4)
-            && (!input.from_specific_turn || self.has(5))
-            && self.has(6)
+            && self.has(NATIVE_FORK)
+            && (!input.from_specific_turn || self.has(FORK_FROM_TURN))
+            && self.has(STRONG_THREAD_IDS)
         {
             return Ok("native_fork");
         }
@@ -242,21 +260,27 @@ pub fn read_frame<R: BufRead>(reader: &mut R) -> io::Result<Option<String>> {
             return if bytes.is_empty() {
                 Ok(None)
             } else {
-                Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated policy frame"))
+                Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "truncated policy frame",
+                ))
             };
         }
         let newline = available.iter().position(|byte| *byte == b'\n');
         let count = newline.map_or(available.len(), |index| index + 1);
         if bytes.len() + count > MAX_FRAME_BYTES + 1 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "policy frame too large"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "policy frame too large",
+            ));
         }
         bytes.extend_from_slice(&available[..count]);
         reader.consume(count);
         if newline.is_some() {
             bytes.pop();
-            return String::from_utf8(bytes)
-                .map(Some)
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "policy frame is not UTF-8"));
+            return String::from_utf8(bytes).map(Some).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "policy frame is not UTF-8")
+            });
         }
     }
 }
@@ -264,7 +288,7 @@ pub fn read_frame<R: BufRead>(reader: &mut R) -> io::Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{BufReader, Cursor};
+    use std::io::BufReader;
 
     fn caps(bits: u16) -> Capabilities {
         Capabilities::from_bits(bits).unwrap()
@@ -281,11 +305,18 @@ mod tests {
 
     #[test]
     fn native_fork_checks_have_upstream_error_precedence() {
-        assert_eq!(caps(0).ensure_native_fork(true).unwrap_err().detail,
-            "providerInstanceId does not support native thread forks");
-        assert_eq!(caps(16).ensure_native_fork(true).unwrap_err().capability, "fork_from_turn");
-        assert_eq!(caps(48).ensure_native_fork(true).unwrap_err().detail,
-            "providerInstanceId does not expose strong native thread ids");
+        assert_eq!(
+            caps(0).ensure_native_fork(true).unwrap_err().detail,
+            "providerInstanceId does not support native thread forks"
+        );
+        assert_eq!(
+            caps(16).ensure_native_fork(true).unwrap_err().capability,
+            "fork_from_turn"
+        );
+        assert_eq!(
+            caps(48).ensure_native_fork(true).unwrap_err().detail,
+            "providerInstanceId does not expose strong native thread ids"
+        );
         assert_eq!(caps(112).ensure_native_fork(true), Ok(""));
     }
 
@@ -299,30 +330,71 @@ mod tests {
             source_busy: false,
         };
         assert_eq!(caps(112).decide_fork(input), Ok("native_fork"));
-        assert_eq!(caps(112).decide_fork(ForkInput { source_busy: true, ..input })
-            .unwrap_err().capability, "context_handoff");
-        assert_eq!(caps(112 | 1024 | 2048 | 8192).decide_fork(
-            ForkInput { source_completed_or_waiting: false, ..input }), Ok("portable_context"));
+        assert_eq!(
+            caps(112)
+                .decide_fork(ForkInput {
+                    source_busy: true,
+                    ..input
+                })
+                .unwrap_err()
+                .capability,
+            "context_handoff"
+        );
+        assert_eq!(
+            caps(112 | 1024 | 2048 | 8192).decide_fork(ForkInput {
+                source_completed_or_waiting: false,
+                ..input
+            }),
+            Ok("portable_context")
+        );
     }
 
     #[test]
     fn rollback_and_handoff_keep_their_own_capability_boundaries() {
-        assert_eq!(caps(512).ensure_rollback().unwrap_err().capability, "rollback");
-        assert_eq!(caps(128 | 256).ensure_rollback().unwrap_err().capability, "rollback_snapshot");
+        assert_eq!(
+            caps(512).ensure_rollback().unwrap_err().capability,
+            "rollback"
+        );
+        assert_eq!(
+            caps(128 | 256).ensure_rollback().unwrap_err().capability,
+            "rollback_snapshot"
+        );
         assert_eq!(caps(128 | 256 | 512).ensure_rollback(), Ok(""));
-        assert_eq!(caps(1024 | 2048 | 4096).ensure_handoff(Handoff::Delta), Ok(""));
-        assert!(caps(1024 | 2048 | 4096).ensure_handoff(Handoff::FullThread).is_err());
-        assert_eq!(caps(1024 | 2048 | 8192).ensure_handoff(Handoff::FullThread), Ok(""));
-        assert!(caps(1024 | 2048 | 8192).ensure_handoff(Handoff::ForkDelta).is_err());
+        assert_eq!(
+            caps(1024 | 2048 | 4096).ensure_handoff(Handoff::Delta),
+            Ok("")
+        );
+        assert!(
+            caps(1024 | 2048 | 4096)
+                .ensure_handoff(Handoff::FullThread)
+                .is_err()
+        );
+        assert_eq!(
+            caps(1024 | 2048 | 8192).ensure_handoff(Handoff::FullThread),
+            Ok("")
+        );
+        assert!(
+            caps(1024 | 2048 | 8192)
+                .ensure_handoff(Handoff::ForkDelta)
+                .is_err()
+        );
     }
 
     #[test]
     fn malformed_frames_never_become_successful_decisions() {
-        for frame in ["", "t3ls-policy-v2\tqueued\t1", "t3ls-policy-v1\tqueued\t+1",
-            "t3ls-policy-v1\tqueued\t16384", "t3ls-policy-v1\tqueued\t65536",
-            "t3ls-policy-v1\tqueued\t1\textra", "t3ls-policy-v1\tsteering\t14\ttrue",
-            "t3ls-policy-v1\tfork\t112\t1\t1\t1\t0", "t3ls-policy-v1\thandoff\t0\tother",
-            "t3ls-policy-v1\tunknown\t0", "t3ls-policy-v1\tqueued\t１"] {
+        for frame in [
+            "",
+            "t3ls-policy-v2\tqueued\t1",
+            "t3ls-policy-v1\tqueued\t+1",
+            "t3ls-policy-v1\tqueued\t16384",
+            "t3ls-policy-v1\tqueued\t65536",
+            "t3ls-policy-v1\tqueued\t1\textra",
+            "t3ls-policy-v1\tsteering\t14\ttrue",
+            "t3ls-policy-v1\tfork\t112\t1\t1\t1\t0",
+            "t3ls-policy-v1\thandoff\t0\tother",
+            "t3ls-policy-v1\tunknown\t0",
+            "t3ls-policy-v1\tqueued\t１",
+        ] {
             assert!(evaluate(frame).is_err(), "{frame}");
         }
         assert_eq!(response(evaluate("t3ls-policy-v1\tqueued\t1")), "ok\t-\n");
@@ -332,15 +404,32 @@ mod tests {
     #[test]
     fn framing_handles_fragmentation_and_refuses_unbounded_or_truncated_input() {
         let source = b"t3ls-policy-v1\tqueued\t1\nt3ls-policy-v1\tinterrupt\t4\n";
-        let mut reader = BufReader::with_capacity(3, Cursor::new(source));
-        assert_eq!(read_frame(&mut reader).unwrap().unwrap(), "t3ls-policy-v1\tqueued\t1");
-        assert_eq!(read_frame(&mut reader).unwrap().unwrap(), "t3ls-policy-v1\tinterrupt\t4");
+        let mut reader = BufReader::with_capacity(3, &source[..]);
+        assert_eq!(
+            read_frame(&mut reader).unwrap().unwrap(),
+            "t3ls-policy-v1\tqueued\t1"
+        );
+        assert_eq!(
+            read_frame(&mut reader).unwrap().unwrap(),
+            "t3ls-policy-v1\tinterrupt\t4"
+        );
         assert_eq!(read_frame(&mut reader).unwrap(), None);
-        let mut reader = Cursor::new(vec![b'x'; MAX_FRAME_BYTES + 2]);
-        assert_eq!(read_frame(&mut reader).unwrap_err().kind(), io::ErrorKind::InvalidData);
-        let mut reader = Cursor::new(b"t3ls-policy-v1\tqueued\t1");
-        assert_eq!(read_frame(&mut reader).unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
-        let mut reader = Cursor::new(vec![255, b'\n']);
-        assert_eq!(read_frame(&mut reader).unwrap_err().kind(), io::ErrorKind::InvalidData);
+        let oversized = vec![b'x'; MAX_FRAME_BYTES + 2];
+        let mut reader = oversized.as_slice();
+        assert_eq!(
+            read_frame(&mut reader).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        let mut reader = &b"t3ls-policy-v1\tqueued\t1"[..];
+        assert_eq!(
+            read_frame(&mut reader).unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+        let invalid = [255, b'\n'];
+        let mut reader = &invalid[..];
+        assert_eq!(
+            read_frame(&mut reader).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 }

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Build pinned Lust and execute the core and its upstream differential oracles.
+"""Build pinned Lust and verify application decisions and the provider process runtime.
 
 Usage: python3 tools/check-lust.py --source /absolute/path/to/lust-lang
 
 The checkout must match lust-toolchain.json. Cargo builds the compiler; Lust
 itself checks, tests and builds our core. There is no --rustc or --release
-fallback. Cargo remains the application's release compiler. A JSON receipt is
+fallback. Iroh remains Cargo-built. A JSON receipt is
 written on both success and failure, defaulting to target/lust-proof.json.
 """
 from __future__ import annotations
@@ -65,9 +65,9 @@ def verify_source(source: Path, revision: str) -> None:
 
 def source_hashes() -> dict[str, str]:
     files = list((ROOT / "crates/core").rglob("*.rs"))
-    files += [ROOT / "Cargo.toml", ROOT / "crates/core/Cargo.toml",
-              ROOT / "tools/check-permissions.mjs", ROOT / "tools/check-connection.mjs",
-              ROOT / "tools/check-policy.mjs", ROOT / "tools/upstream-source.mjs",
+    files += list((ROOT / "tools").glob("check-*.mjs"))
+    files += [ROOT / "Cargo.toml", ROOT / "Cargo.lock", ROOT / "crates/core/Cargo.toml",
+              ROOT / "tools/upstream-source.mjs",
               ROOT / "upstream.lock.json", Path(__file__).resolve(), PIN_FILE]
     hashes = {str(path.relative_to(REPO)): sha256(path) for path in sorted(files)}
     upstream = json.loads((ROOT / "upstream.lock.json").read_text())["upstream"]
@@ -79,7 +79,11 @@ def source_hashes() -> dict[str, str]:
     for path in ("packages/contracts/src/auth.ts",
                  "packages/client-runtime/src/connection/supervisor.ts",
                  "packages/client-runtime/src/connection/wakeups.ts",
-                 "apps/server/src/orchestration-v2/CommandPolicy.ts"):
+                 "apps/server/src/orchestration-v2/CommandPolicy.ts",
+                 "apps/server/src/orchestration-v2/GuestShareDecider.ts",
+                 "packages/contracts/src/guestShare.ts",
+                 "packages/effect-codex-app-server/src/protocol.ts",
+                 "packages/effect-codex-app-server/test/fixtures/codex-app-server-mock-peer.ts"):
         blob = subprocess.run(["git", "--no-replace-objects", "-C", str(REPO),
                                "cat-file", "blob", f"{commit}:{path}"],
                               capture_output=True, check=True).stdout
@@ -115,11 +119,14 @@ def main() -> int:
     parser.add_argument("--source", type=Path, required=True,
                         help="clean Lust checkout at lust-toolchain.json's exact revision")
     parser.add_argument("--receipt", type=Path, default=ROOT / "target/lust-proof.json")
+    parser.add_argument("--artifacts", type=Path,
+                        help="save the verified standalone Lust executables here on success")
     args = parser.parse_args()
     source = args.source.resolve()
     receipt = {"schema": 1, "status": "failed", "steps": [],
                "generated_at": datetime.now(timezone.utc).isoformat(),
-               "scope": "Lust core and policy executable; full application and UI parity excluded"}
+               "scope": "Lust application decisions, JSON codec, and Unix provider process runtime; "
+                        "full application, UI, mobile, and Iroh qualification excluded"}
     try:
         pin = json.loads(PIN_FILE.read_text())
         receipt["compiler"] = pin
@@ -150,6 +157,9 @@ def main() -> int:
             work = Path(temp)
             env["LUST_NO_DAEMON"] = "1"
             env["LUST_CACHE_DIR"] = str(work / "cache")
+            # Separate PID namespaces can reuse Lust's temporary filename prefix.
+            (work / "tmp").mkdir()
+            env["TMPDIR"] = str(work / "tmp")
             version = run([str(lust), "--version"], cwd=ROOT, env=env,
                           receipt=receipt, name="read compiler build identity")
             receipt["compiler_version"] = version.stdout.strip()
@@ -172,38 +182,52 @@ def main() -> int:
                 receipt["unit_tests"].append(test_summary(result.stdout))
             # --bin selects each example by its Cargo target name in this
             # revision (select_unit's name fallback).
-            for surface in ("permission", "connection"):
-                example = f"{surface}_matrix"
+            for surface, example, oracle in (
+                    ("permission", "permission_matrix", "check-permissions.mjs"),
+                    ("connection", "connection_matrix", "check-connection.mjs"),
+                    ("guest_share", "guest_share_matrix", "check-guest-share.mjs"),
+                    ("json", "json_round_trip", "check-json.mjs")):
                 executable = work / f"{surface}-matrix-lust"
                 run([str(lust), "build", f"crates/core/examples/{example}.rs",
                      "--manifest-path", "crates/core/Cargo.toml", "--bin", example,
                      "-o", str(executable), "--json"], cwd=ROOT, env=env, receipt=receipt,
                     name=f"build unchanged {surface} matrix with Lust")
                 receipt[f"{surface}_oracle_binary_sha256"] = sha256(executable)
-                oracle = "check-permissions.mjs" if surface == "permission" else "check-connection.mjs"
                 parity = run(["node", f"tools/{oracle}", str(executable)],
                              cwd=ROOT, env=env, receipt=receipt,
-                             name=f"compare Lust {surface} output to pinned upstream TypeScript")
+                             name=f"verify Lust {surface} against the independent oracle")
                 receipt[f"{surface}_parity"] = parity.stdout.strip()
                 print(parity.stdout, end="")
-            executable = work / "t3-code-ls-policy"
-            run([str(lust), "build", "crates/core/src/bin/t3-code-ls-policy.rs",
-                 "--manifest-path", "crates/core/Cargo.toml", "--bin", "t3-code-ls-policy",
-                 "-o", str(executable), "--json"], cwd=ROOT, env=env, receipt=receipt,
-                name="build provider-policy executable with Lust")
-            receipt["policy_binary_sha256"] = sha256(executable)
-            parity = run(["node", "tools/check-policy.mjs", str(executable)],
-                         cwd=ROOT, env=env, receipt=receipt,
-                         name="compare Lust provider policies to pinned upstream TypeScript")
-            receipt["policy_parity"] = parity.stdout.strip()
-            print(parity.stdout, end="")
+            executables = []
+            for component in ("policy", "provider"):
+                name = f"t3-code-ls-{component}"
+                executable = work / name
+                run([str(lust), "build", f"crates/core/src/bin/{name}.rs",
+                     "--manifest-path", "crates/core/Cargo.toml", "--bin", name,
+                     "-o", str(executable), "--json"], cwd=ROOT, env=env, receipt=receipt,
+                    name=f"build {component} executable with Lust")
+                receipt[f"{component}_binary_sha256"] = sha256(executable)
+                parity = run(["node", f"tools/check-{component}.mjs", str(executable)],
+                             cwd=ROOT, env=env, receipt=receipt,
+                             name=f"verify the Lust-built {component} executable")
+                receipt[f"{component}_verification"] = parity.stdout.strip()
+                print(parity.stdout, end="")
+                executables.append(executable)
 
-        verify_source(source, pin["revision"])
-        if source_hashes() != receipt["inputs"]:
-            raise RuntimeError("Core or upstream oracle inputs changed during validation; run again")
+            verify_source(source, pin["revision"])
+            if source_hashes() != receipt["inputs"]:
+                raise RuntimeError("Core or upstream oracle inputs changed during validation; run again")
+            if args.artifacts:
+                destination = args.artifacts.resolve()
+                destination.mkdir(parents=True, exist_ok=True)
+                receipt["artifacts"] = []
+                for executable in executables:
+                    target = destination / executable.name
+                    shutil.copy2(executable, target)
+                    receipt["artifacts"].append({"file": executable.name, "sha256": sha256(target)})
         receipt["status"] = "passed"
         total = sum(item["passed"] for item in receipt["unit_tests"])
-        print(f"Lust check passed; {total} unit tests passed; all three differential oracles passed.")
+        print(f"Lust check passed; {total} unit tests passed; all application oracles and runtime checks passed.")
         return 0
     except (RuntimeError, subprocess.SubprocessError, OSError, ValueError, KeyError) as error:
         receipt["error"] = str(error)

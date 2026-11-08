@@ -17,7 +17,7 @@ have been incorporated into the native port.
 
 Lust accepts a subset of ordinary Rust. Its upstream contract uses rustc as the
 semantic oracle and Cargo for production builds. Rust syntax alone is not proof
-that a file works with Lust. The pure core must pass an actual pinned Lust
+that a file works with Lust. Application components must pass an actual pinned Lust
 invocation and behavior comparison. The build must fail when that invocation
 fails; silently falling back to Cargo would hide a regression.
 
@@ -33,6 +33,23 @@ The verified compiler is the current `next` implementation, pinned in
 Linux, macOS, and Windows targets. Those targets do not include iOS, Android, or
 browser WebAssembly. This fork has not qualified that release path and continues
 to use Cargo for release artifacts.
+
+Synchronous standard-library networking, child processes, threads, and files do
+run through this compiler. The provider process runtime uses those capabilities
+directly. Its Unix socket pairs let shutdown unblock owned readers and writers
+even if a descendant retains inherited descriptors. It terminates and reaps only
+the child it spawned. The initial implementation is Unix-only and is not evidence
+of a Windows or mobile provider host.
+
+The provider JSON codec preserves number text so large identifiers survive a
+decode/encode cycle. It bounds input bytes, nesting, and value count. Strings
+must contain Unicode scalar values, so unpaired escaped surrogates are rejected;
+JavaScript's JSON parser accepts them. This is an explicit input constraint at
+the native boundary. Invalid UTF-8 and non-finite numeric request IDs are also
+rejected. Finite numeric IDs use ECMAScript formatting through Lust's pinned
+`ryu-js` adapter; string IDs remain strings. The raw protocol runtime does not
+replace Codex's generated method schemas or T3's provider-to-orchestration event
+mapping.
 
 Source basis: [Lust's implementation contract](https://github.com/t3dotgg/lust-lang/blob/240e08d91d4aed0299639f6f11fd522912b248f9/README.md),
 [release target allowlist](https://github.com/t3dotgg/lust-lang/blob/240e08d91d4aed0299639f6f11fd522912b248f9/src/resolve/cfg.rs),

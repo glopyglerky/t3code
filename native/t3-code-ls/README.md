@@ -1,6 +1,6 @@
 # t3 code ls
 
-An unofficial T3 Code port with a Lust-compatible core and a native Iroh transport.
+An unofficial T3 Code port with Lust-built application components and a native Iroh transport.
 This is an implementation in progress. It is not a complete replacement for the T3
 desktop, web, iOS, or Android applications.
 
@@ -20,6 +20,21 @@ permission decisions, 50,025 retry delay cases, 2,001 first-session-loss delays,
 Client compatibility rules and exact server grants have separate APIs so an
 old-client fallback cannot broaden server authority.
 
+Provider capability decisions also run in a standalone Lust executable. They
+cover queued turns, steering, interrupts, native forks, rollback, and context
+handoff. The oracle compares all 688,128 capability and command combinations
+against the immutable nightly implementation. The guest-share decision port
+covers opening, redemption, expiry, submission, owner sending, dismissal,
+cancellation, attachment release, and pending-message and attachment limits.
+
+The Unix provider process runtime runs JSON-RPC over a child process's standard
+streams. It is compiled and executed by Lust, including its bounded JSON codec,
+request tracking, notifications, approval requests, and owned-child cleanup.
+Controlled subprocess fixtures exercise its behavior without paid provider turns
+or personal credentials. This is the raw provider protocol layer; the generated
+Codex payload schemas, other provider adapters, orchestration persistence, and
+application UI still need integration.
+
 The native transport carries a fixed loopback service's HTTP, WebSocket, and
 binary traffic over authenticated Iroh connections. Each host explicitly admits
 client endpoint identities. Admitting a peer does not issue a T3 application
@@ -32,11 +47,10 @@ executable migration step. The Connect account flow, client route selector,
 mobile lifecycle, notifications, shared storage, and native UI are not completed
 by forwarding their network traffic.
 
-## Build
+## Build the Iroh bridge
 
-Use Rust 1.99.1. Cargo and rustc build release artifacts from the same core source
-that Lust checks. The Iroh adapter uses async Rust, Tokio, and dependencies that
-current Lust cannot compile.
+Use Rust 1.99.1. The Iroh adapter uses async Rust, Tokio, and dependencies that
+current Lust cannot compile. Cargo and rustc build this bridge.
 
 ```sh
 cargo build --locked --release --manifest-path native/t3-code-ls/Cargo.toml
@@ -115,6 +129,11 @@ cargo test --locked --all-targets
 cargo clippy --locked --all-targets -- -D warnings
 node --disable-warning=ExperimentalWarning tools/check-permissions.mjs
 node --disable-warning=ExperimentalWarning tools/check-connection.mjs
+node --disable-warning=ExperimentalWarning tools/check-policy.mjs
+node --disable-warning=ExperimentalWarning tools/check-guest-share.mjs
+node tools/check-json.mjs
+cargo build --locked -p t3-code-ls-core --bin t3-code-ls-provider
+node tools/check-provider.mjs target/debug/t3-code-ls-provider
 python3 -B -m unittest discover -s tools -p 'test_*.py'
 ```
 
@@ -122,16 +141,38 @@ For the independent Lust gate, check out `t3dotgg/lust-lang` at the exact revisi
 in [lust-toolchain.json](./lust-toolchain.json), then run:
 
 ```sh
-python3 tools/check-lust.py --source /absolute/path/to/lust-lang
+python3 tools/check-lust.py --source /absolute/path/to/lust-lang --artifacts target/lust-bin
 ```
 
 The gate builds the pinned compiler and TinyCC, checks the unchanged core, runs
-13 unit tests through Lust, and compiles and executes the permission and connection
-matrices through Lust. It compares both outputs to the pinned upstream TypeScript
-functions. It rejects a dirty or wrong compiler checkout, ignored tests, source
-changes during verification, and mismatched behavior. The receipt records hashes
-of the exact Git blobs and command results at `target/lust-proof.json`. There is
-no Cargo fallback for these Lust checks.
+its unit tests through Lust, and compiles and executes the application oracles
+and provider subprocess fixtures. It rejects a dirty or wrong compiler checkout,
+ignored tests, source changes during verification, and mismatched behavior. The
+receipt records hashes of the exact Git blobs, binaries, and command results at
+`target/lust-proof.json`. There is no Cargo fallback for these Lust checks.
+
+After a successful run, `target/lust-bin` contains the standalone Linux x86-64
+`t3-code-ls-policy` and `t3-code-ls-provider` executables. CI retains these verified
+components and their proof receipt as an artifact. They are development
+components, not desktop or mobile installers.
+
+The provider component accepts Codex app-server JSONL on standard input and
+returns responses, notifications, and approval requests on standard output:
+
+```sh
+target/lust-bin/t3-code-ls-provider \
+  --program /absolute/path/to/codex \
+  --cwd /absolute/path/to/project \
+  --home /absolute/path/to/provider-home \
+  --env PATH=/usr/local/bin:/usr/bin:/bin -- app-server
+```
+
+The project and provider-home directories must already exist. The child receives
+the selected home and explicit environment only. Supply additional environment
+entries deliberately when a provider needs them. The caller sends `initialize`
+and `initialized`, and must handle approval requests; this executable does not
+automatically approve tools or issue paid turns. `--help` lists frame, queue,
+pending-request, and request-timeout limits.
 
 The portable core can also be checked with Cargo for `aarch64-apple-ios`,
 `aarch64-apple-ios-sim`, `aarch64-linux-android`, `x86_64-pc-windows-gnu`, and

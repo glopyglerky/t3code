@@ -1,5 +1,6 @@
 import * as assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
 import { stripTypeScriptTypes } from "node:module";
 import { repoRoot, upstreamSource } from "./upstream-source.mjs";
 
@@ -140,9 +141,9 @@ assert.equal(checked, 688_128);
 // EOF, invalid frames, and version drift are operational failures, not denials
 // attributed to a provider. A failed frame must not execute the next request.
 const good = `${protocol}\tqueued\t1\n`;
-const once = execute("", [protocol, "steering", "14", "1"]);
-assert.equal(once.status, 0, once.stderr);
-assert.equal(once.stdout, "ok\tinterrupt_restart\n");
+const single = execute("", [protocol, "steering", "14", "1"]);
+assert.equal(single.status, 0, single.stderr);
+assert.equal(single.stdout, "ok\tinterrupt_restart\n");
 for (const bad of [
   "t3ls-policy-v2\tqueued\t1\n", `${protocol}\tqueued\t16384\n`,
   `${protocol}\tqueued\t+1\n`, `${protocol}\tsteering\t14\ttrue\n`,
@@ -159,4 +160,17 @@ for (const bad of [good.trimEnd(), "x".repeat(258), Buffer.from([255, 10])]) {
   assert.equal(result.status, 2);
   assert.equal(result.stdout, "");
 }
-console.log(`${checked} provider-policy decisions match the pinned upstream implementation; malformed input, single-request execution, and fail-stop framing passed.`);
+const disconnected = spawn(executable, [], { stdio: ["pipe", "pipe", "pipe"], timeout: 30_000 });
+const exited = once(disconnected, "close");
+let writeFailure = "";
+disconnected.stderr.setEncoding("utf8");
+disconnected.stderr.on("data", (chunk) => { writeFailure += chunk; });
+const outputClosed = once(disconnected.stdout, "close");
+disconnected.stdout.destroy();
+await outputClosed;
+disconnected.stdin.end(good);
+const [code, signal] = await exited;
+assert.equal(code, 2, "losing the response consumer must fail the policy process");
+assert.equal(signal, null, "a broken response pipe must be reported without a signal");
+assert.match(writeFailure, /cannot (write|flush) policy response/);
+console.log(`${checked} provider-policy decisions match the pinned upstream implementation; malformed input, single-request execution, fail-stop framing, and broken-pipe failure passed.`);
