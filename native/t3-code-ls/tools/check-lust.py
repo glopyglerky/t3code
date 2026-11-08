@@ -240,6 +240,16 @@ def main() -> int:
                     receipt["dispatch_parity"] = dispatch.stdout.strip()
                     print(dispatch.stdout, end="")
                 executables.append(executable)
+                if component == "guest-share":
+                    alias = work / "t3-code-ls-guest"
+                    shutil.copy2(executable, alias)
+                    alias_hash = sha256(alias)
+                    if alias_hash != receipt[f"{component}_binary_sha256"]:
+                        raise RuntimeError("Guest-share compatibility artifact differs from its verified executable")
+                    receipt["guest_compatibility_alias"] = {
+                        "file": alias.name, "alias_of": executable.name, "sha256": alias_hash,
+                    }
+                    executables.append(alias)
 
             verify_source(source, pin["revision"])
             if source_hashes() != receipt["inputs"]:

@@ -201,6 +201,10 @@ T3_CODE_LS_GUEST_SHARE_EXECUTABLE="$PWD/native/t3-code-ls/target/lust-bin/t3-cod
 vp run dev
 ```
 
+The build also includes `t3-code-ls-guest` as a byte-identical compatibility
+filename for `t3-code-ls-guest-share`. Deploy the server and verified components
+together so their wire formats match.
+
 Only an unset selector retains the upstream decision functions. A failed selected
 executable rejects the operation. The adapter validates the complete result
 before the caller commits domain events or attachment-cleanup requests. Failed

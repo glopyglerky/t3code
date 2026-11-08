@@ -895,6 +895,65 @@ const directNoopsAndDates = Effect.gen(function* () {
     .success;
   NodeAssert.deepEqual(reopened, opened);
   NodeAssert.notEqual(reopened, opened, "same-clock open is still a change");
+  const decideAt = Effect.fn("checkGuestShareAdapter.decideAt")(
+    function* (current, command, offset) {
+      const input = { thread: current, command, now: DateTime.makeUnsafe(nowMillis + offset) };
+      const actual = yield* native.decideGuestShareCommand(input);
+      NodeAssert.deepEqual(actual, GuestShareDecider.decideGuestShareCommand(input));
+      return actual;
+    },
+  );
+  const openedLater = (yield* decideAt(absent, open, 1_000)).success;
+  const submit = {
+    type: "thread.guest-message.submit",
+    commandId: CommandId.make("direct:advancing-submit"),
+    threadId,
+    shareId,
+    guestMessageId: GuestMessageId.make("direct:advancing-guest"),
+    text: "/model guest request with a later timestamp",
+    attachments: thread.guestShare.messages[0].attachments,
+  };
+  NodeAssert.equal(
+    (yield* decideAt(openedLater, submit, 2_000)).failure,
+    GuestShareDecider.GUEST_FAILURE.inactive,
+    "an invitation must be redeemed before submitting",
+  );
+  const redeemedLater = (yield* decideAt(
+    openedLater,
+    {
+      type: "thread.guest-share.redeem",
+      commandId: CommandId.make("direct:advancing-redeem"),
+      threadId,
+      shareId,
+      guestName: "Zoë 🦀",
+    },
+    3_000,
+  )).success;
+  const submittedLater = (yield* decideAt(redeemedLater, submit, 4_000)).success;
+  NodeAssert.equal(DateTime.toEpochMillis(submittedLater.updatedAt), nowMillis + 4_000);
+  NodeAssert.equal(DateTime.toEpochMillis(submittedLater.unsettledAt), nowMillis + 4_000);
+  const laterSend = {
+    thread: submittedLater,
+    guestMessageId: submit.guestMessageId,
+    now: DateTime.makeUnsafe(nowMillis + 5_000),
+  };
+  const sentLater = yield* native.decideGuestMessageSend(laterSend);
+  NodeAssert.deepEqual(sentLater, GuestShareDecider.decideGuestMessageSend(laterSend));
+  const cancelAt = DateTime.makeUnsafe(nowMillis + 6_000);
+  const cancelledLater = yield* native.guestShareAfterCancelledSend(
+    sentLater.success.thread,
+    sentLater.success.guest,
+    cancelAt,
+  );
+  NodeAssert.deepEqual(
+    cancelledLater,
+    GuestShareDecider.guestShareAfterCancelledSend(
+      sentLater.success.thread,
+      sentLater.success.guest,
+      cancelAt,
+    ),
+  );
+  yield* decideAt(cancelledLater, close, 7_000);
   for (const expiresAt of [
     "not a date",
     "Sun, 08 Nov 2026 12:00:01 GMT",
