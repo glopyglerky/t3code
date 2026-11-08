@@ -8,6 +8,8 @@ on:
       - docs/internals/t3-code-ls.md
       - native/t3-code-ls/**
       - packages/contracts/src/auth.ts
+      - apps/server/src/provider/CodexProvider.ts
+      - apps/server/src/provider/nativeCodexProcess.ts
       - apps/server/src/orchestration-v2/CommandPolicy.ts
       - apps/server/src/orchestration-v2/NativeCommandPolicy.ts
       - apps/server/src/orchestration-v2/NativeDispatchFacts.ts
@@ -20,6 +22,8 @@ on:
       - docs/internals/t3-code-ls.md
       - native/t3-code-ls/**
       - packages/contracts/src/auth.ts
+      - apps/server/src/provider/CodexProvider.ts
+      - apps/server/src/provider/nativeCodexProcess.ts
       - apps/server/src/orchestration-v2/CommandPolicy.ts
       - apps/server/src/orchestration-v2/NativeCommandPolicy.ts
       - apps/server/src/orchestration-v2/NativeDispatchFacts.ts
@@ -54,7 +58,7 @@ jobs:
           git init .
           git remote add origin "https://github.com/${SOURCE_REPOSITORY}.git"
           git -c credential.helper= fetch --no-tags --depth=1 origin "$SOURCE_REVISION"
-          git sparse-checkout set --cone native/t3-code-ls packages/contracts packages/client-runtime apps/server/src/orchestration-v2
+          git sparse-checkout set --cone native/t3-code-ls packages/contracts packages/client-runtime apps/server/src/provider apps/server/src/orchestration-v2
           git checkout --detach FETCH_HEAD
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
@@ -85,6 +89,8 @@ jobs:
         run: node --disable-warning=ExperimentalWarning tools/check-guest-share.mjs
       - name: Verify JSON wire compatibility
         run: node tools/check-json.mjs
+      - name: Validate native Codex session launch arguments
+        run: node --disable-warning=ExperimentalWarning tools/check-provider-launch.mjs
       - name: Exercise the provider subprocess protocol
         run: |
           cargo build --locked -p t3-code-ls-core --bin t3-code-ls-provider
@@ -128,7 +134,7 @@ jobs:
           git init .
           git remote add origin "https://github.com/${SOURCE_REPOSITORY}.git"
           git -c credential.helper= fetch --no-tags --depth=1 origin "$SOURCE_REVISION"
-          git sparse-checkout set --cone native/t3-code-ls packages/contracts packages/client-runtime apps/server/src/orchestration-v2
+          git sparse-checkout set --cone native/t3-code-ls packages/contracts packages/client-runtime apps/server/src/provider apps/server/src/orchestration-v2
           git checkout --detach FETCH_HEAD
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
@@ -219,7 +225,7 @@ jobs:
           git init .
           git remote add origin "https://github.com/${SOURCE_REPOSITORY}.git"
           git -c credential.helper= fetch --no-tags --depth=1 origin "$SOURCE_REVISION"
-          git sparse-checkout set --cone native/t3-code-ls packages/contracts packages/client-runtime apps/server/src/orchestration-v2
+          git sparse-checkout set --cone native/t3-code-ls packages/contracts packages/client-runtime apps/server/src/provider apps/server/src/orchestration-v2
           git checkout --detach FETCH_HEAD
       - name: Install mobile, Windows, and WebAssembly standard libraries
         run: |

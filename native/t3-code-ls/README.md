@@ -49,9 +49,10 @@ The Unix provider process runtime runs JSON-RPC over a child process's standard
 streams. It is compiled and executed by Lust, including its bounded JSON codec,
 request tracking, notifications, approval requests, and owned-child cleanup.
 Controlled subprocess fixtures exercise its behavior without paid provider turns
-or personal credentials. This is the raw provider protocol layer; the generated
-Codex payload schemas, other provider adapters, orchestration persistence, and
-application UI still need integration.
+or personal credentials. The real Codex session and discovery factory now has an opt-in path through
+this Lust-built executable. The generated Codex schemas and orchestration stay
+in upstream TypeScript; other providers and the UI still need porting and
+independent application qualification.
 
 The native transport carries a fixed loopback service's HTTP, WebSocket, and
 binary traffic over authenticated Iroh connections. Each host explicitly admits
@@ -110,6 +111,24 @@ authentication and permission checks are unchanged. Each policy call uses a
 separate process; this boundary is not a qualified performance improvement or a
 full server port. The CI executable artifact is Linux x86-64 only and is not a
 desktop or mobile application package.
+
+## Opt in to the Lust provider runtime for Codex
+
+On Unix, the verified `target/lust-bin/t3-code-ls-provider` can replace the
+subprocess boundary used by actual Codex sessions and provider discovery:
+
+```sh
+T3CODE_DEV_SEED=0 \
+T3_CODE_LS_PROVIDER_EXECUTABLE="$PWD/native/t3-code-ls/target/lust-bin/t3-code-ls-provider" \
+vp run dev
+```
+
+The Codex CLI binary, launch arguments, home, working directory, generated
+RPC schemas and application approval handling remain controlled by T3. The
+wrapper inherits the provider environment through the OS, not by placing
+credentials in command-line arguments. A missing, relative, unsupported or
+failing native executable never silently selects upstream. The route remains
+Unix-only; it does not qualify Windows, the full server, UI, desktop or mobile.
 
 ## Connect two machines
 

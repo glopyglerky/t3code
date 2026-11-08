@@ -14,7 +14,11 @@ function fixture() {
   const mode = process.env.T3LS_FIXTURE;
   assert.equal(process.env.HOME, process.env.T3LS_EXPECT_HOME);
   assert.equal(process.env.CODEX_HOME, path.join(process.env.HOME, ".codex"));
-  assert.equal(process.env.T3LS_PARENT_SECRET, undefined);
+  if (mode === "inherited-env") {
+    assert.equal(process.env.T3LS_PARENT_SECRET, "must-not-reach-child");
+  } else {
+    assert.equal(process.env.T3LS_PARENT_SECRET, undefined);
+  }
   const write = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
   const respond = (id, result) => write({ id, result });
   let held;
@@ -251,6 +255,17 @@ async function verify(binary) {
     assert.deepEqual(normal.messages.filter((message) => message.method === "fixture/delta").map((message) => message.params.index), Array.from({ length: 1000 }, (_, index) => index));
     assertions += 15;
     await normal.finish();
+
+    // Credentials cross the native boundary by environment, never by argv.
+    const inherited = await start("inherited-env", ["--inherit-env"]);
+    assert.ok(inherited.child.spawnargs.every((arg) => !arg.includes("must-not-reach-child")));
+    inherited.send({ id: 901, method: "initialize", params: {
+      clientInfo: { name: "t3-code-ls-fixture", title: "Inherited env", version: "0.1.0" },
+      capabilities: { experimentalApi: true, optOutNotificationMethods: null },
+    } });
+    assert.equal((await inherited.response(901)).result.userAgent, "deterministic-codex-app-server");
+    assertions += 2;
+    await inherited.finish();
 
     for (const mode of ["malformed", "truncated", "exit"]) {
       const peer = await start(mode);
