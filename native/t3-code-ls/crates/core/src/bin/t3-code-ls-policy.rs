@@ -9,16 +9,20 @@ fn run() -> Result<(), &'static str> {
             return Err("policy arguments exceed the protocol limit");
         }
         let result = evaluate(&args.join("\t"));
-        output.write_all(response(result).as_bytes()).map_err(|_| "cannot write policy response")?;
+        output
+            .write_all(response(result).as_bytes())
+            .map_err(|_| "cannot write policy response")?;
         output.flush().map_err(|_| "cannot flush policy response")?;
         return result.map(|_| ());
     }
     let mut input = BufReader::new(io::stdin().lock());
     while let Some(frame) = read_frame(&mut input).map_err(|_| "invalid policy input frame")? {
         let result = evaluate(&frame);
-        output.write_all(response(result).as_bytes()).map_err(|_| "cannot write policy response")?;
+        output
+            .write_all(response(result).as_bytes())
+            .map_err(|_| "cannot write policy response")?;
         output.flush().map_err(|_| "cannot flush policy response")?;
-        result?;
+        result.map(|_| ())?;
     }
     Ok(())
 }
