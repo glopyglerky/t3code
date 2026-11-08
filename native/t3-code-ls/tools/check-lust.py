@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build pinned Lust, execute the real core tests, and compare its permission oracle.
+"""Build pinned Lust, execute the real core tests, and compare its permission and connection oracles.
 
 Usage: python3 tools/check-lust.py --source /absolute/path/to/lust-lang
 
@@ -50,7 +50,7 @@ def run(command: list[str], *, cwd: Path, env: dict[str, str],
 
 
 def git(source: Path, *args: str) -> str:
-    result = subprocess.run(["git", "-C", str(source), *args],
+    result = subprocess.run(["git", "--no-replace-objects", "-C", str(source), *args],
                             capture_output=True, text=True, check=True)
     return result.stdout.strip()
 
@@ -66,9 +66,24 @@ def verify_source(source: Path, revision: str) -> None:
 def source_hashes() -> dict[str, str]:
     files = list((ROOT / "crates/core").rglob("*.rs"))
     files += [ROOT / "Cargo.toml", ROOT / "crates/core/Cargo.toml",
-              ROOT / "tools/check-permissions.mjs", Path(__file__).resolve(), PIN_FILE,
-              REPO / "packages/contracts/src/auth.ts"]
-    return {str(path.relative_to(REPO)): sha256(path) for path in sorted(files)}
+              ROOT / "tools/check-permissions.mjs", ROOT / "tools/check-connection.mjs",
+              ROOT / "tools/upstream-source.mjs", ROOT / "upstream.lock.json",
+              Path(__file__).resolve(), PIN_FILE]
+    hashes = {str(path.relative_to(REPO)): sha256(path) for path in sorted(files)}
+    upstream = json.loads((ROOT / "upstream.lock.json").read_text())["upstream"]
+    commit = upstream["commit"]
+    if not re.fullmatch(r"[a-f0-9]{40}", commit):
+        raise RuntimeError("Invalid locked upstream commit")
+    # The oracles execute immutable Git blobs through upstream-source.mjs.
+    # Hash those same blobs, not possibly modified working-tree TypeScript.
+    for path in ("packages/contracts/src/auth.ts",
+                 "packages/client-runtime/src/connection/supervisor.ts",
+                 "packages/client-runtime/src/connection/wakeups.ts"):
+        blob = subprocess.run(["git", "--no-replace-objects", "-C", str(REPO),
+                               "cat-file", "blob", f"{commit}:{path}"],
+                              capture_output=True, check=True).stdout
+        hashes[f"git:{commit}:{path}"] = hashlib.sha256(blob).hexdigest()
+    return hashes
 
 
 def test_summary(output: str) -> dict:
@@ -154,25 +169,30 @@ def main() -> int:
                 result = run([str(lust), "test", str(path), "--json"], cwd=ROOT, env=env,
                              receipt=receipt, name=f"test {path.name} with Lust")
                 receipt["unit_tests"].append(test_summary(result.stdout))
-            executable = work / "permission-matrix-lust"
-            # --bin selects an example by its Cargo target name in this revision
-            # (select_unit's name fallback). The unchanged example links our lib.
-            run([str(lust), "build", "crates/core/examples/permission_matrix.rs",
-                 "--manifest-path", "crates/core/Cargo.toml", "--bin", "permission_matrix",
-                 "-o", str(executable), "--json"], cwd=ROOT, env=env, receipt=receipt,
-                name="build unchanged permission matrix with Lust")
-            receipt["oracle_binary_sha256"] = sha256(executable)
-            parity = run(["node", "tools/check-permissions.mjs", str(executable)],
-                         cwd=ROOT, env=env, receipt=receipt,
-                         name="compare Lust output to checked-out upstream TypeScript")
-            receipt["permission_parity"] = parity.stdout.strip()
-            print(parity.stdout, end="")
+            # --bin selects each example by its Cargo target name in this
+            # revision (select_unit's name fallback). Both examples link the
+            # same unchanged library used by the production adapter.
+            for surface in ("permission", "connection"):
+                example = f"{surface}_matrix"
+                executable = work / f"{surface}-matrix-lust"
+                run([str(lust), "build", f"crates/core/examples/{example}.rs",
+                     "--manifest-path", "crates/core/Cargo.toml", "--bin", example,
+                     "-o", str(executable), "--json"], cwd=ROOT, env=env, receipt=receipt,
+                    name=f"build unchanged {surface} matrix with Lust")
+                receipt[f"{surface}_oracle_binary_sha256"] = sha256(executable)
+                oracle = "check-permissions.mjs" if surface == "permission" else "check-connection.mjs"
+                parity = run(["node", f"tools/{oracle}", str(executable)],
+                             cwd=ROOT, env=env, receipt=receipt,
+                             name=f"compare Lust {surface} output to pinned upstream TypeScript")
+                receipt[f"{surface}_parity"] = parity.stdout.strip()
+                print(parity.stdout, end="")
+
         verify_source(source, pin["revision"])
         if source_hashes() != receipt["inputs"]:
             raise RuntimeError("Core or upstream oracle inputs changed during validation; run again")
         receipt["status"] = "passed"
         total = sum(item["passed"] for item in receipt["unit_tests"])
-        print(f"Lust check passed; {total} unit tests passed; permission parity passed.")
+        print(f"Lust check passed; {total} unit tests passed; permission and connection parity passed.")
         return 0
     except (RuntimeError, subprocess.SubprocessError, OSError, ValueError, KeyError) as error:
         receipt["error"] = str(error)

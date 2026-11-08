@@ -29,7 +29,8 @@ pub fn load_or_create_identity(path: &Path) -> io::Result<SecretKey> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
+        // Validate the opened object without blocking if the path names a FIFO.
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
     if fs::symlink_metadata(path)?.file_type().is_symlink() {
         return Err(io::Error::new(

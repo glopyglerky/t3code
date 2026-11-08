@@ -1,12 +1,12 @@
-use std::{net::SocketAddr, time::Duration};
+use std::{io, net::SocketAddr, time::Duration};
 
-use iroh::{Endpoint, endpoint::presets};
+use iroh::{Endpoint, EndpointAddr, endpoint::presets};
 use t3_code_ls_transport::{
     ALPN, Admission, Forwarder, Host, HostConfig, Limits, Network, SecretKey,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
+    net::{TcpListener, TcpStream, UdpSocket},
     time::timeout,
 };
 
@@ -25,6 +25,24 @@ async fn client(key: SecretKey) -> Endpoint {
         .bind()
         .await
         .unwrap()
+}
+
+async fn assert_closed_without_response(socket: &mut TcpStream) {
+    let mut response = [0; 1];
+    match socket.read(&mut response).await {
+        Ok(0) => {}
+        Err(error) => assert!(
+            matches!(
+                error.kind(),
+                io::ErrorKind::ConnectionReset
+                    | io::ErrorKind::ConnectionAborted
+                    | io::ErrorKind::BrokenPipe
+                    | io::ErrorKind::NotConnected
+            ),
+            "unexpected TCP failure: {error}"
+        ),
+        Ok(_) => panic!("failed request unexpectedly received a response"),
+    }
 }
 
 #[tokio::test]
@@ -372,6 +390,173 @@ async fn host_shutdown_closes_active_backend_and_remote_connection() {
         connection.closed().await;
         assert_eq!(backend_socket.read(&mut byte).await.unwrap(), 0);
         endpoint.close().await;
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn blocked_forwarder_requires_explicit_retry_after_admission_changes() {
+    timeout(DEADLINE, async {
+        let backend = TcpListener::bind(loopback()).await.unwrap();
+        let key = SecretKey::generate();
+        let admission = Admission::new();
+        let host = Host::bind(
+            SecretKey::generate(),
+            Network::Loopback,
+            HostConfig::new(backend.local_addr().unwrap(), admission.clone()),
+        )
+        .await
+        .unwrap();
+        let forwarder = Forwarder::bind(
+            key.clone(),
+            Network::Loopback,
+            host.addr(),
+            loopback(),
+            Limits::default(),
+        )
+        .await
+        .unwrap();
+
+        let mut original = TcpStream::connect(forwarder.local_addr()).await.unwrap();
+        // The peer can deny admission before the local write reaches its socket.
+        let _ = original.write_all(b"denied request").await;
+        assert_closed_without_response(&mut original).await;
+        assert_eq!(host.stats().rejected_peers, 1);
+        for _ in 0..3 {
+            let mut denied = TcpStream::connect(forwarder.local_addr()).await.unwrap();
+            let _ = denied.write_all(b"still denied").await;
+            assert_closed_without_response(&mut denied).await;
+        }
+        assert_eq!(host.stats().rejected_peers, 1);
+        assert_eq!(host.stats().backend_attempts, 0);
+
+        assert!(admission.grant(key.public()));
+        // Granting admission does not resurrect a failed TCP request or clear
+        // the client's blocked state until its explicit recovery signal.
+        let mut still_blocked = TcpStream::connect(forwarder.local_addr()).await.unwrap();
+        let _ = still_blocked.write_all(b"needs retry signal").await;
+        assert_closed_without_response(&mut still_blocked).await;
+        assert_eq!(host.stats().backend_attempts, 0);
+        forwarder.retry_now();
+
+        let mut fresh = TcpStream::connect(forwarder.local_addr()).await.unwrap();
+        fresh.write_all(b"new request").await.unwrap();
+        let (mut service, _) = backend.accept().await.unwrap();
+        let mut request = [0; 11];
+        service.read_exact(&mut request).await.unwrap();
+        assert_eq!(&request, b"new request");
+        service.write_all(b"ok").await.unwrap();
+        let mut response = [0; 2];
+        fresh.read_exact(&mut response).await.unwrap();
+        assert_eq!(&response, b"ok");
+        assert_closed_without_response(&mut original).await;
+        assert_eq!(host.stats().rejected_peers, 1);
+        assert_eq!(host.stats().backend_attempts, 1);
+
+        forwarder.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn backend_close_after_receiving_request_never_replays_application_bytes() {
+    timeout(DEADLINE, async {
+        let backend = TcpListener::bind(loopback()).await.unwrap();
+        let key = SecretKey::generate();
+        let admission = Admission::new();
+        admission.grant(key.public());
+        let host = Host::bind(
+            SecretKey::generate(),
+            Network::Loopback,
+            HostConfig::new(backend.local_addr().unwrap(), admission),
+        )
+        .await
+        .unwrap();
+        let forwarder = Forwarder::bind(
+            key,
+            Network::Loopback,
+            host.addr(),
+            loopback(),
+            Limits::default(),
+        )
+        .await
+        .unwrap();
+
+        let mut original = TcpStream::connect(forwarder.local_addr()).await.unwrap();
+        original.write_all(b"side effect").await.unwrap();
+        original.shutdown().await.unwrap();
+        let (mut service, _) = backend.accept().await.unwrap();
+        let mut marker = [0; 11];
+        service.read_exact(&mut marker).await.unwrap();
+        assert_eq!(&marker, b"side effect");
+        // The backend has performed work, but closes without acknowledging it.
+        // The forwarding layer cannot know whether replay would be safe.
+        drop(service);
+        assert_closed_without_response(&mut original).await;
+        assert!(
+            timeout(Duration::from_millis(300), backend.accept())
+                .await
+                .is_err(),
+            "a failed request must not automatically open another backend connection"
+        );
+        assert_eq!(host.stats().backend_attempts, 1);
+
+        let mut fresh = TcpStream::connect(forwarder.local_addr()).await.unwrap();
+        fresh.write_all(b"new request").await.unwrap();
+        fresh.shutdown().await.unwrap();
+        let (mut service, _) = backend.accept().await.unwrap();
+        let mut request = Vec::new();
+        service.read_to_end(&mut request).await.unwrap();
+        assert_eq!(&request, b"new request");
+        service.write_all(b"ok").await.unwrap();
+        service.shutdown().await.unwrap();
+        let mut response = Vec::new();
+        fresh.read_to_end(&mut response).await.unwrap();
+        assert_eq!(&response, b"ok");
+        assert_eq!(host.stats().backend_attempts, 2);
+
+        forwarder.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn forwarder_shutdown_cancels_pending_handshake_and_closes_tcp_client() {
+    timeout(DEADLINE, async {
+        // Keep the UDP address bound without answering so the QUIC handshake
+        // remains in flight rather than failing immediately on a closed port.
+        let blackhole = UdpSocket::bind(loopback()).await.unwrap();
+        let remote = EndpointAddr::new(SecretKey::generate().public())
+            .with_ip_addr(blackhole.local_addr().unwrap());
+        let limits = Limits {
+            connect_timeout: Duration::from_secs(60),
+            ..Limits::default()
+        };
+        let forwarder = Forwarder::bind(
+            SecretKey::generate(),
+            Network::Loopback,
+            remote,
+            loopback(),
+            limits,
+        )
+        .await
+        .unwrap();
+        let mut pending = TcpStream::connect(forwarder.local_addr()).await.unwrap();
+        pending.write_all(b"pending request").await.unwrap();
+        let mut packet = [0; 2048];
+        let (length, _) = blackhole.recv_from(&mut packet).await.unwrap();
+        assert!(length > 0, "the connection attempt must have started");
+
+        timeout(Duration::from_secs(5), forwarder.shutdown())
+            .await
+            .expect("shutdown must not wait for the 60-second handshake deadline")
+            .unwrap();
+        assert_closed_without_response(&mut pending).await;
     })
     .await
     .unwrap();

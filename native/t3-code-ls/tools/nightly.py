@@ -388,10 +388,11 @@ def main(argv: list[str] | None = None) -> int:
             metadata = latest_nightly(all_releases(client.get))
             if published_time(metadata["published_at"]) < published_time(lock["upstream"]["published_at"]):
                 raise TrackingError("The newest published nightly predates the lock; investigate removed or changed releases.")
-            commit = resolve_tag(client.get, metadata["tag"])
-            if metadata["tag"] == lock["upstream"]["tag"] and commit != lock["upstream"]["commit"]:
+            pinned_commit = resolve_tag(client.get, lock["upstream"]["tag"])
+            if pinned_commit != lock["upstream"]["commit"]:
                 raise TrackingError("The pinned nightly tag moved to another commit; investigate before updating.")
-            ensure_commit(args.repo_root, lock["upstream"]["commit"], args.fetch)
+            commit = pinned_commit if metadata["tag"] == lock["upstream"]["tag"] else resolve_tag(client.get, metadata["tag"])
+            ensure_commit(args.repo_root, pinned_commit, args.fetch)
             ensure_commit(args.repo_root, commit, args.fetch)
             result = report(args.repo_root, lock, manifest(args.repo_root, metadata, commit))
         changed = write_json(args.output, result)

@@ -12,11 +12,13 @@ a newer source revision does not establish feature parity.
 ## Current code
 
 The portable core ports the nightly's permission vocabulary, explicit grant
-precedence, legacy client compatibility, and permission error projection. The
-comparison tool executes the original TypeScript functions from the checkout and
-compares 28,560 decisions with the port. Client compatibility rules and exact
-server grants have separate APIs so an old-client fallback cannot broaden server
-authority.
+precedence, legacy client compatibility, permission error projection, and the
+connection retry decision policy. The comparison tools execute the original
+TypeScript functions from the immutable nightly Git commit. They compare 28,560
+permission decisions, 50,025 retry delay cases, 2,001 first-session-loss delays,
+3,360 retry transitions, and 30 wakeup decisions with the Lust-compiled port.
+Client compatibility rules and exact server grants have separate APIs so an
+old-client fallback cannot broaden server authority.
 
 The native transport carries a fixed loopback service's HTTP, WebSocket, and
 binary traffic over authenticated Iroh connections. Each host explicitly admits
@@ -112,6 +114,7 @@ cd native/t3-code-ls
 cargo test --locked --all-targets
 cargo clippy --locked --all-targets -- -D warnings
 node --disable-warning=ExperimentalWarning tools/check-permissions.mjs
+node --disable-warning=ExperimentalWarning tools/check-connection.mjs
 python3 -B -m unittest discover -s tools -p 'test_*.py'
 ```
 
@@ -123,12 +126,12 @@ python3 tools/check-lust.py --source /absolute/path/to/lust-lang
 ```
 
 The gate builds the pinned compiler and TinyCC, checks the unchanged core, runs
-its five unit tests through Lust, and compiles and executes the same permission
-matrix through Lust. It compares that output to upstream's actual TypeScript
+13 unit tests through Lust, and compiles and executes the permission and connection
+matrices through Lust. It compares both outputs to the pinned upstream TypeScript
 functions. It rejects a dirty or wrong compiler checkout, ignored tests, source
 changes during verification, and mismatched behavior. The receipt records hashes
-and command results at `target/lust-proof.json`. There is no Cargo fallback for
-these Lust checks.
+of the exact Git blobs and command results at `target/lust-proof.json`. There is
+no Cargo fallback for these Lust checks.
 
 The portable core can also be checked with Cargo for `aarch64-apple-ios`,
 `aarch64-apple-ios-sim`, `aarch64-linux-android`, `x86_64-pc-windows-gnu`, and

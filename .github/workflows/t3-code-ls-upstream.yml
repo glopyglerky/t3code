@@ -5,7 +5,7 @@ on:
     - cron: "8 */2 * * *"
   workflow_dispatch:
   push:
-    branches: [main, t3-code-ls]
+    branches: [main, t3-code-ls, "codex/t3-code-ls-*"]
     paths:
       - .github/workflows/t3-code-ls-upstream.yml
       - native/t3-code-ls/tools/nightly.py
@@ -22,7 +22,7 @@ concurrency:
 jobs:
   watch:
     name: Published nightly and upstream activity
-    if: github.repository == 'glopyglerky/t3code' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/t3-code-ls')
+    if: github.repository_id == '1352693431' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/t3-code-ls' || startsWith(github.ref, 'refs/heads/codex/t3-code-ls-'))
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:

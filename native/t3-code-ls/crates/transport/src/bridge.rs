@@ -1,6 +1,9 @@
 use iroh::{
     Endpoint, EndpointAddr, EndpointId, RelayMode, RelayUrl, SecretKey, Watcher,
-    endpoint::{Connection, QuicTransportConfig, presets},
+    endpoint::{
+        ConnectError, ConnectWithOptsError, ConnectingError, Connection, ConnectionError,
+        QuicConnectError, QuicTransportConfig, presets,
+    },
 };
 use std::{
     io,
@@ -11,13 +14,18 @@ use std::{
     },
     time::Duration,
 };
-use t3_code_ls_core::peers::PeerPolicy;
+use t3_code_ls_core::{
+    connection::{
+        AttemptEnd, AttemptOutcome, BACKOFF_RESET_AFTER_MS, RetryDecision, RetryPolicy, Wakeup,
+    },
+    peers::PeerPolicy,
+};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     sync::{Mutex, Semaphore, watch},
     task::{JoinHandle, JoinSet},
-    time::timeout,
+    time::{Instant, sleep_until, timeout, timeout_at},
 };
 
 pub const ALPN: &[u8] = b"t3-code-ls/connect/1";
@@ -34,6 +42,8 @@ pub enum BridgeError {
     Io(#[from] io::Error),
     #[error("iroh: {0}")]
     Transport(String),
+    #[error("connection blocked: {0}")]
+    ConnectionBlocked(String),
     #[error("bridge task: {0}")]
     Task(#[from] tokio::task::JoinError),
 }
@@ -456,6 +466,7 @@ pub struct Forwarder {
     address: SocketAddr,
     endpoint: Endpoint,
     cancel: watch::Sender<bool>,
+    retry_wakeups: watch::Sender<RetryWakeup>,
     task: Option<JoinHandle<Result<(), BridgeError>>>,
 }
 
@@ -479,17 +490,20 @@ impl Forwarder {
         };
         let address = listener.local_addr()?;
         let (cancel, receiver) = watch::channel(false);
+        let (retry_wakeups, wakeups) = watch::channel(RetryWakeup::Explicit);
         let task = tokio::spawn(forward(
             endpoint.clone(),
             listener,
             remote,
             limits,
             receiver,
+            wakeups,
         ));
         Ok(Self {
             address,
             endpoint,
             cancel,
+            retry_wakeups,
             task: Some(task),
         })
     }
@@ -501,6 +515,12 @@ impl Forwarder {
     }
     pub async fn network_changed(&self) {
         self.endpoint.network_change().await;
+        self.retry_wakeups.send_replace(RetryWakeup::NetworkChanged);
+    }
+    /// Clear connection backoff or an admission/authentication block for the
+    /// next new TCP request. Existing streams are never restarted or replayed.
+    pub fn retry_now(&self) {
+        self.retry_wakeups.send_replace(RetryWakeup::Explicit);
     }
     /// Waits for the forwarding loop; cancelling this wait leaves shutdown available.
     pub async fn wait(&mut self) -> Result<(), BridgeError> {
@@ -523,30 +543,313 @@ impl Drop for Forwarder {
     }
 }
 
+#[derive(Clone, Copy)]
+enum RetryWakeup {
+    Explicit,
+    NetworkChanged,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConnectionFailure {
+    Transient,
+    Blocked,
+    Stopped,
+}
+
+fn connection_failure(error: &ConnectionError) -> ConnectionFailure {
+    match error {
+        ConnectionError::ApplicationClosed(close) if close.error_code == REJECTED.into() => {
+            ConnectionFailure::Blocked
+        }
+        ConnectionError::VersionMismatch | ConnectionError::CidsExhausted => {
+            ConnectionFailure::Blocked
+        }
+        ConnectionError::TransportError(error)
+            if (0x100..0x200).contains(&u64::from(error.code)) =>
+        {
+            ConnectionFailure::Blocked
+        }
+        ConnectionError::ConnectionClosed(close)
+            if (0x100..0x200).contains(&u64::from(close.error_code)) =>
+        {
+            ConnectionFailure::Blocked
+        }
+        ConnectionError::LocallyClosed => ConnectionFailure::Stopped,
+        _ => ConnectionFailure::Transient,
+    }
+}
+
+fn connect_failure(error: &ConnectError) -> ConnectionFailure {
+    match error {
+        ConnectError::Connection { source, .. }
+        | ConnectError::Connecting {
+            source: ConnectingError::ConnectionError { source, .. },
+            ..
+        } => connection_failure(source),
+        ConnectError::Connect {
+            source: ConnectWithOptsError::NoAddress { .. },
+            ..
+        } => ConnectionFailure::Transient,
+        ConnectError::Connect {
+            source:
+                ConnectWithOptsError::EndpointClosed { .. }
+                | ConnectWithOptsError::InternalConsistencyError { .. },
+            ..
+        }
+        | ConnectError::Connect {
+            source:
+                ConnectWithOptsError::Noq {
+                    source: QuicConnectError::EndpointStopping,
+                    ..
+                },
+            ..
+        }
+        | ConnectError::Connecting {
+            source: ConnectingError::InternalConsistencyError { .. },
+            ..
+        } => ConnectionFailure::Stopped,
+        // Authentication, unsupported protocol, local hooks, and invalid local
+        // configuration need an explicit wakeup rather than timed retries.
+        _ => ConnectionFailure::Blocked,
+    }
+}
+
+fn failure_error(kind: ConnectionFailure, message: String) -> BridgeError {
+    match kind {
+        ConnectionFailure::Transient => BridgeError::Transport(message),
+        ConnectionFailure::Blocked => BridgeError::ConnectionBlocked(message),
+        ConnectionFailure::Stopped => io::Error::new(io::ErrorKind::NotConnected, message).into(),
+    }
+}
+
+fn connection_timeout() -> BridgeError {
+    io::Error::new(io::ErrorKind::TimedOut, "Iroh connection wait timed out").into()
+}
+
+#[derive(Clone)]
+struct ConnectionEnded {
+    reason: ConnectionError,
+    at: Instant,
+    stable: bool,
+}
+
+// A ready close event wins over a simultaneously elapsed stability timer. This
+// also handles an observer first polled long after a short session has ended.
+async fn observe_session_end(
+    closed: impl std::future::Future<Output = ConnectionError>,
+    stable_at: Instant,
+) -> ConnectionEnded {
+    tokio::pin!(closed);
+    let (reason, stable) = tokio::select! {
+        biased;
+        reason = &mut closed => (reason, false),
+        _ = sleep_until(stable_at) => (closed.await, true),
+    };
+    ConnectionEnded {
+        reason,
+        at: Instant::now(),
+        stable,
+    }
+}
+
+struct LiveConnection {
+    connection: Connection,
+    ended: watch::Receiver<Option<ConnectionEnded>>,
+    observer: JoinHandle<()>,
+}
+
+impl LiveConnection {
+    fn new(connection: Connection) -> Self {
+        let (sender, ended) = watch::channel(None);
+        let observed = connection.clone();
+        let stable_at = Instant::now() + Duration::from_millis(BACKOFF_RESET_AFTER_MS);
+        let observer = tokio::spawn(async move {
+            let ended = observe_session_end(observed.closed(), stable_at).await;
+            let _ = sender.send(Some(ended));
+        });
+        Self {
+            connection,
+            ended,
+            observer,
+        }
+    }
+
+    async fn end(&mut self) -> Result<ConnectionEnded, BridgeError> {
+        loop {
+            if let Some(ended) = self.ended.borrow().clone() {
+                return Ok(ended);
+            }
+            self.ended.changed().await.map_err(|_| {
+                io::Error::other("connection observer stopped before reporting closure")
+            })?;
+        }
+    }
+}
+
+impl Drop for LiveConnection {
+    fn drop(&mut self) {
+        self.observer.abort();
+    }
+}
+
+struct ConnectionCache {
+    live: Option<LiveConnection>,
+    retry: RetryPolicy,
+    retry_at: Option<Instant>,
+    blocked: Option<(ConnectionFailure, String)>,
+    wakeups: watch::Receiver<RetryWakeup>,
+}
+
+impl ConnectionCache {
+    fn new(wakeups: watch::Receiver<RetryWakeup>) -> Self {
+        Self {
+            live: None,
+            retry: RetryPolicy::new(),
+            retry_at: None,
+            blocked: None,
+            wakeups,
+        }
+    }
+
+    fn receive_wakeup(&mut self) {
+        match *self.wakeups.borrow_and_update() {
+            RetryWakeup::Explicit => self.retry.reset(),
+            RetryWakeup::NetworkChanged => {
+                self.retry.wakeup(Wakeup::NetworkChanged);
+            }
+        }
+        self.retry_at = None;
+        if self
+            .blocked
+            .as_ref()
+            .is_some_and(|(kind, _)| *kind == ConnectionFailure::Blocked)
+        {
+            self.blocked = None;
+        }
+    }
+
+    fn record_failure(
+        &mut self,
+        kind: ConnectionFailure,
+        established: bool,
+        stable: bool,
+        at: Instant,
+        message: String,
+    ) {
+        let end = match kind {
+            ConnectionFailure::Transient => AttemptEnd::TransientFailure,
+            ConnectionFailure::Blocked => AttemptEnd::BlockedFailure,
+            ConnectionFailure::Stopped => AttemptEnd::Interrupted { reset_retry: false },
+        };
+        let decision = self.retry.after_attempt(
+            AttemptOutcome {
+                established,
+                stable,
+                probe_failed: false,
+                end,
+            },
+            fastrand::f64(),
+        );
+        self.retry_at = match decision {
+            RetryDecision::RetryAfter(delay_ms) => Some(at + Duration::from_millis(delay_ms)),
+            _ => None,
+        };
+        self.blocked = if kind == ConnectionFailure::Transient {
+            None
+        } else {
+            Some((kind, message))
+        };
+    }
+}
+
 async fn cached_connection(
-    cached: &Mutex<Option<Connection>>,
+    cached: &Mutex<ConnectionCache>,
     endpoint: &Endpoint,
     remote: EndpointAddr,
     deadline: Duration,
 ) -> Result<Connection, BridgeError> {
-    timeout(deadline, async {
-        let mut cached = cached.lock().await;
-        if cached
-            .as_ref()
-            .is_some_and(|connection| connection.close_reason().is_some())
-        {
-            *cached = None;
+    let expires = Instant::now()
+        .checked_add(deadline)
+        .ok_or(BridgeError::Configuration(
+            "connection timeout exceeds clock range",
+        ))?;
+    // Every local request has its own total deadline, including queueing behind
+    // another request and backoff. Only a dial failure increments the ladder.
+    let mut cached = timeout_at(expires, cached.lock())
+        .await
+        .map_err(|_| connection_timeout())?;
+    if let Some(live) = &mut cached.live {
+        if live.connection.close_reason().is_none() {
+            let connection = live.connection.clone();
+            if cached.wakeups.has_changed().unwrap_or(false) {
+                cached.receive_wakeup();
+            }
+            return Ok(connection);
         }
-        if cached.is_none() {
-            *cached = Some(endpoint.connect(remote, ALPN).await.map_err(transport)?);
+        let ended = timeout_at(expires, live.end())
+            .await
+            .map_err(|_| connection_timeout())??;
+        cached.live = None;
+        cached.record_failure(
+            connection_failure(&ended.reason),
+            true,
+            ended.stable,
+            ended.at,
+            ended.reason.to_string(),
+        );
+    }
+    loop {
+        if cached.wakeups.has_changed().unwrap_or(false) {
+            cached.receive_wakeup();
         }
-        Ok(cached
-            .as_ref()
-            .expect("connection established above")
-            .clone())
-    })
-    .await
-    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Iroh connection wait timed out"))?
+        if let Some((kind, message)) = &cached.blocked {
+            return Err(failure_error(*kind, message.clone()));
+        }
+        let Some(retry_at) = cached.retry_at else {
+            break;
+        };
+        if retry_at <= Instant::now() {
+            cached.retry_at = None;
+            break;
+        }
+        tokio::select! {
+            biased;
+            changed = cached.wakeups.changed() => {
+                changed.map_err(|_| io::Error::new(io::ErrorKind::NotConnected, "forwarder stopped"))?;
+                cached.receive_wakeup();
+            }
+            _ = sleep_until(expires) => return Err(connection_timeout()),
+            _ = sleep_until(retry_at) => { cached.retry_at = None; }
+        }
+    }
+    if Instant::now() >= expires {
+        return Err(connection_timeout());
+    }
+    // Exactly one handshake per request. A failed dial returns to its TCP
+    // caller; only a later request can use the next retry deadline. No bytes
+    // have been read from that TCP connection at this point.
+    match timeout_at(expires, endpoint.connect(remote, ALPN)).await {
+        Ok(Ok(connection)) => {
+            cached.live = Some(LiveConnection::new(connection.clone()));
+            Ok(connection)
+        }
+        Ok(Err(error)) => {
+            let kind = connect_failure(&error);
+            let message = error.to_string();
+            cached.record_failure(kind, false, false, Instant::now(), message.clone());
+            Err(failure_error(kind, message))
+        }
+        Err(_) => {
+            cached.record_failure(
+                ConnectionFailure::Transient,
+                false,
+                false,
+                Instant::now(),
+                String::new(),
+            );
+            Err(connection_timeout())
+        }
+    }
 }
 
 async fn forward(
@@ -555,8 +858,9 @@ async fn forward(
     remote: EndpointAddr,
     limits: Limits,
     mut stop: watch::Receiver<bool>,
+    wakeups: watch::Receiver<RetryWakeup>,
 ) -> Result<(), BridgeError> {
-    let cached = Arc::new(Mutex::new(None::<Connection>));
+    let cached = Arc::new(Mutex::new(ConnectionCache::new(wakeups)));
     let streams = Arc::new(Semaphore::new(limits.total_streams));
     let mut tasks = JoinSet::new();
     let result = loop {
@@ -592,8 +896,8 @@ async fn forward(
     };
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}
-    if let Some(connection) = &*cached.lock().await {
-        connection.close(SHUTDOWN.into(), b"forwarder stopped");
+    if let Some(live) = cached.lock().await.live.take() {
+        live.connection.close(SHUTDOWN.into(), b"forwarder stopped");
     }
     endpoint.close().await;
     result
@@ -631,17 +935,20 @@ mod tests {
             let listener = TcpListener::from_std(listener).unwrap();
             let address = listener.local_addr().unwrap();
             let (cancel, receiver) = watch::channel(false);
+            let (retry_wakeups, wakeups) = watch::channel(RetryWakeup::Explicit);
             let task = tokio::spawn(forward(
                 endpoint.clone(),
                 listener,
                 host.addr(),
                 limits,
                 receiver,
+                wakeups,
             ));
             let mut forwarder = Forwarder {
                 address,
                 endpoint,
                 cancel,
+                retry_wakeups,
                 task: Some(task),
             };
 
@@ -675,7 +982,8 @@ mod tests {
             .bind()
             .await
             .unwrap();
-        let cached = Mutex::new(None);
+        let (_wakeups, receiver) = watch::channel(RetryWakeup::Explicit);
+        let cached = Mutex::new(ConnectionCache::new(receiver));
         let blocked = cached.lock().await;
         let remote = EndpointAddr::new(SecretKey::generate().public());
         let result = timeout(
@@ -688,6 +996,151 @@ mod tests {
             matches!(result, Err(BridgeError::Io(error)) if error.kind() == io::ErrorKind::TimedOut)
         );
         drop(blocked);
+        endpoint.close().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stability_uses_live_time_not_late_cache_observation() {
+        let began = Instant::now();
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let observer = tokio::spawn(observe_session_end(
+            async { receiver.await.unwrap() },
+            began + Duration::from_millis(BACKOFF_RESET_AFTER_MS),
+        ));
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        sender.send(ConnectionError::Reset).unwrap();
+        tokio::task::yield_now().await;
+        // The cache need not be read until a later local TCP client arrives.
+        tokio::time::advance(Duration::from_secs(40)).await;
+        let ended = observer.await.unwrap();
+        assert!(!ended.stable);
+        assert_eq!(ended.at - began, Duration::from_secs(1));
+
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let observer = tokio::spawn(observe_session_end(
+            async { receiver.await.unwrap() },
+            Instant::now() + Duration::from_millis(BACKOFF_RESET_AFTER_MS),
+        ));
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(BACKOFF_RESET_AFTER_MS)).await;
+        tokio::task::yield_now().await;
+        assert!(!observer.is_finished());
+        sender.send(ConnectionError::Reset).unwrap();
+        assert!(observer.await.unwrap().stable);
+
+        // If both conditions are ready before the observer is first polled,
+        // an already closed connection cannot be classified as stable.
+        let ended = observe_session_end(async { ConnectionError::Reset }, began).await;
+        assert!(!ended.stable);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_backoff_wait_timeout_does_not_count_as_another_failed_dial() {
+        let endpoint = Endpoint::builder(presets::Minimal)
+            .bind_addr("127.0.0.1:0")
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let (_sender, receiver) = watch::channel(RetryWakeup::Explicit);
+        let mut state = ConnectionCache::new(receiver);
+        state.record_failure(
+            ConnectionFailure::Transient,
+            false,
+            false,
+            Instant::now(),
+            String::new(),
+        );
+        state.retry_at = Some(Instant::now() + Duration::from_secs(300));
+        let cached = Mutex::new(state);
+        let result = cached_connection(
+            &cached,
+            &endpoint,
+            EndpointAddr::new(endpoint.id()),
+            Duration::from_secs(1),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(BridgeError::Io(error)) if error.kind() == io::ErrorKind::TimedOut)
+        );
+        assert_eq!(cached.lock().await.retry.failure_count(), 1);
+        assert!(
+            cached.lock().await.blocked.is_none(),
+            "a timed-out waiter must not dial the self address"
+        );
+        endpoint.close().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_wakeups_interrupt_an_active_backoff_waiter() {
+        for wakeup in [RetryWakeup::Explicit, RetryWakeup::NetworkChanged] {
+            let endpoint = Endpoint::builder(presets::Minimal)
+                .bind_addr("127.0.0.1:0")
+                .unwrap()
+                .bind()
+                .await
+                .unwrap();
+            let (sender, receiver) = watch::channel(RetryWakeup::Explicit);
+            let mut state = ConnectionCache::new(receiver);
+            state.record_failure(
+                ConnectionFailure::Transient,
+                false,
+                false,
+                Instant::now(),
+                String::new(),
+            );
+            state.retry_at = Some(Instant::now() + Duration::from_secs(300));
+            let cached = Arc::new(Mutex::new(state));
+            let worker_cache = cached.clone();
+            let worker_endpoint = endpoint.clone();
+            let request = tokio::spawn(async move {
+                cached_connection(
+                    &worker_cache,
+                    &worker_endpoint,
+                    EndpointAddr::new(worker_endpoint.id()),
+                    Duration::from_secs(1),
+                )
+                .await
+            });
+            tokio::task::yield_now().await;
+            assert!(
+                cached.try_lock().is_err(),
+                "request must be waiting in shared backoff"
+            );
+            sender.send_replace(wakeup);
+            let result = timeout(Duration::from_millis(100), request)
+                .await
+                .unwrap()
+                .unwrap();
+            // A self-dial is immediately blocked, proving the timer was cleared
+            // and that reset did not require the lock held by the waiting request.
+            assert!(matches!(result, Err(BridgeError::ConnectionBlocked(_))));
+            assert_eq!(cached.lock().await.retry.failure_count(), 0);
+            endpoint.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn an_actual_dial_timeout_counts_once_before_releasing_the_cache() {
+        let limits = Limits::default();
+        let endpoint = endpoint(SecretKey::generate(), Network::Loopback, &limits, false)
+            .await
+            .unwrap();
+        let silent = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let remote = EndpointAddr::new(SecretKey::generate().public())
+            .with_ip_addr(silent.local_addr().unwrap());
+        let (_sender, receiver) = watch::channel(RetryWakeup::Explicit);
+        let cached = Mutex::new(ConnectionCache::new(receiver));
+        let result = cached_connection(&cached, &endpoint, remote, Duration::from_millis(50)).await;
+        assert!(
+            matches!(result, Err(BridgeError::Io(error)) if error.kind() == io::ErrorKind::TimedOut)
+        );
+        let state = cached.lock().await;
+        assert_eq!(state.retry.failure_count(), 1);
+        assert!(state.retry_at.is_some_and(|at| at > Instant::now()));
+        assert!(state.live.is_none());
+        drop(state);
         endpoint.close().await;
     }
 }
