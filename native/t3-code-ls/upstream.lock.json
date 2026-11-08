@@ -3,12 +3,12 @@
   "upstream": {
     "repository": "pingdotgg/t3code",
     "channel": "nightly",
-    "release_id": 438229340,
-    "tag": "v0.1.8-nightly.20261108.4367",
-    "published_at": "2026-11-08T12:24:26Z",
-    "release_url": "https://github.com/pingdotgg/t3code/releases/tag/v0.1.8-nightly.20261108.4367",
-    "commit": "6417151c093e54dbba0e6c824c69d03983793b9a",
-    "root_tree": "705a9e127d7b9811fa1ce42f99c4ebdd2412289e"
+    "release_id": 438446495,
+    "tag": "v0.1.8-nightly.20261108.4380",
+    "published_at": "2026-11-08T18:48:01Z",
+    "release_url": "https://github.com/pingdotgg/t3code/releases/tag/v0.1.8-nightly.20261108.4380",
+    "commit": "ade473018d32003658b7d38693e083ee2e314bd8",
+    "root_tree": "107c4f087f85dd137429e3d441ab770fd4b2a67b"
   },
   "qualification": {
     "status": "unqualified",
@@ -21,7 +21,7 @@
     "server": {
       "path_prefixes": ["apps/server/"],
       "entries": 1593,
-      "inventory_sha256": "439cc1a35397170fadb79e6775f8694d3f2a358b22b84ea190dd5e2b6bbd722e"
+      "inventory_sha256": "18be3653924fc7cb16eabf309d327ed96dce138c5be45c331eedf2d1b05e79ee"
     },
     "contracts": {
       "path_prefixes": ["packages/contracts/"],
@@ -70,7 +70,7 @@
         "packages/effect-codex-app-server/"
       ],
       "entries": 343,
-      "inventory_sha256": "6441e8e6e0d1581ea0e4bb7a17b40c6f9a6ba660b5f211022cc6d436bb92c381"
+      "inventory_sha256": "69758ba5c49c15c1979ff88cb9674170cf88aa164435bb869ae19c47d1bed42a"
     },
     "shared": {
       "path_prefixes": ["packages/shared/"],

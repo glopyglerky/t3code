@@ -140,7 +140,7 @@ jobs:
       - name: Verify against the official nightly runtime
         run: |
           curl --fail --location --retry 3 \
-            https://github.com/pingdotgg/t3code/releases/download/v0.1.8-nightly.20261108.4367/t3-0.1.8-nightly.20261108.4367-linux-x64.tar.gz \
+            https://github.com/pingdotgg/t3code/releases/download/v0.1.8-nightly.20261108.4380/t3-0.1.8-nightly.20261108.4380-linux-x64.tar.gz \
             --output "$RUNNER_TEMP/t3-nightly-linux-x64.tar.gz"
           python3 tools/verify-upstream.py \
             --archive "$RUNNER_TEMP/t3-nightly-linux-x64.tar.gz" \
