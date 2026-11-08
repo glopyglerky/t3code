@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build pinned Lust, execute the real core tests, and compare its permission and connection oracles.
+"""Build pinned Lust and execute the core and its upstream differential oracles.
 
 Usage: python3 tools/check-lust.py --source /absolute/path/to/lust-lang
 
@@ -67,8 +67,8 @@ def source_hashes() -> dict[str, str]:
     files = list((ROOT / "crates/core").rglob("*.rs"))
     files += [ROOT / "Cargo.toml", ROOT / "crates/core/Cargo.toml",
               ROOT / "tools/check-permissions.mjs", ROOT / "tools/check-connection.mjs",
-              ROOT / "tools/upstream-source.mjs", ROOT / "upstream.lock.json",
-              Path(__file__).resolve(), PIN_FILE]
+              ROOT / "tools/check-policy.mjs", ROOT / "tools/upstream-source.mjs",
+              ROOT / "upstream.lock.json", Path(__file__).resolve(), PIN_FILE]
     hashes = {str(path.relative_to(REPO)): sha256(path) for path in sorted(files)}
     upstream = json.loads((ROOT / "upstream.lock.json").read_text())["upstream"]
     commit = upstream["commit"]
@@ -78,7 +78,8 @@ def source_hashes() -> dict[str, str]:
     # Hash those same blobs, not possibly modified working-tree TypeScript.
     for path in ("packages/contracts/src/auth.ts",
                  "packages/client-runtime/src/connection/supervisor.ts",
-                 "packages/client-runtime/src/connection/wakeups.ts"):
+                 "packages/client-runtime/src/connection/wakeups.ts",
+                 "apps/server/src/orchestration-v2/CommandPolicy.ts"):
         blob = subprocess.run(["git", "--no-replace-objects", "-C", str(REPO),
                                "cat-file", "blob", f"{commit}:{path}"],
                               capture_output=True, check=True).stdout
@@ -118,7 +119,7 @@ def main() -> int:
     source = args.source.resolve()
     receipt = {"schema": 1, "status": "failed", "steps": [],
                "generated_at": datetime.now(timezone.utc).isoformat(),
-               "scope": "Lust core validation only; runtime and application parity excluded"}
+               "scope": "Lust core and policy executable; full application and UI parity excluded"}
     try:
         pin = json.loads(PIN_FILE.read_text())
         receipt["compiler"] = pin
@@ -170,8 +171,7 @@ def main() -> int:
                              receipt=receipt, name=f"test {path.name} with Lust")
                 receipt["unit_tests"].append(test_summary(result.stdout))
             # --bin selects each example by its Cargo target name in this
-            # revision (select_unit's name fallback). Both examples link the
-            # same unchanged library used by the production adapter.
+            # revision (select_unit's name fallback).
             for surface in ("permission", "connection"):
                 example = f"{surface}_matrix"
                 executable = work / f"{surface}-matrix-lust"
@@ -186,13 +186,24 @@ def main() -> int:
                              name=f"compare Lust {surface} output to pinned upstream TypeScript")
                 receipt[f"{surface}_parity"] = parity.stdout.strip()
                 print(parity.stdout, end="")
+            executable = work / "t3-code-ls-policy"
+            run([str(lust), "build", "crates/core/src/bin/t3-code-ls-policy.rs",
+                 "--manifest-path", "crates/core/Cargo.toml", "--bin", "t3-code-ls-policy",
+                 "-o", str(executable), "--json"], cwd=ROOT, env=env, receipt=receipt,
+                name="build provider-policy executable with Lust")
+            receipt["policy_binary_sha256"] = sha256(executable)
+            parity = run(["node", "tools/check-policy.mjs", str(executable)],
+                         cwd=ROOT, env=env, receipt=receipt,
+                         name="compare Lust provider policies to pinned upstream TypeScript")
+            receipt["policy_parity"] = parity.stdout.strip()
+            print(parity.stdout, end="")
 
         verify_source(source, pin["revision"])
         if source_hashes() != receipt["inputs"]:
             raise RuntimeError("Core or upstream oracle inputs changed during validation; run again")
         receipt["status"] = "passed"
         total = sum(item["passed"] for item in receipt["unit_tests"])
-        print(f"Lust check passed; {total} unit tests passed; permission and connection parity passed.")
+        print(f"Lust check passed; {total} unit tests passed; all three differential oracles passed.")
         return 0
     except (RuntimeError, subprocess.SubprocessError, OSError, ValueError, KeyError) as error:
         receipt["error"] = str(error)
