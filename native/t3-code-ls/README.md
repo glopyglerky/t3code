@@ -42,8 +42,14 @@ complete orchestrator, provider lifecycle, persistence, or UI.
 
 The guest-share decision port covers opening, redemption, expiry, submission,
 owner sending, dismissal, cancellation, attachment release, and pending-message
-and attachment limits. Expiration-string parsing remains the date adapter's
-responsibility; the port preserves its parsed result and the original string.
+and attachment limits. `T3_CODE_LS_GUEST_SHARE_EXECUTABLE` selects these decisions
+in the actual orchestrator, including attachment cleanup after archiving and
+removal of forged guest attribution. The native response distinguishes a real
+change from an unchanged result so the server preserves event and receipt
+semantics. Expiration-string parsing remains the date adapter's responsibility;
+the port preserves its parsed result and the original string. Guest HTTP
+authorization, signing, uploads, streaming, and Connect hosting remain upstream
+implementations.
 
 The Unix provider process runtime runs JSON-RPC over a child process's standard
 streams. It is compiled and executed by Lust, including its bounded JSON codec,
@@ -184,6 +190,32 @@ closes and reaps the owned process before returning. The verified artifact is
 Linux x86-64; other hosts need their own compilation and runtime qualification.
 This ports recovery decisions while the persistence engine remains TypeScript.
 
+## Use the Lust guest-share decisions
+
+After building the verified Linux components, select the guest-share executable
+in the server's environment. From the repository root:
+
+```sh
+T3CODE_DEV_SEED=0 \
+T3_CODE_LS_GUEST_SHARE_EXECUTABLE="$PWD/native/t3-code-ls/target/lust-bin/t3-code-ls-guest-share" \
+vp run dev
+```
+
+Only an unset selector retains the upstream decision functions. A failed selected
+executable rejects the operation. The adapter validates the complete result
+before the caller commits domain events or attachment-cleanup requests. Failed
+commands retain the existing rejected-receipt behavior. Accepted changes and
+cleanup requests commit through the existing event sink, and the effect worker
+deletes released files after that commit.
+
+The process receives only the data needed by the selected decision, with an
+empty environment and no shell. Requests and responses are limited to 128 MiB
+each and execution to 30 seconds. The native JSON parser limits nesting and value
+count, rejects duplicate keys, and requires Unicode scalar strings. This
+component preserves the existing guest link and provider behavior; links still
+use the existing Connect host and guest service. The verified executable is
+Linux x86-64, and is independent of the other native selectors.
+
 ## Connect two machines
 
 The bridge currently makes every backend connection from loopback. Upstream
@@ -253,6 +285,8 @@ node --disable-warning=ExperimentalWarning tools/check-connection.mjs
 node --disable-warning=ExperimentalWarning tools/check-policy.mjs
 node --disable-warning=ExperimentalWarning tools/check-dispatch.mjs
 node --disable-warning=ExperimentalWarning tools/check-guest-share.mjs
+cargo build --locked -p t3-code-ls-core --bin t3-code-ls-guest-share
+node --disable-warning=ExperimentalWarning tools/check-guest-share-runtime.mjs target/debug/t3-code-ls-guest-share
 cargo build --locked -p t3-code-ls-core --example provider_recovery_matrix
 node --disable-warning=ExperimentalWarning tools/check-provider-recovery.mjs target/debug/examples/provider_recovery_matrix
 cargo build --locked -p t3-code-ls-core --bin t3-code-ls-recovery
@@ -272,6 +306,8 @@ tools/server-test-runtime/node_modules/.bin/effect-tsgo tsrs --noEmit --project 
 node tools/check-provider-adapter.mjs "$PWD/target/lust-bin/t3-code-ls-provider"
 tools/server-test-runtime/node_modules/.bin/effect-tsgo tsrs --noEmit --project tools/recovery-tsconfig.json
 node tools/check-recovery-adapter.mjs "$PWD/target/lust-bin/t3-code-ls-recovery"
+tools/server-test-runtime/node_modules/.bin/effect-tsgo tsrs --noEmit --project tools/guest-share-tsconfig.json
+node tools/check-guest-share-adapter.mjs "$PWD/target/lust-bin/t3-code-ls-guest-share"
 ```
 
 The gate builds the pinned compiler and TinyCC, checks the unchanged core, runs
@@ -291,10 +327,11 @@ are service and call-site integration checks, not a complete orchestrator,
 application, provider-session, browser, or mobile qualification.
 
 After a successful run, `target/lust-bin` contains the standalone Linux x86-64
-`t3-code-ls-policy`, `t3-code-ls-provider`, and `t3-code-ls-recovery` executables.
+`t3-code-ls-policy`, `t3-code-ls-provider`, `t3-code-ls-recovery`, and
+`t3-code-ls-guest-share` executables.
 CI retains these verified components and their proof receipts as an artifact,
-including the dispatch and SQLite recovery receipts. They are development
-components, not desktop or mobile installers.
+including the dispatch, SQLite recovery, and guest-share integration receipts.
+They are development components, not desktop or mobile installers.
 
 The provider component accepts Codex app-server JSONL on standard input and
 returns responses, notifications, and approval requests on standard output:

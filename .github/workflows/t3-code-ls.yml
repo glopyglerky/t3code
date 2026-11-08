@@ -12,6 +12,9 @@ on:
       - apps/server/src/orchestration-v2/NativeCommandPolicy.ts
       - apps/server/src/orchestration-v2/NativeDispatchFacts.ts
       - apps/server/src/orchestration-v2/NativeDispatchPolicy.ts
+      - apps/server/src/orchestration-v2/NativeGuestShare.ts
+      - apps/server/src/orchestration-v2/GuestShareDecider.ts
+      - apps/server/src/guest/**
       - apps/server/src/orchestration-v2/Orchestrator.ts
       - apps/server/src/orchestration-v2/ProviderRecoveryPlanner.ts
       - apps/server/src/orchestration-v2/ProviderRuntimeRecoveryService.ts
@@ -22,6 +25,7 @@ on:
       - packages/effect-codex-app-server/**
       - packages/provider-core/src/server/subagentProjection.ts
       - packages/contracts/src/orchestrationV2.ts
+      - packages/contracts/src/guestShare.ts
       - patches/**
       - tsconfig.base.json
       - .github/workflows/t3-code-ls.yml
@@ -35,6 +39,9 @@ on:
       - apps/server/src/orchestration-v2/NativeCommandPolicy.ts
       - apps/server/src/orchestration-v2/NativeDispatchFacts.ts
       - apps/server/src/orchestration-v2/NativeDispatchPolicy.ts
+      - apps/server/src/orchestration-v2/NativeGuestShare.ts
+      - apps/server/src/orchestration-v2/GuestShareDecider.ts
+      - apps/server/src/guest/**
       - apps/server/src/orchestration-v2/Orchestrator.ts
       - apps/server/src/orchestration-v2/ProviderRecoveryPlanner.ts
       - apps/server/src/orchestration-v2/ProviderRuntimeRecoveryService.ts
@@ -45,6 +52,7 @@ on:
       - packages/effect-codex-app-server/**
       - packages/provider-core/src/server/subagentProjection.ts
       - packages/contracts/src/orchestrationV2.ts
+      - packages/contracts/src/guestShare.ts
       - patches/**
       - tsconfig.base.json
       - .github/workflows/t3-code-ls.yml
@@ -107,6 +115,10 @@ jobs:
         run: node --disable-warning=ExperimentalWarning tools/check-dispatch.mjs
       - name: Compare the guest share lifecycle with the actual upstream functions
         run: node --disable-warning=ExperimentalWarning tools/check-guest-share.mjs
+      - name: Verify the bounded guest-share executable
+        run: |
+          cargo build --locked -p t3-code-ls-core --bin t3-code-ls-guest-share
+          node --disable-warning=ExperimentalWarning tools/check-guest-share-runtime.mjs target/debug/t3-code-ls-guest-share
       - name: Compare recovery events with the actual upstream functions
         run: |
           cargo build --locked -p t3-code-ls-core --example provider_recovery_matrix
@@ -190,6 +202,9 @@ jobs:
       - name: Typecheck recovery and its production orchestration callers
         run: |
           tools/server-test-runtime/node_modules/.bin/effect-tsgo tsrs --noEmit --project tools/recovery-tsconfig.json
+      - name: Typecheck guest sharing and its production callers
+        run: |
+          tools/server-test-runtime/node_modules/.bin/effect-tsgo tsrs --noEmit --project tools/guest-share-tsconfig.json
       - name: Exercise the actual server-policy service with a Lust-built executable
         run: |
           mkdir -p target/lust
@@ -207,9 +222,13 @@ jobs:
         run: |
           node --disable-warning=ExperimentalWarning tools/check-recovery-adapter.mjs \
             "$PWD/target/lust-bin/t3-code-ls-recovery" "$PWD/target/lust/recovery-adapter-proof.json"
+      - name: Verify Lust guest sharing through the actual service and SQLite event sink
+        run: |
+          node --disable-warning=ExperimentalWarning tools/check-guest-share-adapter.mjs \
+            "$PWD/target/lust-bin/t3-code-ls-guest-share" "$PWD/target/lust/guest-share-adapter-proof.json"
       - name: Package the verified Linux components with their receipt
         run: |
-          tar -czf target/t3-code-ls-lust-linux-x64.tar.gz -C target lust-bin lust-proof.json lust/policy-adapter-proof.json lust/dispatch-proof.json lust/provider-adapter-proof.json lust/recovery-adapter-proof.json
+          tar -czf target/t3-code-ls-lust-linux-x64.tar.gz -C target lust-bin lust-proof.json lust/policy-adapter-proof.json lust/dispatch-proof.json lust/provider-adapter-proof.json lust/recovery-adapter-proof.json lust/guest-share-adapter-proof.json
           sha256sum target/t3-code-ls-lust-linux-x64.tar.gz > target/t3-code-ls-lust-linux-x64.tar.gz.sha256
       - name: Retain the verified Linux Lust executables
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -231,6 +250,7 @@ jobs:
             native/t3-code-ls/target/lust/dispatch-proof.json
             native/t3-code-ls/target/lust/provider-adapter-proof.json
             native/t3-code-ls/target/lust/recovery-adapter-proof.json
+            native/t3-code-ls/target/lust/guest-share-adapter-proof.json
             native/t3-code-ls/tools/server-test-runtime/package-lock.json
           if-no-files-found: ignore
           retention-days: 14

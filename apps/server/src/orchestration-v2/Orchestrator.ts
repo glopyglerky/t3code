@@ -125,14 +125,8 @@ import {
   isUndeliveredMailboxSteer,
 } from "./NotificationMailbox.ts";
 import { EventSinkV2 } from "./EventSink.ts";
-import {
-  decideGuestMessageSend,
-  guestShareAfterCancelledSend,
-  releasedGuestAttachmentIds,
-  withoutGuestAttribution,
-  decideGuestShareCommand,
-  type GuestShareCommand,
-} from "./GuestShareDecider.ts";
+import type { GuestShareCommand } from "./GuestShareDecider.ts";
+import * as NativeGuestShare from "./NativeGuestShare.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import { withCommandMetrics } from "../observability/Metrics.ts";
 import type { OrchestrationEffectRequestV2, PendingOrchestrationEffectV2 } from "./EffectOutbox.ts";
@@ -1091,6 +1085,7 @@ function lastDeliveredRunForProviderThread(
 const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(function* () {
   const checkpointService = yield* CheckpointServiceV2;
   const recoveryPlanner = yield* ProviderRecoveryPlanner.make();
+  const guestShareDecider = yield* NativeGuestShare.make();
   const commandPolicy = yield* CommandPolicyV2;
   const contextHandoffService = yield* ContextHandoffServiceV2;
   const eventSink = yield* EventSinkV2;
@@ -3128,25 +3123,26 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   );
 
   // Deleted after the share change commits: the files of waiting messages it dismissed or dropped.
-  const releaseGuestAttachments = (
-    command: { readonly commandId: CommandId; readonly threadId: ThreadId },
+  const releaseGuestAttachments = Effect.fn("Orchestrator.releaseGuestAttachments")(function* (
+    command: Extract<OrchestrationV2ServerCommand, { readonly threadId: ThreadId }>,
     before: OrchestrationV2AppThread["guestShare"],
     after: OrchestrationV2AppThread["guestShare"],
     effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
-  ) => {
-    const attachmentIds = releasedGuestAttachmentIds(before ?? null, after ?? null);
-    return attachmentIds.length === 0
-      ? Effect.void
-      : Ref.update(effects, (existing) => [
-          ...existing,
-          {
-            id: `effect:${command.commandId}:guest-attachment.cleanup`,
-            commandId: command.commandId,
-            threadId: command.threadId,
-            request: { type: "attachment.cleanup", attachmentIds: [...attachmentIds] },
-          } satisfies PendingOrchestrationEffectV2,
-        ]);
-  };
+  ) {
+    const attachmentIds = yield* guestShareDecider
+      .releasedGuestAttachmentIds(before ?? null, after ?? null)
+      .pipe(mapDispatchError(command));
+    if (attachmentIds.length === 0) return;
+    yield* Ref.update(effects, (existing) => [
+      ...existing,
+      {
+        id: `effect:${command.commandId}:guest-attachment.cleanup`,
+        commandId: command.commandId,
+        threadId: command.threadId,
+        request: { type: "attachment.cleanup", attachmentIds: [...attachmentIds] },
+      } satisfies PendingOrchestrationEffectV2,
+    ]);
+  });
 
   const dispatchGuestShare = Effect.fn("orchestrationV2.dispatch.guestShare")(function* (
     command: GuestShareCommand,
@@ -3165,11 +3161,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const decided =
       thread.deletedAt !== null
         ? Result.fail(`Thread ${command.threadId} is deleted.`)
-        : decideGuestShareCommand({
-            thread,
-            command,
-            now,
-          });
+        : yield* guestShareDecider
+            .decideGuestShareCommand({
+              thread,
+              command,
+              now,
+            })
+            .pipe(mapDispatchError(command));
     if (Result.isFailure(decided)) {
       return yield* new OrchestratorDispatchError({
         commandId: command.commandId,
@@ -3200,7 +3198,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
   ) {
     const now = yield* DateTime.now;
-    const decided = decideGuestMessageSend({ thread, guestMessageId, now });
+    const decided = yield* guestShareDecider
+      .decideGuestMessageSend({ thread, guestMessageId, now })
+      .pipe(mapDispatchError(command));
     if (Result.isFailure(decided)) {
       return yield* new OrchestratorDispatchError({
         commandId: command.commandId,
@@ -10135,7 +10135,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     }
     const guest = queuedMessage?.context?.guest;
     if (guest !== undefined) {
-      const thread = guestShareAfterCancelledSend(projection.thread, guest, now);
+      const thread = yield* guestShareDecider
+        .guestShareAfterCancelledSend(projection.thread, guest, now)
+        .pipe(mapDispatchError(command));
       if (thread !== projection.thread) {
         yield* emitEvent({
           type: "thread.guest-share-updated",
@@ -10219,13 +10221,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ...(queuedRun.rootNodeId === null ? {} : { nodeId: queuedRun.rootNodeId }),
       providerInstanceId: queuedRun.providerInstanceId,
       occurredAt: now,
-      payload: withoutGuestAttribution({
-        ...queuedMessage,
-        text: command.text,
-        ...editedAttachments,
-        ...(command.context ? { context: command.context } : {}),
-        updatedAt: now,
-      }),
+      payload: yield* guestShareDecider
+        .withoutGuestAttribution({
+          ...queuedMessage,
+          text: command.text,
+          ...editedAttachments,
+          ...(command.context ? { context: command.context } : {}),
+          updatedAt: now,
+        })
+        .pipe(mapDispatchError(command)),
     });
     if (queuedTurnItem !== undefined && queuedTurnItem.type === "user_message") {
       yield* emitEvent({
@@ -10235,13 +10239,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ...(queuedRun.rootNodeId === null ? {} : { nodeId: queuedRun.rootNodeId }),
         providerInstanceId: queuedRun.providerInstanceId,
         occurredAt: now,
-        payload: withoutGuestAttribution({
-          ...queuedTurnItem,
-          text: command.text,
-          ...editedAttachments,
-          ...(command.context ? { context: command.context } : {}),
-          updatedAt: now,
-        }),
+        payload: yield* guestShareDecider
+          .withoutGuestAttribution({
+            ...queuedTurnItem,
+            text: command.text,
+            ...editedAttachments,
+            ...(command.context ? { context: command.context } : {}),
+            updatedAt: now,
+          })
+          .pipe(mapDispatchError(command)),
       });
     }
   });
@@ -13540,7 +13546,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             : yield* emitGuestMessageSent(command, command.guestMessageId, thread, events);
         const dispatched =
           guestSend === undefined
-            ? withoutGuestAttribution(command)
+            ? yield* guestShareDecider
+                .withoutGuestAttribution(command)
+                .pipe(mapDispatchError(command))
             : {
                 ...command,
                 text: guestSend.text,

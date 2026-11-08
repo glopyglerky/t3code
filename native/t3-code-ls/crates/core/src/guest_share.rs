@@ -104,6 +104,7 @@ pub struct GuestMessage<AttachmentPayload> {
     pub status: MessageStatus,
     pub submitted_at: String,
     pub attachments: Option<Vec<Attachment<AttachmentPayload>>>,
+    pub retained: Option<AttachmentPayload>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -114,6 +115,7 @@ pub struct GuestShare<AttachmentPayload> {
     pub expires_at: Expiration,
     pub guest_name: Option<String>,
     pub messages: Vec<GuestMessage<AttachmentPayload>>,
+    pub retained: Option<AttachmentPayload>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -249,11 +251,17 @@ fn resolve_message<A: Clone>(
     Ok(next)
 }
 
-pub fn decide<A: Clone, T: Clone>(
+#[derive(Clone, Debug, PartialEq)]
+pub struct Transition<T> {
+    pub value: T,
+    pub changed: bool,
+}
+
+pub fn decide_transition<A: Clone, T: Clone>(
     thread: &Thread<A, T>,
     command: &Command<A>,
     now: Timestamp,
-) -> Result<Thread<A, T>, String> {
+) -> Result<Transition<Thread<A, T>>, String> {
     let share = thread.share();
     let mut next = thread.clone();
     let next_share = match command {
@@ -272,11 +280,15 @@ pub fn decide<A: Clone, T: Clone>(
                 expires_at: expires_at.clone(),
                 guest_name: None,
                 messages: Vec::new(),
+                retained: None,
             })
         }
         Command::Close => {
             if share.is_none() {
-                return Ok(next);
+                return Ok(Transition {
+                    value: next,
+                    changed: false,
+                });
             }
             None
         }
@@ -339,6 +351,7 @@ pub fn decide<A: Clone, T: Clone>(
                     .as_ref()
                     .filter(|files| !files.is_empty())
                     .cloned(),
+                retained: None,
             });
             value.messages = trim_resolved(value.messages);
             if next.settled_override == Some(SettlementOverride::Settled) {
@@ -356,7 +369,18 @@ pub fn decide<A: Clone, T: Clone>(
     };
     next.guest_share = Some(next_share);
     next.updated_at = now;
-    Ok(next)
+    Ok(Transition {
+        value: next,
+        changed: true,
+    })
+}
+
+pub fn decide<A: Clone, T: Clone>(
+    thread: &Thread<A, T>,
+    command: &Command<A>,
+    now: Timestamp,
+) -> Result<Thread<A, T>, String> {
+    decide_transition(thread, command, now).map(|transition| transition.value)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -404,16 +428,19 @@ pub fn send_message<A: Clone, T: Clone>(
     })
 }
 
-pub fn after_cancelled_send<A: Clone, T: Clone>(
+pub fn cancelled_send_transition<A: Clone, T: Clone>(
     thread: &Thread<A, T>,
     guest: &Attribution,
     now: Timestamp,
-) -> Thread<A, T> {
+) -> Transition<Thread<A, T>> {
     let Some(share) = thread
         .share()
         .filter(|share| guest.share_id.as_ref() == Some(&share.id))
     else {
-        return thread.clone();
+        return Transition {
+            value: thread.clone(),
+            changed: false,
+        };
     };
     if !share
         .messages
@@ -421,7 +448,10 @@ pub fn after_cancelled_send<A: Clone, T: Clone>(
         .find(|message| message.id == guest.message_id)
         .is_some_and(|message| message.status == MessageStatus::Sent)
     {
-        return thread.clone();
+        return Transition {
+            value: thread.clone(),
+            changed: false,
+        };
     }
     let mut next_share = share.clone();
     for message in &mut next_share.messages {
@@ -432,18 +462,29 @@ pub fn after_cancelled_send<A: Clone, T: Clone>(
     let mut next = thread.clone();
     next.guest_share = Some(Some(next_share));
     next.updated_at = now;
-    next
+    Transition {
+        value: next,
+        changed: true,
+    }
+}
+
+pub fn after_cancelled_send<A: Clone, T: Clone>(
+    thread: &Thread<A, T>,
+    guest: &Attribution,
+    now: Timestamp,
+) -> Thread<A, T> {
+    cancelled_send_transition(thread, guest, now).value
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MessageContext<Payload> {
-    pub guest: Option<Attribution>,
+pub struct MessageContext<Payload, Guest = Attribution> {
+    pub guest: Option<Guest>,
     pub payload: Payload,
 }
 
-pub fn without_guest_attribution<T: Clone>(
-    context: Option<&MessageContext<T>>,
-) -> Option<MessageContext<T>> {
+pub fn without_guest_attribution<T: Clone, G>(
+    context: Option<&MessageContext<T, G>>,
+) -> Option<MessageContext<T, G>> {
     context.map(|context| MessageContext {
         guest: None,
         payload: context.payload.clone(),
@@ -678,7 +719,7 @@ mod tests {
         let stripped = without_guest_attribution(Some(&context)).unwrap();
         assert_eq!(stripped.guest, None);
         assert_eq!(stripped.payload, context.payload);
-        assert!(without_guest_attribution::<String>(None).is_none());
+        assert!(without_guest_attribution::<String, Attribution>(None).is_none());
     }
 
     #[test]

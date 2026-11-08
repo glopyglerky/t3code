@@ -76,6 +76,8 @@ def source_hashes() -> dict[str, str]:
     files += [REPO / "apps/server/src/orchestration-v2/NativeDispatchFacts.ts",
               REPO / "apps/server/src/orchestration-v2/NativeDispatchPolicy.ts",
               REPO / "apps/server/src/orchestration-v2/NativeCommandPolicy.ts",
+              REPO / "apps/server/src/orchestration-v2/NativeGuestShare.ts",
+              REPO / "apps/server/src/orchestration-v2/GuestShareDecider.ts",
               REPO / "apps/server/src/orchestration-v2/CommandPolicy.ts",
               REPO / "apps/server/src/orchestration-v2/ProviderRecoveryPlanner.ts",
               REPO / "apps/server/src/orchestration-v2/ProviderRuntimeRecoveryService.ts",
@@ -217,7 +219,8 @@ def main() -> int:
             executables = []
             for component, verifier in (("policy", "check-policy.mjs"),
                                         ("provider", "check-provider.mjs"),
-                                        ("recovery", "check-recovery-runtime.mjs")):
+                                        ("recovery", "check-recovery-runtime.mjs"),
+                                        ("guest-share", "check-guest-share-runtime.mjs")):
                 name = f"t3-code-ls-{component}"
                 executable = work / name
                 run([str(lust), "build", f"crates/core/src/bin/{name}.rs",

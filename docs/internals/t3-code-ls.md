@@ -88,6 +88,24 @@ The SQLite integration gate exercises persistence, reopen/replay, idempotence,
 group rollback, and cancellation. This establishes recovery integration, while
 the event store, projections, and outbox still execute in TypeScript.
 
+`T3_CODE_LS_GUEST_SHARE_EXECUTABLE` selects the guest-share decision port at all
+orchestrator call sites, including queued edits and attachment release during
+ordinary thread mutations. Its response carries an explicit change marker.
+The adapter returns the original object for an unchanged result because the
+caller uses identity to suppress events. Comparing values would lose real
+updates that happen to produce equal data at the same timestamp. Unrelated
+thread, share, message, and attachment fields survive the native round trip.
+
+Guest-share domain refusals retain their exact upstream strings because the
+guest service maps those strings to public reasons. Native process and protocol
+failures remain separate errors. The event sink still records rejected command
+receipts, while domain state and attachment-cleanup effects commit only on
+success. The guest service retains upload rollback and the effect worker retains
+file deletion after commit. Expiration parsing uses the original `Date.parse`
+result, including invalid dates, while conversion of DateTime fields is explicit.
+This ports decisions; credentials, HTTP/SSE, file storage, and Connect hostname
+acquisition remain in the existing guest service.
+
 Source basis: [Lust's implementation contract](https://github.com/t3dotgg/lust-lang/blob/240e08d91d4aed0299639f6f11fd522912b248f9/README.md),
 [release target allowlist](https://github.com/t3dotgg/lust-lang/blob/240e08d91d4aed0299639f6f11fd522912b248f9/src/resolve/cfg.rs),
 and [C/zig release driver](https://github.com/t3dotgg/lust-lang/blob/240e08d91d4aed0299639f6f11fd522912b248f9/src/cc.rs).
