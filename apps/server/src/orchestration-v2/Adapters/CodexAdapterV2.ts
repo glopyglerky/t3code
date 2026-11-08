@@ -50,6 +50,7 @@ import {
 import { getModelSelectionStringOptionValue, modelSelectionsEqual } from "@t3tools/shared/model";
 import { appendGeneratedImageEmbeds } from "@t3tools/shared/generatedImageMarkdown";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
+import { selectCodexAppServerCommand } from "../../provider/CodexAppServerProcess.ts";
 import { mcpToolResultOutput } from "@t3tools/shared/toolOutput";
 import type {
   ChatAttachment,
@@ -1475,9 +1476,10 @@ export const makeCodexAppServerSpawnCommand = Effect.fn(
   readonly extendEnv?: boolean | undefined;
   readonly threadId?: string | undefined;
 }) {
+  const selectedCommand = yield* selectCodexAppServerCommand(input);
   const launch = yield* (yield* AgentScope).wrap({
-    command: input.command,
-    args: input.args,
+    command: selectedCommand.command,
+    args: selectedCommand.args,
     name: "codex",
     threadId: input.threadId,
     env: input.env,
@@ -1600,7 +1602,17 @@ export const layerAppServerClientFactory: Layer.Layer<
           ),
           env: environment,
           threadId: input.threadId,
-        }).pipe(Effect.provideService(AgentScope, agentScope));
+        }).pipe(
+          Effect.provideService(AgentScope, agentScope),
+          Effect.mapError(
+            (cause) =>
+              new ProviderAdapter.ProviderAdapterOpenSessionError({
+                driver: CODEX_PROVIDER,
+                providerSessionId: input.providerSessionId,
+                cause,
+              }),
+          ),
+        );
         const handle = yield* spawner.spawn(command).pipe(
           Effect.provideService(Scope.Scope, scope),
           Effect.mapError(

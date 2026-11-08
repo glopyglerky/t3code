@@ -175,25 +175,31 @@ pub struct Config {
     pub program: PathBuf,
     pub args: Vec<String>,
     pub cwd: PathBuf,
-    pub home: PathBuf,
+    pub home: Option<PathBuf>,
+    pub inherit_environment: bool,
+    pub inherit_stderr: bool,
+    /// Disable when the caller owns request correlation and cancellation.
+    pub track_requests: bool,
     pub environment: Vec<(String, String)>,
     pub limits: Limits,
 }
 
 impl Config {
     fn validate(&self) -> Result<(), Error> {
-        if !self.program.is_absolute()
+        if self.program.as_os_str().is_empty()
+            || (!self.inherit_environment && (!self.program.is_absolute() || self.home.is_none()))
             || !self.cwd.is_absolute()
-            || !self.home.is_absolute()
             || !self.cwd.is_dir()
-            || !self.home.is_dir()
+            || self
+                .home
+                .as_ref()
+                .is_some_and(|home| !home.is_absolute() || !home.is_dir())
             || self.limits.max_frame_bytes == 0
             || self.limits.max_frame_bytes > MAX_FRAME_BYTES
             || self.limits.max_pending_requests == 0
             || self.limits.max_pending_requests > 1024
             || self.limits.max_queued_messages == 0
             || self.limits.max_queued_messages > 1024
-            || self.limits.request_timeout.is_zero()
             || self.limits.request_timeout > Duration::from_secs(86400)
             || self.environment.iter().any(|(key, _)| {
                 key.is_empty() || key == "HOME" || key.contains('=') || key.contains('\0')
@@ -207,7 +213,7 @@ impl Config {
 
 struct Pending {
     id: RequestId,
-    deadline: Instant,
+    deadline: Option<Instant>,
 }
 
 struct State {
@@ -224,6 +230,7 @@ struct Shared {
     ready: Condvar,
     stderr: Mutex<Vec<u8>>,
     limits: Limits,
+    track_requests: bool,
 }
 
 impl Shared {
@@ -263,6 +270,9 @@ impl Shared {
         if let Some(error) = state.terminal {
             return Err(error);
         }
+        if !self.track_requests {
+            return self.enqueue(&mut state, Event::Message(message));
+        }
         match &message.kind {
             MessageKind::Response(id) => {
                 let Some(index) = state
@@ -274,7 +284,10 @@ impl Shared {
                     return Ok(());
                 };
                 let pending = state.pending.remove(index);
-                if pending.deadline <= Instant::now() {
+                if pending
+                    .deadline
+                    .is_some_and(|deadline| deadline <= Instant::now())
+                {
                     return self.enqueue(
                         &mut state,
                         Event::RequestFailed {
@@ -334,15 +347,27 @@ impl ProviderProcess {
         command
             .args(&config.args)
             .current_dir(&config.cwd)
-            .env_clear()
-            .env("HOME", &config.home)
-            .env("CODEX_HOME", config.home.join(".codex"))
-            .env("XDG_CONFIG_HOME", config.home.join(".config"))
-            .env("XDG_CACHE_HOME", config.home.join(".cache"))
-            .env("XDG_STATE_HOME", config.home.join(".local/state"))
             .stdin(Stdio::from(OwnedFd::from(child_input)))
             .stdout(Stdio::from(OwnedFd::from(child_output)))
-            .stderr(Stdio::from(OwnedFd::from(child_errors)));
+            .stderr(if config.inherit_stderr {
+                Stdio::inherit()
+            } else {
+                Stdio::from(OwnedFd::from(child_errors))
+            });
+        if config.inherit_environment {
+            if let Some(home) = &config.home {
+                command.env("HOME", home);
+            }
+        } else {
+            let home = config.home.as_ref().ok_or(Error::InvalidConfig)?;
+            command
+                .env_clear()
+                .env("HOME", home)
+                .env("CODEX_HOME", home.join(".codex"))
+                .env("XDG_CONFIG_HOME", home.join(".config"))
+                .env("XDG_CACHE_HOME", home.join(".cache"))
+                .env("XDG_STATE_HOME", home.join(".local/state"));
+        }
         for (key, value) in &config.environment {
             command.env(key, value);
         }
@@ -361,6 +386,7 @@ impl ProviderProcess {
             ready: Condvar::new(),
             stderr: Mutex::new(Vec::new()),
             limits: config.limits,
+            track_requests: config.track_requests,
         });
         let (sender, receiver) = mpsc::sync_channel::<String>(shared.limits.max_queued_messages);
         let mut process = Self {
@@ -419,32 +445,36 @@ impl ProviderProcess {
                 })
                 .map_err(|_| Error::Spawn)?,
         );
-        process.workers.push(
-            thread::Builder::new()
-                .name("t3ls-provider-stderr".to_owned())
-                .spawn(move || {
-                    let mut buffer = [0u8; 4096];
-                    loop {
-                        match errors.read(&mut buffer) {
-                            Ok(0) => break,
-                            Ok(count) => {
-                                let mut tail = shared
-                                    .stderr
-                                    .lock()
-                                    .unwrap_or_else(|error| error.into_inner());
-                                tail.extend_from_slice(&buffer[..count]);
-                                if tail.len() > STDERR_TAIL_BYTES {
-                                    let remove = tail.len() - STDERR_TAIL_BYTES;
-                                    tail.drain(..remove);
+        if !config.inherit_stderr {
+            process.workers.push(
+                thread::Builder::new()
+                    .name("t3ls-provider-stderr".to_owned())
+                    .spawn(move || {
+                        let mut buffer = [0u8; 4096];
+                        loop {
+                            match errors.read(&mut buffer) {
+                                Ok(0) => break,
+                                Ok(count) => {
+                                    let mut tail = shared
+                                        .stderr
+                                        .lock()
+                                        .unwrap_or_else(|error| error.into_inner());
+                                    tail.extend_from_slice(&buffer[..count]);
+                                    if tail.len() > STDERR_TAIL_BYTES {
+                                        let remove = tail.len() - STDERR_TAIL_BYTES;
+                                        tail.drain(..remove);
+                                    }
                                 }
+                                Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                                    continue;
+                                }
+                                Err(_) => break,
                             }
-                            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                            Err(_) => break,
                         }
-                    }
-                })
-                .map_err(|_| Error::Spawn)?,
-        );
+                    })
+                    .map_err(|_| Error::Spawn)?,
+            );
+        }
         Ok(process)
     }
 
@@ -477,37 +507,41 @@ impl ProviderProcess {
             return Err(error);
         }
         let sender = self.outgoing.as_ref().ok_or(Error::InputClosed)?;
-        match &message.kind {
-            MessageKind::Request(id) => {
-                if state
-                    .pending
+        if self.shared.track_requests
+            && let MessageKind::Request(id) = &message.kind
+        {
+            if state
+                .pending
+                .iter()
+                .any(|pending| pending.id.same_client_id(id))
+                || state
+                    .retired
                     .iter()
-                    .any(|pending| pending.id.same_client_id(id))
-                    || state
-                        .retired
-                        .iter()
-                        .any(|retired| retired.same_client_id(id))
-                {
-                    return Err(Error::DuplicateId);
-                }
-                if state.pending.len() >= self.shared.limits.max_pending_requests {
-                    return Err(Error::TooManyRequests);
-                }
+                    .any(|retired| retired.same_client_id(id))
+            {
+                return Err(Error::DuplicateId);
             }
-            MessageKind::Response(_) => {}
-            MessageKind::Notification => {}
+            if state.pending.len() >= self.shared.limits.max_pending_requests {
+                return Err(Error::TooManyRequests);
+            }
         }
         sender.try_send(encoded).map_err(|error| match error {
             TrySendError::Full(_) => Error::QueueFull,
             TrySendError::Disconnected(_) => Error::InputClosed,
         })?;
-        match message.kind {
-            MessageKind::Request(id) => state.pending.push(Pending {
-                id,
-                deadline: Instant::now() + self.shared.limits.request_timeout,
-            }),
-            MessageKind::Response(id) => state.server_requests.retain(|request| *request != id),
-            MessageKind::Notification => {}
+        if self.shared.track_requests {
+            match message.kind {
+                MessageKind::Request(id) => state.pending.push(Pending {
+                    id,
+                    deadline: if self.shared.limits.request_timeout.is_zero() {
+                        None
+                    } else {
+                        Some(Instant::now() + self.shared.limits.request_timeout)
+                    },
+                }),
+                MessageKind::Response(id) => state.server_requests.retain(|request| *request != id),
+                MessageKind::Notification => {}
+            }
         }
         self.shared.ready.notify_all();
         Ok(())
@@ -596,7 +630,7 @@ impl ProviderProcess {
                 && let Some(index) = state
                     .pending
                     .iter()
-                    .position(|pending| pending.deadline <= now)
+                    .position(|pending| pending.deadline.is_some_and(|deadline| deadline <= now))
             {
                 if state.retired.len() >= self.shared.limits.max_pending_requests {
                     state.terminal = Some(Error::TooManyRequests);
@@ -630,7 +664,7 @@ impl ProviderProcess {
             let next = state
                 .pending
                 .iter()
-                .map(|pending| pending.deadline)
+                .filter_map(|pending| pending.deadline)
                 .min()
                 .unwrap_or(deadline);
             let wait = next.min(deadline).saturating_duration_since(now);

@@ -49,9 +49,18 @@ The Unix provider process runtime runs JSON-RPC over a child process's standard
 streams. It is compiled and executed by Lust, including its bounded JSON codec,
 request tracking, notifications, approval requests, and owned-child cleanup.
 Controlled subprocess fixtures exercise its behavior without paid provider turns
-or personal credentials. This is the raw provider protocol layer; the generated
-Codex payload schemas, other provider adapters, orchestration persistence, and
-application UI still need integration.
+or personal credentials. `T3_CODE_LS_PROVIDER_EXECUTABLE` selects it for the actual
+Codex session factory and the provider, account, and skills probes. Generated
+Codex payload schemas, provider-to-event translation, orchestration persistence,
+and application UI retain their upstream implementations. Codex's separate
+`exec` text-generation path and the other provider adapters are not ported by
+this selection.
+
+The recovery planner ports orphaned native subagent and runless root-turn
+completion. Its oracle compares complete event batches, allocator failures, and
+replayed recovery cases against the immutable upstream functions using the real
+Effect runtime. These functions plan events; production recovery-service wiring
+and durable event commits remain separate work.
 
 The native transport carries a fixed loopback service's HTTP, WebSocket, and
 binary traffic over authenticated Iroh connections. Each host explicitly admits
@@ -110,6 +119,39 @@ authentication and permission checks are unchanged. Each policy call uses a
 separate process; this boundary is not a qualified performance improvement or a
 full server port. The CI executable artifact is Linux x86-64 only and is not a
 desktop or mobile application package.
+
+## Use the Lust process runtime for Codex sessions
+
+After building the verified Linux components, select the provider executable in
+the server's environment. From the repository root:
+
+```sh
+T3CODE_DEV_SEED=0 \
+T3_CODE_LS_PROVIDER_EXECUTABLE="$PWD/native/t3-code-ls/target/lust-bin/t3-code-ls-provider" \
+vp run dev
+```
+
+This selection applies to both live Codex sessions and discovery probes. It is
+independent of `T3_CODE_LS_POLICY_EXECUTABLE`; set both to use both components.
+Only an unset selector preserves the original launcher. Invalid configuration
+or a failing selected executable fails the operation, including the diagnostic
+version probe. Provider-specific environment settings cannot select a different
+runtime executable.
+
+The adapter preserves the selected provider environment, working directory,
+launch arguments, and separate `HOME` and `CODEX_HOME` values. Credentials remain
+in the environment rather than command arguments. Existing agent process scopes
+wrap the Lust launcher and its child. T3's Effect client owns request correlation,
+request cancellation, and deadlines; parent-protocol mode forwards provider frames
+without retaining a second pending-request table. Provider exit codes and stderr
+continue through T3's existing process-error handling. Invalid native frames and
+exceeded native queue or frame limits fail the connection.
+
+The integration checks run the actual session factory, probe, generated codecs,
+and Node process service with controlled provider peers. They cover request and
+approval exchanges, notifications, cancelled requests on a continuing session,
+terminal errors, and scope cleanup. They do not establish a complete server,
+provider conversation, or client application port.
 
 ## Connect two machines
 
@@ -172,6 +214,7 @@ on another computer cannot make the unmodified store app use Iroh.
 
 ```sh
 cd native/t3-code-ls
+node tools/install-server-tests.mjs
 cargo test --locked --all-targets
 cargo clippy --locked --all-targets -- -D warnings
 node --disable-warning=ExperimentalWarning tools/check-permissions.mjs
@@ -179,6 +222,8 @@ node --disable-warning=ExperimentalWarning tools/check-connection.mjs
 node --disable-warning=ExperimentalWarning tools/check-policy.mjs
 node --disable-warning=ExperimentalWarning tools/check-dispatch.mjs
 node --disable-warning=ExperimentalWarning tools/check-guest-share.mjs
+cargo build --locked -p t3-code-ls-core --example provider_recovery_matrix
+node --disable-warning=ExperimentalWarning tools/check-provider-recovery.mjs target/debug/examples/provider_recovery_matrix
 node tools/check-json.mjs
 cargo build --locked -p t3-code-ls-core --bin t3-code-ls-provider
 node tools/check-provider.mjs target/debug/t3-code-ls-provider
@@ -190,6 +235,8 @@ in [lust-toolchain.json](./lust-toolchain.json), then run:
 
 ```sh
 python3 tools/check-lust.py --source /absolute/path/to/lust-lang --artifacts target/lust-bin
+tools/server-test-runtime/node_modules/.bin/effect-tsgo tsrs --noEmit --project tools/provider-tsconfig.json
+node tools/check-provider-adapter.mjs "$PWD/target/lust-bin/t3-code-ls-provider"
 ```
 
 The gate builds the pinned compiler and TinyCC, checks the unchanged core, runs
@@ -230,6 +277,14 @@ entries deliberately when a provider needs them. The caller sends `initialize`
 and `initialized`, and must handle approval requests; this executable does not
 automatically approve tools or issue paid turns. `--help` lists frame, queue,
 pending-request, and request-timeout limits.
+
+The server integration explicitly uses `--inherit-env --inherit-stderr
+--parent-protocol --request-timeout-ms 0`. These options preserve the environment
+already selected by the server, forward stderr to its existing diagnostic
+consumer, and delegate request bookkeeping and deadlines to the parent client.
+The standalone CLI keeps isolated environment and local request tracking by
+default. `--home` is optional in inherited-environment mode and overrides only
+`HOME` when supplied.
 
 The portable core can also be checked with Cargo for `aarch64-apple-ios`,
 `aarch64-apple-ios-sim`, `aarch64-linux-android`, `x86_64-pc-windows-gnu`, and

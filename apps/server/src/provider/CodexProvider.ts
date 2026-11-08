@@ -37,6 +37,10 @@ import {
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import { codexAppServerArgs, resolveCodexLaunchArgs } from "./codexLaunchArgs.ts";
 import {
+  CodexAppServerProcessConfigurationError,
+  selectCodexAppServerCommand,
+} from "./CodexAppServerProcess.ts";
+import {
   buildServerProvider,
   COMPACT_SLASH_COMMAND,
   DEFAULT_TIMEOUT_MS,
@@ -55,6 +59,9 @@ import {
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import packageJson from "../../package.json" with { type: "json" };
 const isCodexAppServerSpawnError = Schema.is(CodexErrors.CodexAppServerSpawnError);
+const isCodexAppServerProcessConfigurationError = Schema.is(
+  CodexAppServerProcessConfigurationError,
+);
 const RATE_LIMITS_PROBE_TIMEOUT_MS = 3_000;
 
 type CodexRateLimitsProbe =
@@ -492,11 +499,15 @@ export const withCodexAppServerClient = Effect.fn("withCodexAppServerClient")(fu
 }) {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const environment = yield* codexProcessEnvironment(input);
-  const spawnCommand = yield* resolveSpawnCommand(
-    input.binaryPath,
-    codexAppServerArgs(input.launchArgs),
-    { env: environment, extendEnv: true },
-  );
+  const selectedCommand = yield* selectCodexAppServerCommand({
+    command: input.binaryPath,
+    args: codexAppServerArgs(input.launchArgs),
+    cwd: input.cwd,
+  });
+  const spawnCommand = yield* resolveSpawnCommand(selectedCommand.command, selectedCommand.args, {
+    env: environment,
+    extendEnv: true,
+  });
   const child = yield* spawner
     .spawn(
       ChildProcess.make(spawnCommand.command, spawnCommand.args, {
@@ -743,7 +754,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     readonly skipNativeUsage?: boolean;
   }) => Effect.Effect<
     CodexAppServerProviderSnapshot,
-    CodexErrors.CodexAppServerError,
+    CodexErrors.CodexAppServerError | CodexAppServerProcessConfigurationError,
     ChildProcessSpawner.ChildProcessSpawner | FileSystem.FileSystem | Path.Path | Scope.Scope
   > = probeCodexAppServerProvider,
   environment?: NodeJS.ProcessEnv,
@@ -790,15 +801,19 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
 
   if (Result.isFailure(probeResult)) {
     const error = probeResult.failure;
-    const installed = !isCodexAppServerSpawnError(error);
-    const version = installed
-      ? yield* probeCodexCliVersion({
-          binaryPath: codexSettings.binaryPath,
-          homePath: codexSettings.homePath,
-          cwd: process.cwd(),
-          environment: resolvedEnvironment,
-        })
-      : null;
+    const configurationFailed = isCodexAppServerProcessConfigurationError(error);
+    const installed = !isCodexAppServerSpawnError(error) && !configurationFailed;
+    const nativeRuntimeSelected =
+      (yield* HostProcess.Environment).T3_CODE_LS_PROVIDER_EXECUTABLE !== undefined;
+    const version =
+      installed && !nativeRuntimeSelected
+        ? yield* probeCodexCliVersion({
+            binaryPath: codexSettings.binaryPath,
+            homePath: codexSettings.homePath,
+            cwd: process.cwd(),
+            environment: resolvedEnvironment,
+          })
+        : null;
     return buildServerProvider({
       presentation: CODEX_PRESENTATION,
       enabled: codexSettings.enabled,
@@ -810,12 +825,14 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
         version,
         status: "error",
         auth: { status: "unknown" },
-        message: installed
-          ? `Codex app-server provider probe failed: ${error.message}.`
-          : `Could not start Codex CLI (\`${codexSettings.binaryPath}\`). Check Settings → Providers → Codex → Binary path on the server.` +
-            (codexSettings.binaryPath === "codex"
-              ? " Installing ChatGPT or Codex desktop may not add codex to PATH."
-              : " Make sure the configured executable exists and can be run."),
+        message: configurationFailed
+          ? error.message
+          : installed
+            ? `Codex app-server provider probe failed: ${error.message}.`
+            : `Could not start Codex CLI (\`${codexSettings.binaryPath}\`). Check Settings → Providers → Codex → Binary path on the server.` +
+              (codexSettings.binaryPath === "codex"
+                ? " Installing ChatGPT or Codex desktop may not add codex to PATH."
+                : " Make sure the configured executable exists and can be run."),
       },
     });
   }

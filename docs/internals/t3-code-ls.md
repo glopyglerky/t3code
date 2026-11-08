@@ -51,6 +51,30 @@ rejected. Finite numeric IDs use ECMAScript formatting through Lust's pinned
 replace Codex's generated method schemas or T3's provider-to-orchestration event
 mapping.
 
+`T3_CODE_LS_PROVIDER_EXECUTABLE` selects the Lust process runtime in both Codex
+launch paths: the provider/account/skills probes and the live session factory.
+Selection comes from the server environment, before the existing agent process
+scope is applied. Provider-specific environment values cannot replace the
+selected executable. The wrapper inherits the environment already chosen by the
+server, preserving account overlays and an absent `HOME` without exposing values
+in command arguments. The separate `codex exec` text-generation path is unchanged.
+
+The parent Effect client still owns generated payload schemas, request
+correlation, cancellation, and deadlines. Parent-protocol mode therefore keeps
+no native pending-request or approval table. Effect removes cancelled requests
+without sending a wire cancellation; retaining a second table would eventually
+exhaust its limit on a healthy shared session. Native frame and queue limits
+remain, provider exit codes and stderr reach the original diagnostics, and
+native framing failures terminate the connection. Invalid configured selection
+also disables the original executable's diagnostic version fallback.
+
+Recovery event planning is a separate Lust port of the two upstream completion
+functions in `subagentProjection.ts`. It preserves event order and allocation
+failures while retaining payload fields outside its model. The caller still
+owns authoritative event storage and transactional commit. A matching planned
+batch does not establish durable recovery or wire this planner into the current
+recovery service.
+
 Source basis: [Lust's implementation contract](https://github.com/t3dotgg/lust-lang/blob/240e08d91d4aed0299639f6f11fd522912b248f9/README.md),
 [release target allowlist](https://github.com/t3dotgg/lust-lang/blob/240e08d91d4aed0299639f6f11fd522912b248f9/src/resolve/cfg.rs),
 and [C/zig release driver](https://github.com/t3dotgg/lust-lang/blob/240e08d91d4aed0299639f6f11fd522912b248f9/src/cc.rs).

@@ -1,6 +1,7 @@
 #[cfg(unix)]
 mod app {
     use std::io::{self, BufReader, Write};
+    use std::os::unix::process::ExitStatusExt;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -12,7 +13,7 @@ mod app {
         is_blank_frame, read_frame,
     };
 
-    const USAGE: &str = "Usage: t3-code-ls-provider --program /absolute/provider --cwd /workspace --home /isolated/home [--env KEY=VALUE] [--max-frame-bytes N] [--max-pending N] [--queue-size N] [--request-timeout-ms N] -- [provider arguments]\n\nReads and writes Codex app-server JSONL on stdin/stdout. Start Codex with provider argument app-server. The child receives only the explicit environment and the selected home directory.";
+    const USAGE: &str = "Usage: t3-code-ls-provider --program PROVIDER --cwd /workspace (--home /isolated/home | --inherit-env) [--inherit-stderr] [--parent-protocol] [--env KEY=VALUE] [--max-frame-bytes N] [--max-pending N] [--queue-size N] [--request-timeout-ms N] -- [provider arguments]\n\nReads and writes Codex app-server JSONL on stdin/stdout. Start Codex with provider argument app-server. By default the program must be absolute and the child receives only the explicit environment and home defaults. --inherit-env preserves the launcher's environment exactly and permits PATH or relative program names; an optional --home overrides HOME only. --inherit-stderr passes the provider's stderr directly to the caller. A request timeout of 0 leaves deadlines to the caller. --parent-protocol delegates pending-request failures and deadlines to the caller, forwards only provider messages, and preserves the provider's exit status.";
 
     enum Input {
         Frame(String),
@@ -20,7 +21,26 @@ mod app {
         Failed(Error),
     }
 
-    fn config() -> Result<Option<Config>, String> {
+    struct Options {
+        process: Config,
+        parent_protocol: bool,
+    }
+
+    fn exit_code(status: std::process::ExitStatus) -> i32 {
+        status
+            .code()
+            .or_else(|| status.signal().map(|signal| 128 + signal))
+            .unwrap_or(2)
+    }
+
+    fn process_io_failure(error: Error) -> bool {
+        matches!(
+            error,
+            Error::Read | Error::Write | Error::InputClosed | Error::OutputClosed
+        )
+    }
+
+    fn config() -> Result<Option<Options>, String> {
         let args: Vec<String> = std::env::args().skip(1).collect();
         if args.len() == 1 && args[0] == "--help" {
             println!("{USAGE}");
@@ -29,11 +49,30 @@ mod app {
         let mut program = None;
         let mut cwd = None;
         let mut home = None;
+        let mut inherit_environment = false;
+        let mut inherit_stderr = false;
+        let mut parent_protocol = false;
+        let mut request_timeout = None;
         let mut environment = Vec::new();
         let mut limits = Limits::default();
         let mut index = 0;
         while index < args.len() && args[index] != "--" {
             let key = &args[index];
+            if key == "--inherit-env" {
+                inherit_environment = true;
+                index += 1;
+                continue;
+            }
+            if key == "--inherit-stderr" {
+                inherit_stderr = true;
+                index += 1;
+                continue;
+            }
+            if key == "--parent-protocol" {
+                parent_protocol = true;
+                index += 1;
+                continue;
+            }
             let value = args.get(index + 1).ok_or(USAGE.to_owned())?;
             match key.as_str() {
                 "--program" => program = Some(PathBuf::from(value)),
@@ -54,9 +93,9 @@ mod app {
                     limits.max_queued_messages = value.parse().map_err(|_| "invalid queue limit")?
                 }
                 "--request-timeout-ms" => {
-                    limits.request_timeout = Duration::from_millis(
+                    request_timeout = Some(Duration::from_millis(
                         value.parse().map_err(|_| "invalid request timeout")?,
-                    );
+                    ));
                 }
                 _ => return Err(USAGE.to_owned()),
             }
@@ -67,20 +106,36 @@ mod app {
         } else {
             Vec::new()
         };
-        Ok(Some(Config {
-            program: program.ok_or(USAGE.to_owned())?,
-            cwd: cwd.ok_or(USAGE.to_owned())?,
-            home: home.ok_or(USAGE.to_owned())?,
-            args,
-            environment,
-            limits,
+        if parent_protocol {
+            if request_timeout.is_some_and(|timeout| !timeout.is_zero()) {
+                return Err("--parent-protocol cannot use a local request deadline".to_owned());
+            }
+            limits.request_timeout = Duration::ZERO;
+        } else if let Some(timeout) = request_timeout {
+            limits.request_timeout = timeout;
+        }
+        Ok(Some(Options {
+            process: Config {
+                program: program.ok_or(USAGE.to_owned())?,
+                cwd: cwd.ok_or(USAGE.to_owned())?,
+                home,
+                inherit_environment,
+                inherit_stderr,
+                track_requests: !parent_protocol,
+                args,
+                environment,
+                limits,
+            },
+            parent_protocol,
         }))
     }
 
     pub fn run() -> Result<i32, String> {
-        let Some(config) = config()? else {
+        let Some(options) = config()? else {
             return Ok(0);
         };
+        let config = options.process;
+        let parent_protocol = options.parent_protocol;
         let interrupted = Arc::new(AtomicUsize::new(0));
         for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
             signal_hook::flag::register_usize(signal, interrupted.clone(), signal as usize)
@@ -152,9 +207,11 @@ mod app {
                     Ok(Input::Frame(frame)) => {
                         let message =
                             decode_frame(&frame, frame_limit).map_err(|error| error.to_string())?;
-                        process
-                            .send(message.value)
-                            .map_err(|error| error.to_string())?;
+                        if let Err(error) = process.send(message.value)
+                            && (!parent_protocol || !process_io_failure(error))
+                        {
+                            return Err(error.to_string());
+                        }
                     }
                     Ok(Input::Closed) => {
                         input_closed = true;
@@ -186,6 +243,9 @@ mod app {
                     let value = match event {
                         Event::Message(message) => message.value,
                         Event::RequestFailed { id, error } => {
+                            if parent_protocol {
+                                continue;
+                            }
                             session_failed = true;
                             error_response(&id, -32000, &error.to_string())
                         }
@@ -207,6 +267,12 @@ mod app {
                     output_worker
                         .join()
                         .map_err(|_| "client output writer failed")?;
+                    if let Some(status) = status {
+                        let code = exit_code(status);
+                        if code != 0 || parent_protocol {
+                            return Ok(code);
+                        }
+                    }
                     return if !incomplete
                         && !session_failed
                         && status.is_some_and(|status| status.success())
@@ -217,6 +283,13 @@ mod app {
                     };
                 }
                 Err(error) => {
+                    let status = if parent_protocol && process_io_failure(error) {
+                        process
+                            .wait_for_exit(Duration::from_millis(250))
+                            .map_err(|failure| failure.to_string())?
+                    } else {
+                        None
+                    };
                     process.shutdown().map_err(|failure| failure.to_string())?;
                     drop(output_sender);
                     if output_done.recv_timeout(Duration::from_secs(2)) != Ok(true) {
@@ -225,6 +298,9 @@ mod app {
                     output_worker
                         .join()
                         .map_err(|_| "client output writer failed")?;
+                    if let Some(status) = status {
+                        return Ok(exit_code(status));
+                    }
                     return Err(error.to_string());
                 }
             }

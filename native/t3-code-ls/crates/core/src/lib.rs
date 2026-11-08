@@ -9,3 +9,4 @@ pub mod peers;
 pub mod permissions;
 #[cfg(unix)]
 pub mod provider_process;
+pub mod provider_recovery;

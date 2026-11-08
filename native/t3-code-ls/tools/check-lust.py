@@ -68,6 +68,9 @@ def source_hashes() -> dict[str, str]:
     files += list((ROOT / "tools").glob("check-*.mjs"))
     files += [ROOT / "Cargo.toml", ROOT / "Cargo.lock", ROOT / "crates/core/Cargo.toml",
               ROOT / "tools/upstream-source.mjs",
+              ROOT / "tools/install-server-tests.mjs",
+              ROOT / "tools/server-test-runtime/package.json",
+              ROOT / "tools/server-test-runtime/package-lock.json",
               ROOT / "upstream.lock.json", Path(__file__).resolve(), PIN_FILE]
     files += [REPO / "apps/server/src/orchestration-v2/NativeDispatchFacts.ts",
               REPO / "apps/server/src/orchestration-v2/NativeDispatchPolicy.ts",
@@ -87,6 +90,8 @@ def source_hashes() -> dict[str, str]:
                  "apps/server/src/orchestration-v2/CommandPolicy.ts",
                  "apps/server/src/orchestration-v2/GuestShareDecider.ts",
                  "packages/contracts/src/guestShare.ts",
+                 "packages/provider-core/src/server/subagentProjection.ts",
+                 "packages/contracts/src/orchestrationV2.ts",
                  "packages/effect-codex-app-server/src/protocol.ts",
                  "packages/effect-codex-app-server/test/fixtures/codex-app-server-mock-peer.ts"):
         blob = subprocess.run(["git", "--no-replace-objects", "-C", str(REPO),
@@ -139,6 +144,7 @@ def main() -> int:
             raise RuntimeError("This proof is qualified for Linux x86_64; other hosts require review")
         verify_source(source, pin["revision"])
         env = {key: value for key, value in os.environ.items() if not key.startswith("LUST_")}
+        env["CARGO_INCREMENTAL"] = "0"
         for command in ("cargo", "node", "bash"):
             if not shutil.which(command, path=env.get("PATH")):
                 raise RuntimeError(f"{command} is required on PATH")
@@ -191,6 +197,7 @@ def main() -> int:
                     ("permission", "permission_matrix", "check-permissions.mjs"),
                     ("connection", "connection_matrix", "check-connection.mjs"),
                     ("guest_share", "guest_share_matrix", "check-guest-share.mjs"),
+                    ("provider_recovery", "provider_recovery_matrix", "check-provider-recovery.mjs"),
                     ("json", "json_round_trip", "check-json.mjs")):
                 executable = work / f"{surface}-matrix-lust"
                 run([str(lust), "build", f"crates/core/examples/{example}.rs",
