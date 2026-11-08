@@ -78,7 +78,10 @@ impl AdmissionFile {
                 ));
             }
             let peer = candidate.parse::<EndpointId>().map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidData, "invalid endpoint ID in peer file")
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid endpoint ID in peer file",
+                )
             })?;
             if peers.contains(&peer) {
                 return Err(io::Error::new(

@@ -3,8 +3,7 @@ use std::{net::SocketAddr, path::PathBuf, time::Duration};
 use clap::{Args, Parser, Subcommand};
 use t3_code_ls_transport::{
     Admission, AdmissionFile, EndpointAddr, EndpointId, Forwarder, Host, HostConfig, Limits,
-    Network, RelayUrl,
-    load_or_create_identity,
+    Network, RelayUrl, load_or_create_identity,
 };
 
 #[derive(Parser)]

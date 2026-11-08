@@ -64,7 +64,7 @@ fn malformed_or_missing_file_cannot_partially_change_grants() {
 #[cfg(unix)]
 #[test]
 fn symlinks_and_group_writable_allowlists_are_rejected() {
-    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::os::unix::fs::{PermissionsExt, symlink};
 
     let temporary = tempfile::tempdir().unwrap();
     let path = temporary.path().join("allowlist");
