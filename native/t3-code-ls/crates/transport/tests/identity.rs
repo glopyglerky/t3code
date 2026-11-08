@@ -33,3 +33,38 @@ fn identities_refuse_shared_permissions_symlinks_and_hard_links() {
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
     assert!(load_or_create_identity(&path).is_err());
 }
+
+#[cfg(unix)]
+#[test]
+fn identity_rejects_fifo_without_waiting_for_a_writer() {
+    use std::{os::unix::fs::OpenOptionsExt, sync::mpsc, time::Duration};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("endpoint.key");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let worker_path = path.clone();
+    let (sender, receiver) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        sender.send(load_or_create_identity(&worker_path)).unwrap();
+    });
+    let result = receiver.recv_timeout(Duration::from_secs(2));
+    if result.is_err() {
+        // Release the old blocking implementation so a failing test leaves no blocked thread.
+        let _writer = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&path);
+        worker.join().unwrap();
+        panic!("identity validation waited for a FIFO writer");
+    }
+    worker.join().unwrap();
+    assert_eq!(
+        result.unwrap().unwrap_err().kind(),
+        std::io::ErrorKind::InvalidData
+    );
+}

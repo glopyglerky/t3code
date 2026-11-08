@@ -100,14 +100,14 @@ Use protocols for specific application behavior, with authority scoped to that
 behavior. Mounting every available handler on one endpoint would expose data
 without proving the caller's T3 permissions.
 
-| Component | Intended T3 use | Required boundary |
-| --- | --- | --- |
-| Iroh endpoint, QUIC, relays | HTTP/WebSocket transport, direct paths with relay fallback | Pin peer identity; explicit admission; preserve T3 application authentication |
-| Address discovery and tickets | Find and pair an endpoint | Discovery is opt-in; addresses and tickets are not authorization |
-| Iroh blobs | Attachments, screenshots, large diffs, transferable artifacts | Per-environment storage and grants, validated content, quotas, cancellation, retention and garbage collection |
-| Iroh gossip | Short-lived presence and invalidation hints | Authorized peers, bounded messages, private content protection; never command ordering or durable delivery |
-| Iroh docs | Explicitly shared small metadata such as a device catalog | Separate read/write capabilities, bounded synchronization, revocation and recovery rules |
-| Browser and mobile bindings | Embed the transport in each client | Real platform builds and lifecycle tests; no inferred support from the Rust core compiling |
+| Component                     | Intended T3 use                                               | Required boundary                                                                                             |
+| ----------------------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| Iroh endpoint, QUIC, relays   | HTTP/WebSocket transport, direct paths with relay fallback    | Pin peer identity; explicit admission; preserve T3 application authentication                                 |
+| Address discovery and tickets | Find and pair an endpoint                                     | Discovery is opt-in; addresses and tickets are not authorization                                              |
+| Iroh blobs                    | Attachments, screenshots, large diffs, transferable artifacts | Per-environment storage and grants, validated content, quotas, cancellation, retention and garbage collection |
+| Iroh gossip                   | Short-lived presence and invalidation hints                   | Authorized peers, bounded messages, private content protection; never command ordering or durable delivery    |
+| Iroh docs                     | Explicitly shared small metadata such as a device catalog     | Separate read/write capabilities, bounded synchronization, revocation and recovery rules                      |
+| Browser and mobile bindings   | Embed the transport in each client                            | Real platform builds and lifecycle tests; no inferred support from the Rust core compiling                    |
 
 Blobs, docs, and gossip do not replace T3's authoritative event log, transactional
 outbox, provider adapters, or permission checks. Adding an entry to Cargo.toml is

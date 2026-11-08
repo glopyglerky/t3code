@@ -19,44 +19,32 @@
   "inventory_format": "SHA-256 of ASCII compact JSON arrays [path,mode,kind,Git-object-id], sorted by path; source objects come from the pinned commit, never the working tree.",
   "source_surfaces": {
     "server": {
-      "path_prefixes": [
-        "apps/server/"
-      ],
+      "path_prefixes": ["apps/server/"],
       "entries": 1593,
       "inventory_sha256": "439cc1a35397170fadb79e6775f8694d3f2a358b22b84ea190dd5e2b6bbd722e"
     },
     "contracts": {
-      "path_prefixes": [
-        "packages/contracts/"
-      ],
+      "path_prefixes": ["packages/contracts/"],
       "entries": 110,
       "inventory_sha256": "56c2f28b4cea50f370e9e2baf09ff12cbcaccaff1d04e402d98ea0b2de3b4bb0"
     },
     "client_runtime": {
-      "path_prefixes": [
-        "packages/client-runtime/"
-      ],
+      "path_prefixes": ["packages/client-runtime/"],
       "entries": 396,
       "inventory_sha256": "f21a743e6ffcc30c0eab299ddb014d1d778d32ff993ff62848ccea1f84260d93"
     },
     "web": {
-      "path_prefixes": [
-        "apps/web/"
-      ],
+      "path_prefixes": ["apps/web/"],
       "entries": 1920,
       "inventory_sha256": "8f594525833c3ad3b1544dfdf14cceb7166016a35b1d18294c2c0dfd45ec85fc"
     },
     "desktop": {
-      "path_prefixes": [
-        "apps/desktop/"
-      ],
+      "path_prefixes": ["apps/desktop/"],
       "entries": 293,
       "inventory_sha256": "e21cfc3c6d4266c3afc43b2c58d10aa26ed0683a24234ed38f64d49a05c2b74c"
     },
     "mobile": {
-      "path_prefixes": [
-        "apps/mobile/"
-      ],
+      "path_prefixes": ["apps/mobile/"],
       "entries": 1693,
       "inventory_sha256": "0eadc28c8dde5e636852f38cb671c4952f6ab93c9de22453689ddde3a3670b7d"
     },
@@ -85,9 +73,7 @@
       "inventory_sha256": "6441e8e6e0d1581ea0e4bb7a17b40c6f9a6ba660b5f211022cc6d436bb92c381"
     },
     "shared": {
-      "path_prefixes": [
-        "packages/shared/"
-      ],
+      "path_prefixes": ["packages/shared/"],
       "entries": 237,
       "inventory_sha256": "6ef3ac25888bfac0156845f37a74d6298ba264e7ee73962de8c5bf043684a7c0"
     }

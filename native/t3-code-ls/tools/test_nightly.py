@@ -226,13 +226,21 @@ class ImmutableSnapshots(unittest.TestCase):
         output = self.root / "lock.json"
         report_path = self.root / "report.json"
         nightly.write_json(output, self.lock)
-        with patch.object(nightly, "all_releases", return_value=[release()]), \
-                patch.object(nightly, "resolve_tag", return_value="a" * 40), patch("sys.stderr"):
-            status = nightly.main(["check", "--repo-root", str(self.root), "--lock", str(output),
-                                   "--output", str(report_path)])
-        self.assertEqual(status, 1)
-        self.assertFalse(report_path.exists())
-        self.assertEqual(json.loads(output.read_text()), self.lock)
+        pinned_tag = self.lock["upstream"]["tag"]
+        newer = release("v0.1.8-nightly.20261109.4400", "2026-11-09T00:00:00Z", 2)
+
+        def resolve(_get, tag):
+            return "a" * 40 if tag == pinned_tag else self.base
+
+        for releases in ([release()], [release(), newer]):
+            with self.subTest(newest=releases[-1]["tag_name"]), \
+                    patch.object(nightly, "all_releases", return_value=releases), \
+                    patch.object(nightly, "resolve_tag", side_effect=resolve), patch("sys.stderr"):
+                status = nightly.main(["check", "--repo-root", str(self.root), "--lock", str(output),
+                                       "--output", str(report_path)])
+                self.assertEqual(status, 1)
+                self.assertFalse(report_path.exists())
+                self.assertEqual(json.loads(output.read_text()), self.lock)
 
     def test_check_refuses_to_overwrite_lock(self):
         output = self.root / "lock.json"

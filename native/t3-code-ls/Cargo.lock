@@ -2811,6 +2811,7 @@ name = "t3-code-ls-transport"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "fastrand",
  "iroh",
  "libc",
  "serde_json",

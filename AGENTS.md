@@ -1,4 +1,28 @@
-# T3 Code
+# t3 code ls fork
+
+This fork is t3 code ls, "t3 code luxury sport addition". The requested destination
+is the complete T3 Code nightly application in Lust, including matching behavior
+and UI on web, desktop, iOS and Android, with Iroh carrying Connect traffic.
+The repository ID is `1352693431`; resolve that identity when the repository is
+renamed instead of assuming its old URL still names the intended repository.
+
+Keep the upstream README body byte-for-byte at the immutable source revision in
+`native/t3-code-ls/upstream.lock.json`. Put the truthful port status above it and
+fork customizations, divergence decisions, and port methods below it. Use the
+README synchronization tool when updating the nightly baseline.
+
+Lust compatibility requires the pinned Lust compiler to build and execute the
+unchanged source. Cargo compilation alone is not evidence of Lust compatibility.
+Do not describe the upstream TypeScript UI or Cargo-built Iroh adapter as a
+completed Lust recreation. Track incomplete application, UI, compiler, Connect,
+and mobile work explicitly until the relevant execution checks pass.
+
+Preserve the separate `codex/archived-thread-subscribe` and
+`codex/mobile-catalog-durable-backup` branches. Maintain `main` through tested,
+non-forced updates against published nightlies. Keep upstream checks every two
+hours and keep source currency separate from application qualification.
+
+# Upstream T3 Code guidance
 
 T3 Code is a minimal GUI for coding agents. A Node WebSocket server wraps provider CLIs and agents (Codex, Claude Code, Cursor, Grok, OpenCode, Antigravity, Kiro) and serves web, desktop, and mobile clients.
 
