@@ -14,6 +14,7 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
+import { makeNativeCommandPolicy } from "./NativeCommandPolicy.ts";
 
 export const SteeringExecutionPolicyV2 = Schema.Literals(["active_steering", "interrupt_restart"]);
 export type SteeringExecutionPolicyV2 = typeof SteeringExecutionPolicyV2.Type;
@@ -394,12 +395,17 @@ const decideForkExecution: CommandPolicyV2Shape["decideForkExecution"] = (input)
   }).pipe(Effect.as("portable_context"));
 };
 
-export const layer: Layer.Layer<CommandPolicyV2> = Layer.succeed(CommandPolicyV2, {
-  ensureQueuedMessages,
-  decideSteeringExecution,
-  ensureInterrupt,
-  ensureNativeFork,
-  decideForkExecution,
-  ensureRollback,
-  ensureContextHandoff,
+export const layer: Layer.Layer<CommandPolicyV2> = Layer.sync(CommandPolicyV2, () => {
+  const executable = process.env.T3_CODE_LS_POLICY_EXECUTABLE;
+  // Only an unset path selects upstream. A broken native installation must never silently fall back.
+  if (executable !== undefined) return makeNativeCommandPolicy(executable, unsupported);
+  return {
+    ensureQueuedMessages,
+    decideSteeringExecution,
+    ensureInterrupt,
+    ensureNativeFork,
+    decideForkExecution,
+    ensureRollback,
+    ensureContextHandoff,
+  };
 });
