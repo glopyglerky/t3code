@@ -69,7 +69,9 @@ def source_hashes() -> dict[str, str]:
     files += [ROOT / "Cargo.toml", ROOT / "Cargo.lock", ROOT / "crates/core/Cargo.toml",
               ROOT / "tools/upstream-source.mjs",
               ROOT / "upstream.lock.json", Path(__file__).resolve(), PIN_FILE]
-    files += [REPO / "apps/server/src/orchestration-v2/NativeDispatchFacts.ts",
+    files += [REPO / "apps/server/src/provider/CodexProvider.ts",
+              REPO / "apps/server/src/provider/nativeCodexProcess.ts",
+              REPO / "apps/server/src/orchestration-v2/NativeDispatchFacts.ts",
               REPO / "apps/server/src/orchestration-v2/NativeDispatchPolicy.ts",
               REPO / "apps/server/src/orchestration-v2/NativeCommandPolicy.ts",
               REPO / "apps/server/src/orchestration-v2/CommandPolicy.ts",

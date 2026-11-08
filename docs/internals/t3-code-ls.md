@@ -47,9 +47,12 @@ must contain Unicode scalar values, so unpaired escaped surrogates are rejected;
 JavaScript's JSON parser accepts them. This is an explicit input constraint at
 the native boundary. Invalid UTF-8 and non-finite numeric request IDs are also
 rejected. Finite numeric IDs use ECMAScript formatting through Lust's pinned
-`ryu-js` adapter; string IDs remain strings. The raw protocol runtime does not
-replace Codex's generated method schemas or T3's provider-to-orchestration event
-mapping.
+`ryu-js` adapter; string IDs remain strings. The optional `T3_CODE_LS_PROVIDER_EXECUTABLE` setting now routes the
+shared real Codex session/discovery factory through the Lust-built Unix
+subprocess. Provider credentials are forwarded in the process environment,
+not command arguments. The original path remains the default and invalid
+native selection fails closed. This does not replace Codex's generated
+method schemas or T3's provider-to-orchestration event mapping.
 
 Source basis: [Lust's implementation contract](https://github.com/t3dotgg/lust-lang/blob/240e08d91d4aed0299639f6f11fd522912b248f9/README.md),
 [release target allowlist](https://github.com/t3dotgg/lust-lang/blob/240e08d91d4aed0299639f6f11fd522912b248f9/src/resolve/cfg.rs),

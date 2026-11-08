@@ -12,7 +12,7 @@ mod app {
         is_blank_frame, read_frame,
     };
 
-    const USAGE: &str = "Usage: t3-code-ls-provider --program /absolute/provider --cwd /workspace --home /isolated/home [--env KEY=VALUE] [--max-frame-bytes N] [--max-pending N] [--queue-size N] [--request-timeout-ms N] -- [provider arguments]\n\nReads and writes Codex app-server JSONL on stdin/stdout. Start Codex with provider argument app-server. The child receives only the explicit environment and the selected home directory.";
+    const USAGE: &str = "Usage: t3-code-ls-provider --program /absolute/provider --cwd /workspace --home /isolated/home [--inherit-env] [--env KEY=VALUE] [--max-frame-bytes N] [--max-pending N] [--queue-size N] [--request-timeout-ms N] -- [provider arguments]\n\nReads and writes Codex app-server JSONL on stdin/stdout. Start Codex with provider argument app-server. By default the child receives only the explicit environment; --inherit-env forwards the wrapper process environment without putting secrets in argv. HOME always uses the selected home directory.";
 
     enum Input {
         Frame(String),
@@ -29,11 +29,17 @@ mod app {
         let mut program = None;
         let mut cwd = None;
         let mut home = None;
-        let mut environment = Vec::new();
+        let mut explicit_environment = Vec::new();
+        let mut inherit_environment = false;
         let mut limits = Limits::default();
         let mut index = 0;
         while index < args.len() && args[index] != "--" {
             let key = &args[index];
+            if key == "--inherit-env" {
+                inherit_environment = true;
+                index += 1;
+                continue;
+            }
             let value = args.get(index + 1).ok_or(USAGE.to_owned())?;
             match key.as_str() {
                 "--program" => program = Some(PathBuf::from(value)),
@@ -41,7 +47,7 @@ mod app {
                 "--home" => home = Some(PathBuf::from(value)),
                 "--env" => {
                     let (key, value) = value.split_once('=').ok_or("--env requires KEY=VALUE")?;
-                    environment.push((key.to_owned(), value.to_owned()));
+                    explicit_environment.push((key.to_owned(), value.to_owned()));
                 }
                 "--max-frame-bytes" => {
                     limits.max_frame_bytes = value.parse().map_err(|_| "invalid frame limit")?
@@ -67,6 +73,14 @@ mod app {
         } else {
             Vec::new()
         };
+        // Credentials stay in the wrapper environment, not in child argv.
+        // HOME remains the explicitly selected directory in both modes.
+        let mut environment: Vec<(String, String)> = if inherit_environment {
+            std::env::vars().filter(|(key, _)| key != "HOME").collect()
+        } else {
+            Vec::new()
+        };
+        environment.extend(explicit_environment);
         Ok(Some(Config {
             program: program.ok_or(USAGE.to_owned())?,
             cwd: cwd.ok_or(USAGE.to_owned())?,
