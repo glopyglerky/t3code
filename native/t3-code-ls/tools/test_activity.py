@@ -92,8 +92,9 @@ def run_scan(get, state=None, **kwargs):
 class ActivityPagination(unittest.TestCase):
     def test_every_page_including_empty_intermediate_page_is_followed(self):
         first = activity.issue_query(NOW - timedelta(hours=24))
-        second = first + "&page=2"
+        second = first + "&after=Y3Vyc29yOnYyOjI%3D&page=2"
         third = second.replace("page=2", "page=3").replace(
+            "after=Y3Vyc29yOnYyOjI%3D", "after=Y3Vyc29yOnYyOjM%3D").replace(
             f"/repos/{activity.REPOSITORY}", f"/repositories/{activity.REPOSITORY_ID}")
         data = fixtures([issue(), issue(3)])
         data[first] = ([issue()], {"Link": f'<{second}>; rel="next", <{third}>; rel="last"'})

@@ -130,7 +130,7 @@ def pages(get: Callable, url: str, *, key: str | None = None,
     """Follow every Link page, rejecting changed filters, duplicate rows and truncation."""
     path = api_path(url)
     filters = {name: values for name, values in parse_qs(urlsplit(url).query).items()
-               if name != "page"}
+               if name not in ("page", "after", "before")}
     visited: set[str] = set()
     seen: set[object] = set()
     result: list[dict] = []
@@ -143,7 +143,7 @@ def pages(get: Callable, url: str, *, key: str | None = None,
         if api_path(url) != path:
             raise TrackingError("Activity pagination changed its resource.")
         query = {name: values for name, values in parse_qs(urlsplit(url).query).items()
-                 if name != "page"}
+                 if name not in ("page", "after", "before")}
         if query != filters:
             raise TrackingError("Activity pagination changed its selection filters.")
         visited.add(url)
