@@ -112,6 +112,16 @@ function fixture() {
         write({ id: 10001, method: "item/tool/requestUserInput", params: { questions: [] } });
         write({ method: "serverRequest/resolved", params: { requestId: 10001 } });
         respond(message.id, {});
+      } else if (message.method === "fixture/duplicate-server-approval") {
+        // JS String(id) identifies numeric and string approval IDs as the same request.
+        write({ id: 10010, method: "item/tool/requestUserInput", params: { questions: [] } });
+        write({ id: "10010", method: "item/tool/requestUserInput", params: { questions: [] } });
+        respond(message.id, {});
+      } else if (message.method === "fixture/resolved-string-id") {
+        write({ id: 10011, method: "item/tool/requestUserInput", params: { questions: [] } });
+        write({ method: "serverRequest/resolved", params: { requestId: "10011" } });
+        write({ id: 10012, method: "item/tool/requestUserInput", params: { questions: [] } });
+        respond(message.id, {});
       } else if (message.method === "fixture/approval-burst") {
         for (let index = 0; index < 8; index += 1)
           write({
@@ -575,6 +585,25 @@ async function verify(binary) {
     NodeAssert.equal((await resolved.response(41)).result.requiresOpenaiAuth, false);
     await resolved.finish();
     assertions += 1;
+
+    const crossTypeResolved = await start("normal", ["--max-pending", "1"]);
+    crossTypeResolved.send({ id: 42, method: "fixture/resolved-string-id" });
+    await crossTypeResolved.wait(
+      (message) => message.id === 10012 && message.method === "item/tool/requestUserInput",
+    );
+    await crossTypeResolved.response(42);
+    await crossTypeResolved.finish();
+    assertions += 1;
+
+    const duplicateServerApproval = await start("normal");
+    duplicateServerApproval.send({ id: 43, method: "fixture/duplicate-server-approval" });
+    await duplicateServerApproval.wait(
+      (message) => message.id === 10010 && message.method === "item/tool/requestUserInput",
+    );
+    const duplicateServerExit = await duplicateServerApproval.completion;
+    NodeAssert.equal(duplicateServerExit.code, 2);
+    NodeAssert.match((await duplicateServerApproval.finish(2)).stderr, /request ID is already active/);
+    assertions += 2;
 
     const nonfinite = await start("normal");
     nonfinite.child.stdin.write('{"id":1e9999,"method":"fixture/echo"}\n');

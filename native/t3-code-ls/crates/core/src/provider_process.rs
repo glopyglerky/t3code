@@ -298,7 +298,11 @@ impl Shared {
                 }
             }
             MessageKind::Request(id) => {
-                if state.server_requests.contains(id) {
+                if state
+                    .server_requests
+                    .iter()
+                    .any(|request| request.same_client_id(id))
+                {
                     return Err(Error::DuplicateId);
                 }
                 if state.server_requests.len() >= self.limits.max_pending_requests {
@@ -315,7 +319,9 @@ impl Shared {
                         .and_then(|params| params.get("requestId"))
                         .and_then(RequestId::from_value)
                 {
-                    state.server_requests.retain(|request| *request != id);
+                    state
+                        .server_requests
+                        .retain(|request| !request.same_client_id(&id));
                 }
             }
         }
@@ -539,7 +545,9 @@ impl ProviderProcess {
                         Some(Instant::now() + self.shared.limits.request_timeout)
                     },
                 }),
-                MessageKind::Response(id) => state.server_requests.retain(|request| *request != id),
+                MessageKind::Response(id) => state
+                    .server_requests
+                    .retain(|request| !request.same_client_id(&id)),
                 MessageKind::Notification => {}
             }
         }
@@ -810,4 +818,69 @@ pub fn is_blank_frame(frame: &str) -> bool {
             | '\u{205f}' | '\u{3000}' | '\u{feff}'
         )
     })
+}
+
+#[cfg(test)]
+mod server_request_id_tests {
+    use super::*;
+
+    fn request(id: Value) -> Message {
+        Message::decode(Value::Object(vec![
+            ("id".to_owned(), id),
+            (
+                "method".to_owned(),
+                Value::String("item/tool/requestUserInput".to_owned()),
+            ),
+        ]))
+        .unwrap()
+    }
+
+    #[test]
+    fn numeric_and_string_server_request_ids_share_one_authority_slot() {
+        let shared = Shared {
+            state: Mutex::new(State {
+                events: VecDeque::new(),
+                pending: Vec::new(),
+                retired: Vec::new(),
+                server_requests: Vec::new(),
+                next_id: 1,
+                terminal: None,
+            }),
+            ready: Condvar::new(),
+            stderr: Mutex::new(Vec::new()),
+            limits: Limits {
+                max_pending_requests: 1,
+                ..Limits::default()
+            },
+            track_requests: true,
+        };
+        let numeric = Value::Number("10001".to_owned());
+        let string = Value::String("10001".to_owned());
+        shared.route(request(numeric.clone())).unwrap();
+        assert_eq!(
+            shared.route(request(string.clone())),
+            Err(Error::DuplicateId),
+            "JS client keys both requests by String(id)"
+        );
+        assert_eq!(shared.lock().server_requests.len(), 1);
+
+        shared
+            .route(
+                Message::decode(Value::Object(vec![
+                    (
+                        "method".to_owned(),
+                        Value::String("serverRequest/resolved".to_owned()),
+                    ),
+                    (
+                        "params".to_owned(),
+                        Value::Object(vec![("requestId".to_owned(), string.clone())]),
+                    ),
+                ]))
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(shared.lock().server_requests.is_empty());
+        shared.route(request(string)).unwrap();
+        assert_eq!(shared.lock().server_requests.len(), 1);
+    }
 }
