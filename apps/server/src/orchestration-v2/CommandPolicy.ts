@@ -190,6 +190,12 @@ interface CapabilityCheckInput {
 }
 
 export interface CommandPolicyV2Shape {
+  readonly resolveMessageDispatchIntent: (
+    ...args: Parameters<typeof resolveMessageDispatchIntent>
+  ) => Effect.Effect<ReturnType<typeof resolveMessageDispatchIntent>>;
+  readonly goalCommandStopsActiveRun: (
+    ...args: Parameters<typeof goalCommandStopsActiveRun>
+  ) => Effect.Effect<boolean>;
   readonly ensureQueuedMessages: (
     input: CapabilityCheckInput,
   ) => Effect.Effect<void, CommandPolicyV2Error>;
@@ -400,6 +406,14 @@ export const layer: Layer.Layer<CommandPolicyV2> = Layer.sync(CommandPolicyV2, (
   // Only an unset path selects upstream. A broken native installation must never silently fall back.
   if (executable !== undefined) return makeNativeCommandPolicy(executable, unsupported);
   return {
+    resolveMessageDispatchIntent: Effect.fn("CommandPolicy.resolveMessageDispatchIntent")(
+      (...args: Parameters<typeof resolveMessageDispatchIntent>) =>
+        Effect.sync(() => resolveMessageDispatchIntent(...args)),
+    ),
+    goalCommandStopsActiveRun: Effect.fn("CommandPolicy.goalCommandStopsActiveRun")(
+      (...args: Parameters<typeof goalCommandStopsActiveRun>) =>
+        Effect.sync(() => goalCommandStopsActiveRun(...args)),
+    ),
     ensureQueuedMessages,
     decideSteeringExecution,
     ensureInterrupt,

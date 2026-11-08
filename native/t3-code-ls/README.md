@@ -28,8 +28,17 @@ combinations against the immutable nightly implementation. The server's actual
 `CommandPolicyV2` service selects this executable through
 `T3_CODE_LS_POLICY_EXECUTABLE`. A temporary TypeScript adapter translates the
 existing service contract while the policy decisions execute in Lust.
-Message-dispatch helpers, persistence, and the remaining server services retain
-their upstream implementations.
+
+The same executable owns message-delivery precedence (queue, steer, restart,
+and immediate start) and goal-command stop decisions. The orchestrator awaits
+these operations through `CommandPolicyV2`, including both goal-stop paths.
+The temporary adapter still joins projection records and classifies maintenance
+messages; it sends only bounded capability/status facts, not prompts or IDs.
+The Lust resolver preserves absent versus explicit delivery intent, the requested
+versus latest-active target, preparation gaps, missing sessions, and maintenance
+commands. The dispatch oracle compares 46,430 cases with the pinned upstream
+implementation through the production fact adapter. This is not a port of the
+complete orchestrator, provider lifecycle, persistence, or UI.
 
 The guest-share decision port covers opening, redemption, expiry, submission,
 owner sending, dismissal, cancellation, attachment release, and pending-message
@@ -81,6 +90,7 @@ application's dependencies, check the actual service integration from
 
 ```sh
 node tools/check-policy-adapter.mjs "$PWD/target/lust-bin/t3-code-ls-policy"
+node tools/check-dispatch.mjs "$PWD/target/lust-bin/t3-code-ls-policy" --service
 ```
 
 To select the executable in a development server, run from the repository root:
@@ -94,12 +104,12 @@ vp run dev
 Only an unset variable selects upstream's original policy. An empty, relative,
 missing, failing, or malformed native executable never silently selects the
 original policy. The adapter uses an absolute executable path without a shell,
-passes only capability flags, does not inherit the server's environment, and
-bounds execution time and output. Existing application authentication and
-permission checks are unchanged. Each policy call uses a separate process;
-this boundary is not a qualified performance improvement or a full server port.
-The CI executable artifact is Linux x86-64 only and is not a desktop or mobile
-application package.
+passes only bounded capability and status facts, does not inherit the server's
+environment, and bounds execution time and output. Existing application
+authentication and permission checks are unchanged. Each policy call uses a
+separate process; this boundary is not a qualified performance improvement or a
+full server port. The CI executable artifact is Linux x86-64 only and is not a
+desktop or mobile application package.
 
 ## Connect two machines
 
@@ -167,6 +177,7 @@ cargo clippy --locked --all-targets -- -D warnings
 node --disable-warning=ExperimentalWarning tools/check-permissions.mjs
 node --disable-warning=ExperimentalWarning tools/check-connection.mjs
 node --disable-warning=ExperimentalWarning tools/check-policy.mjs
+node --disable-warning=ExperimentalWarning tools/check-dispatch.mjs
 node --disable-warning=ExperimentalWarning tools/check-guest-share.mjs
 node tools/check-json.mjs
 cargo build --locked -p t3-code-ls-core --bin t3-code-ls-provider
@@ -192,13 +203,15 @@ The dedicated CI additionally typechecks the server-policy integration and
 executes the actual `CommandPolicyV2` layer with the real Effect runtime. Those
 checks cover native selection, success and refusal mapping, concurrent calls,
 invalid configuration, malformed responses, failed subprocesses, environment
-isolation, and pre-execution cancellation. These are service integration checks,
-not a full application, provider-session, browser, or mobile qualification.
+isolation, and pre-execution cancellation. Dispatch checks also verify the
+orchestrator's three service call sites and parse its TypeScript syntax. These
+are service and call-site integration checks, not a complete orchestrator,
+application, provider-session, browser, or mobile qualification.
 
 After a successful run, `target/lust-bin` contains the standalone Linux x86-64
 `t3-code-ls-policy` and `t3-code-ls-provider` executables. CI retains these verified
-components and their proof receipt as an artifact. They are development
-components, not desktop or mobile installers.
+components and their proof receipts as an artifact, including the dispatch-service
+receipt. They are development components, not desktop or mobile installers.
 
 The provider component accepts Codex app-server JSONL on standard input and
 returns responses, notifications, and approval requests on standard output:

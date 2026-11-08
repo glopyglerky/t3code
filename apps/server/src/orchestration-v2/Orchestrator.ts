@@ -105,10 +105,8 @@ import {
 import { CheckpointServiceV2 } from "./CheckpointService.ts";
 import {
   CommandPolicyV2,
-  goalCommandStopsActiveRun,
   isActiveRun,
   isNativeMaintenanceCommand,
-  resolveMessageDispatchIntent,
 } from "./CommandPolicy.ts";
 import { CommandReceiptStoreV2, type CommandReceiptV2 } from "./CommandReceiptStore.ts";
 import {
@@ -5826,7 +5824,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       projection = applyToProjection(projection, event);
     }
     const modelSelection = command.modelSelection ?? projection.thread.modelSelection;
-    let dispatchMode = resolveMessageDispatchIntent(
+    let dispatchMode = yield* commandPolicy.resolveMessageDispatchIntent(
       projection,
       command.dispatchMode,
       command.deliveryIntent,
@@ -5898,7 +5896,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         );
         if (
           isLiveRun(target) &&
-          goalCommandStopsActiveRun(goalCommand, goal?.status ?? null) &&
+          (yield* commandPolicy.goalCommandStopsActiveRun(goalCommand, goal?.status ?? null)) &&
           (targetMessage === undefined || !isNativeMaintenanceCommand(targetMessage)) &&
           !(yield* stopReachedRun(command, command.threadId, target.id))
         ) {
@@ -9884,7 +9882,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const stops =
         target !== undefined &&
         isLiveRun(target) &&
-        goalCommandStopsActiveRun(goalCommand, goal?.status ?? null) &&
+        (yield* commandPolicy.goalCommandStopsActiveRun(goalCommand, goal?.status ?? null)) &&
         (targetMessage === undefined || !isNativeMaintenanceCommand(targetMessage)) &&
         !(yield* stopReachedRun(command, command.threadId, target.id));
       return yield* stopRunForQueuedCommand({

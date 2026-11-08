@@ -69,6 +69,11 @@ def source_hashes() -> dict[str, str]:
     files += [ROOT / "Cargo.toml", ROOT / "Cargo.lock", ROOT / "crates/core/Cargo.toml",
               ROOT / "tools/upstream-source.mjs",
               ROOT / "upstream.lock.json", Path(__file__).resolve(), PIN_FILE]
+    files += [REPO / "apps/server/src/orchestration-v2/NativeDispatchFacts.ts",
+              REPO / "apps/server/src/orchestration-v2/NativeDispatchPolicy.ts",
+              REPO / "apps/server/src/orchestration-v2/NativeCommandPolicy.ts",
+              REPO / "apps/server/src/orchestration-v2/CommandPolicy.ts",
+              REPO / "apps/server/src/orchestration-v2/Orchestrator.ts"]
     hashes = {str(path.relative_to(REPO)): sha256(path) for path in sorted(files)}
     upstream = json.loads((ROOT / "upstream.lock.json").read_text())["upstream"]
     commit = upstream["commit"]
@@ -212,6 +217,12 @@ def main() -> int:
                              name=f"verify the Lust-built {component} executable")
                 receipt[f"{component}_verification"] = parity.stdout.strip()
                 print(parity.stdout, end="")
+                if component == "policy":
+                    dispatch = run(["node", "tools/check-dispatch.mjs", str(executable)],
+                                   cwd=ROOT, env=env, receipt=receipt,
+                                   name="compare Lust message dispatch and goal policy to upstream")
+                    receipt["dispatch_parity"] = dispatch.stdout.strip()
+                    print(dispatch.stdout, end="")
                 executables.append(executable)
 
             verify_source(source, pin["revision"])

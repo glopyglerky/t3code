@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { isAbsolute } from "node:path";
 import * as Effect from "effect/Effect";
+import { makeNativeDispatchPolicy } from "./NativeDispatchPolicy.ts";
 
 import type {
   CommandPolicyCapability,
@@ -107,6 +108,7 @@ export function makeNativeCommandPolicy(
   }
 
   return {
+    ...makeNativeDispatchPolicy((args, signal) => execute(executable, args, signal)),
     ensureQueuedMessages: Effect.fn("NativeCommandPolicy.ensureQueuedMessages")((input: Input) =>
       decide(input, "queued", [], ["-"], ["queued_messages"]).pipe(Effect.asVoid),
     ),
