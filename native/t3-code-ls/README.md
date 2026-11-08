@@ -24,8 +24,11 @@ The core also ports provider capability policy decisions for queued turns,
 steering, interruption, native forks, rollback, and context handoff. The
 frame-bounded `t3-code-ls-policy` executable has a fail-stop subprocess protocol;
 688,128 decisions are checked against the pinned upstream TypeScript functions.
-This provides a real callable policy boundary for future provider integrations,
-but it does not yet execute provider sessions or replace the upstream server.
+The server's actual `CommandPolicyV2` service can select this executable through
+`T3_CODE_LS_POLICY_EXECUTABLE`. A temporary TypeScript adapter translates the
+existing service contract; the policy decisions execute in Lust. This does not
+port provider sessions, persistence, message-dispatch helpers, or the rest of the
+server. The repository is still mixed-language, not an all-Lust application.
 
 The native transport carries a fixed loopback service's HTTP, WebSocket, and
 binary traffic over authenticated Iroh connections. Each host explicitly admits
@@ -34,10 +37,9 @@ session, change a user's permissions, or replace T3 pairing. The transport uses
 the core's peer policy and closes admitted connections when their grant is
 revoked, including a revoke immediately followed by a new grant.
 
-The existing T3 server and clients remain upstream code. The bridge is an
-executable migration step. The Connect account flow, client route selector,
-mobile lifecycle, notifications, shared storage, and native UI are not completed
-by forwarding their network traffic.
+The rest of the T3 server and clients remain upstream implementations. The
+Connect account flow, client route selector, mobile lifecycle, notifications,
+shared storage, and native UI are not completed by forwarding network traffic.
 
 ## Build
 
@@ -56,6 +58,46 @@ group/world permissions. Keep keys in a private directory. The CLI file storage
 is not an iOS Keychain, Android Keystore, or Windows credential-store integration.
 Applications embedding the library must provide an identity from their platform
 key store.
+
+## Use the Lust provider policy in the server
+
+On Linux x86-64, build the policy with the pinned Lust compiler after running the
+independent Lust gate below. From `native/t3-code-ls`:
+
+```sh
+mkdir -p target/lust
+LUST_NO_DAEMON=1 /absolute/path/to/lust-lang/target/gate/lust build \
+  crates/core/src/bin/t3-code-ls-policy.rs \
+  --manifest-path crates/core/Cargo.toml --bin t3-code-ls-policy \
+  -o "$PWD/target/lust/t3-code-ls-policy" --json
+node tools/check-policy.mjs "$PWD/target/lust/t3-code-ls-policy"
+```
+
+After installing the existing application's dependencies, the actual service
+integration can be checked without starting a provider or accessing personal
+T3 state:
+
+```sh
+node tools/check-policy-adapter.mjs "$PWD/target/lust/t3-code-ls-policy"
+```
+
+To select the executable in a development server, run from the repository root:
+
+```sh
+T3CODE_DEV_SEED=0 \
+T3_CODE_LS_POLICY_EXECUTABLE="$PWD/native/t3-code-ls/target/lust/t3-code-ls-policy" \
+vp run dev
+```
+
+Only an unset variable selects upstream's original policy. An empty, relative,
+missing, failing, or malformed native executable never silently selects the
+original policy. The adapter uses an absolute executable path without a shell,
+passes only capability flags, does not inherit the server's environment, and
+bounds execution time and output. Existing application authentication and
+permission checks are unchanged. Each policy call uses a separate process;
+this boundary is not a qualified performance improvement or a full server port.
+The CI executable artifact is Linux x86-64 only and is not a desktop or mobile
+application package.
 
 ## Connect two machines
 
@@ -136,10 +178,18 @@ python3 tools/check-lust.py --source /absolute/path/to/lust-lang
 The gate builds the pinned compiler and TinyCC, checks the unchanged core, runs
 all inline core unit tests through Lust, and compiles and executes the
 permission, connection, and provider-policy oracles through Lust. It compares
-their outputs to the pinned upstream TypeScript functions. It rejects a dirty or wrong compiler checkout, ignored tests, source
-changes during verification, and mismatched behavior. The receipt records hashes
-of the exact Git blobs and command results at `target/lust-proof.json`. There is
-no Cargo fallback for these Lust checks.
+their outputs to the pinned upstream TypeScript functions. It rejects a dirty or
+wrong compiler checkout, ignored tests, source changes during verification, and
+mismatched behavior. The receipt records hashes of the exact Git blobs and
+command results at `target/lust-proof.json`. There is no Cargo fallback for
+these Lust checks.
+
+The dedicated CI additionally typechecks the server-policy integration and
+executes the actual `CommandPolicyV2` layer with the real Effect runtime. Those
+checks cover native selection, success and refusal mapping, concurrent calls,
+invalid configuration, malformed responses, failed subprocesses, environment
+isolation, and pre-execution cancellation. These are service integration checks,
+not a full application, provider-session, browser, or mobile qualification.
 
 The portable core can also be checked with Cargo for `aarch64-apple-ios`,
 `aarch64-apple-ios-sim`, `aarch64-linux-android`, `x86_64-pc-windows-gnu`, and
@@ -219,9 +269,9 @@ candidate separate and the qualification status unchanged.
 ## Language and transport boundaries
 
 Current Lust is an experimental Rust-subset compiler. Its supported development
-host is Linux x86-64. It rejects async, external FFI, custom procedural macros, and crates
-without Lust adapters. The native adapter and platform application work therefore
-cannot honestly be described as all-Lust today. See the
+host is Linux x86-64. It rejects async, external FFI, custom procedural macros,
+and crates without Lust adapters. The native adapter and platform application
+work therefore cannot honestly be described as all-Lust today. See the
 [architecture decision](../../docs/internals/t3-code-ls.md) for the boundaries
 and Iroh protocol choices.
 
