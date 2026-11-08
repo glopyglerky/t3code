@@ -22,10 +22,19 @@ old-client fallback cannot broaden server authority.
 
 Provider capability decisions also run in a standalone Lust executable. They
 cover queued turns, steering, interrupts, native forks, rollback, and context
-handoff. The oracle compares all 688,128 capability and command combinations
-against the immutable nightly implementation. The guest-share decision port
-covers opening, redemption, expiry, submission, owner sending, dismissal,
-cancellation, attachment release, and pending-message and attachment limits.
+handoff. The frame-bounded `t3-code-ls-policy` executable has a fail-stop
+subprocess protocol; its oracle compares all 688,128 capability and command
+combinations against the immutable nightly implementation. The server's actual
+`CommandPolicyV2` service selects this executable through
+`T3_CODE_LS_POLICY_EXECUTABLE`. A temporary TypeScript adapter translates the
+existing service contract while the policy decisions execute in Lust.
+Message-dispatch helpers, persistence, and the remaining server services retain
+their upstream implementations.
+
+The guest-share decision port covers opening, redemption, expiry, submission,
+owner sending, dismissal, cancellation, attachment release, and pending-message
+and attachment limits. Expiration-string parsing remains the date adapter's
+responsibility; the port preserves its parsed result and the original string.
 
 The Unix provider process runtime runs JSON-RPC over a child process's standard
 streams. It is compiled and executed by Lust, including its bounded JSON codec,
@@ -42,10 +51,9 @@ session, change a user's permissions, or replace T3 pairing. The transport uses
 the core's peer policy and closes admitted connections when their grant is
 revoked, including a revoke immediately followed by a new grant.
 
-The existing T3 server and clients remain upstream code. The bridge is an
-executable migration step. The Connect account flow, client route selector,
-mobile lifecycle, notifications, shared storage, and native UI are not completed
-by forwarding their network traffic.
+The rest of the T3 server and clients remain upstream implementations. The
+Connect account flow, client route selector, mobile lifecycle, notifications,
+shared storage, and native UI are not completed by forwarding network traffic.
 
 ## Build the Iroh bridge
 
@@ -63,6 +71,35 @@ group/world permissions. Keep keys in a private directory. The CLI file storage
 is not an iOS Keychain, Android Keystore, or Windows credential-store integration.
 Applications embedding the library must provide an identity from their platform
 key store.
+
+## Use the Lust provider policy in the server
+
+On Linux x86-64, use `target/lust-bin/t3-code-ls-policy` produced by the
+[independent Lust gate](#verification). After installing the existing
+application's dependencies, check the actual service integration from
+`native/t3-code-ls` without starting a provider or accessing personal T3 state:
+
+```sh
+node tools/check-policy-adapter.mjs "$PWD/target/lust-bin/t3-code-ls-policy"
+```
+
+To select the executable in a development server, run from the repository root:
+
+```sh
+T3CODE_DEV_SEED=0 \
+T3_CODE_LS_POLICY_EXECUTABLE="$PWD/native/t3-code-ls/target/lust-bin/t3-code-ls-policy" \
+vp run dev
+```
+
+Only an unset variable selects upstream's original policy. An empty, relative,
+missing, failing, or malformed native executable never silently selects the
+original policy. The adapter uses an absolute executable path without a shell,
+passes only capability flags, does not inherit the server's environment, and
+bounds execution time and output. Existing application authentication and
+permission checks are unchanged. Each policy call uses a separate process;
+this boundary is not a qualified performance improvement or a full server port.
+The CI executable artifact is Linux x86-64 only and is not a desktop or mobile
+application package.
 
 ## Connect two machines
 
@@ -150,6 +187,13 @@ and provider subprocess fixtures. It rejects a dirty or wrong compiler checkout,
 ignored tests, source changes during verification, and mismatched behavior. The
 receipt records hashes of the exact Git blobs, binaries, and command results at
 `target/lust-proof.json`. There is no Cargo fallback for these Lust checks.
+
+The dedicated CI additionally typechecks the server-policy integration and
+executes the actual `CommandPolicyV2` layer with the real Effect runtime. Those
+checks cover native selection, success and refusal mapping, concurrent calls,
+invalid configuration, malformed responses, failed subprocesses, environment
+isolation, and pre-execution cancellation. These are service integration checks,
+not a full application, provider-session, browser, or mobile qualification.
 
 After a successful run, `target/lust-bin` contains the standalone Linux x86-64
 `t3-code-ls-policy` and `t3-code-ls-provider` executables. CI retains these verified
@@ -252,9 +296,9 @@ candidate separate and the qualification status unchanged.
 ## Language and transport boundaries
 
 Current Lust is an experimental Rust-subset compiler. Its supported development
-host is Linux x86-64. It rejects async, external FFI, custom procedural macros, and crates
-without Lust adapters. The native adapter and platform application work therefore
-cannot honestly be described as all-Lust today. See the
+host is Linux x86-64. It rejects async, external FFI, custom procedural macros,
+and crates without Lust adapters. The native adapter and platform application
+work therefore cannot honestly be described as all-Lust today. See the
 [architecture decision](../../docs/internals/t3-code-ls.md) for the boundaries
 and Iroh protocol choices.
 

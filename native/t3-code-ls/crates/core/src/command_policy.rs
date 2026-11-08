@@ -425,7 +425,7 @@ mod tests {
             read_frame(&mut reader).unwrap_err().kind(),
             io::ErrorKind::UnexpectedEof
         );
-        let invalid = [255, b'\n'];
+        let invalid = [255_u8, b'\n'];
         let mut reader = &invalid[..];
         assert_eq!(
             read_frame(&mut reader).unwrap_err().kind(),

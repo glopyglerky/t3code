@@ -22,7 +22,7 @@ fn run() -> Result<(), &'static str> {
             .write_all(response(result).as_bytes())
             .map_err(|_| "cannot write policy response")?;
         output.flush().map_err(|_| "cannot flush policy response")?;
-        result.map(|_| ())?;
+        let _ = result?;
     }
     Ok(())
 }
