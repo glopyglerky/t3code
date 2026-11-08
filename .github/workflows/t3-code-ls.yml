@@ -8,6 +8,8 @@ on:
       - docs/internals/t3-code-ls.md
       - native/t3-code-ls/**
       - packages/contracts/src/auth.ts
+      - apps/server/src/orchestration-v2/CommandPolicy.ts
+      - apps/server/src/orchestration-v2/NativeCommandPolicy.ts
       - .github/workflows/t3-code-ls.yml
   pull_request:
     paths:
@@ -15,6 +17,8 @@ on:
       - docs/internals/t3-code-ls.md
       - native/t3-code-ls/**
       - packages/contracts/src/auth.ts
+      - apps/server/src/orchestration-v2/CommandPolicy.ts
+      - apps/server/src/orchestration-v2/NativeCommandPolicy.ts
       - .github/workflows/t3-code-ls.yml
   workflow_dispatch:
 
@@ -67,6 +71,8 @@ jobs:
         run: node --disable-warning=ExperimentalWarning tools/check-permissions.mjs
       - name: Compare connection retry policy with the actual upstream functions
         run: node --disable-warning=ExperimentalWarning tools/check-connection.mjs
+      - name: Compare provider policies with the actual upstream functions
+        run: node --disable-warning=ExperimentalWarning tools/check-policy.mjs
       - name: Test nightly selection and complete source comparison
         run: python3 -m unittest discover -s tools -p 'test_*.py'
       - name: Build the bridge executable
@@ -106,11 +112,11 @@ jobs:
           git init .
           git remote add origin "https://github.com/${SOURCE_REPOSITORY}.git"
           git -c credential.helper= fetch --no-tags --depth=1 origin "$SOURCE_REVISION"
-          git sparse-checkout set --cone native/t3-code-ls packages/contracts packages/client-runtime
+          git sparse-checkout set --cone native/t3-code-ls packages/contracts packages/client-runtime apps/server/src/orchestration-v2
           git checkout --detach FETCH_HEAD
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
-          node-version: 24
+          node-version: 26.12.1
       - name: Fetch the immutable upstream comparison source
         run: |
           upstream_commit="$(python3 -c 'import json, re; value = json.load(open("upstream.lock.json"))["upstream"]["commit"]; assert re.fullmatch("[0-9a-f]{40}", value); print(value)')"
@@ -125,13 +131,47 @@ jobs:
           git -C "$RUNNER_TEMP/lust-lang" checkout --detach FETCH_HEAD
       - name: Compile and execute the core through Lust
         run: python3 tools/check-lust.py --source "$RUNNER_TEMP/lust-lang"
+      - name: Install the matching server-policy test runtime
+        run: |
+          mkdir -p "$RUNNER_TEMP/ls-policy-node"
+          npm install --prefix "$RUNNER_TEMP/ls-policy-node" --ignore-scripts --no-audit --no-fund --save-exact \
+            effect@4.1.2 @effect/tsgo@0.67.1 @types/node@24.12.4
+          mkdir -p "$GITHUB_WORKSPACE/node_modules/@t3tools" "$GITHUB_WORKSPACE/node_modules/@types"
+          ln -s "$RUNNER_TEMP/ls-policy-node/node_modules/effect" "$GITHUB_WORKSPACE/node_modules/effect"
+          ln -s "$RUNNER_TEMP/ls-policy-node/node_modules/@types/node" "$GITHUB_WORKSPACE/node_modules/@types/node"
+          ln -s "$GITHUB_WORKSPACE/packages/contracts" "$GITHUB_WORKSPACE/node_modules/@t3tools/contracts"
+      - name: Typecheck the server-policy integration
+        run: |
+          "$RUNNER_TEMP/ls-policy-node/node_modules/.bin/effect-tsgo" tsrs --noEmit --project tools/policy-tsconfig.json
+      - name: Exercise the actual server-policy service with a Lust-built executable
+        env:
+          LUST_NO_DAEMON: "1"
+        run: |
+          mkdir -p target/lust
+          "$RUNNER_TEMP/lust-lang/target/gate/lust" build crates/core/src/bin/t3-code-ls-policy.rs \
+            --manifest-path crates/core/Cargo.toml --bin t3-code-ls-policy \
+            -o "$PWD/target/lust/t3-code-ls-policy" --json
+          node --disable-warning=ExperimentalWarning tools/check-policy.mjs "$PWD/target/lust/t3-code-ls-policy"
+          node --disable-warning=ExperimentalWarning tools/check-policy-adapter.mjs \
+            "$PWD/target/lust/t3-code-ls-policy" "$PWD/target/lust/policy-adapter-proof.json"
+          sha256sum target/lust/t3-code-ls-policy
       - name: Retain Lust execution evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: t3-code-ls-lust-proof
-          path: native/t3-code-ls/target/lust-proof.json
+          path: |
+            native/t3-code-ls/target/lust-proof.json
+            native/t3-code-ls/target/lust/policy-adapter-proof.json
+            ${{ runner.temp }}/ls-policy-node/package-lock.json
           if-no-files-found: ignore
+          retention-days: 14
+      - name: Retain the verified Lust policy executable
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: t3-code-ls-policy-linux-x64
+          path: native/t3-code-ls/target/lust/t3-code-ls-policy
+          if-no-files-found: error
           retention-days: 14
 
   portable-core:
