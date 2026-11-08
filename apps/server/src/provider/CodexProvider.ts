@@ -503,16 +503,19 @@ export const withCodexAppServerClient = Effect.fn("withCodexAppServerClient")(fu
   const nativeExecutable = environment[NATIVE_CODEX_PROVIDER_EXECUTABLE] ??
     process.env[NATIVE_CODEX_PROVIDER_EXECUTABLE];
   const codexCommand = nativeExecutable !== undefined && !spawnCommand.shell
-    ? (yield* resolveCommandPath(spawnCommand.command, { env: environment, extendEnv: true })) ??
-      spawnCommand.command
+    ? (yield* resolveCommandPath(spawnCommand.command, {
+        env: { ...process.env, ...environment },
+      })) ?? spawnCommand.command
     : spawnCommand.command;
+  const homeDirectory = yield* HostProcess.HomeDirectory;
+  const platform = yield* HostProcess.Platform;
   const selected = yield* Effect.try({
     try: () => selectNativeCodexProcess(
       nativeExecutable,
       { ...spawnCommand, command: codexCommand },
       input.cwd,
-      environment.HOME ?? process.env.HOME ?? "",
-      process.platform,
+      environment.HOME ?? process.env.HOME ?? homeDirectory,
+      platform,
     ),
     catch: (cause) => new CodexErrors.CodexAppServerSpawnError({
       command: `${input.binaryPath} app-server`,
