@@ -14,7 +14,7 @@ import { makeNativeGuestShareDecider } from "../../../apps/server/src/orchestrat
 const binary = process.argv[2];
 Assert.ok(binary && NodePath.isAbsolute(binary), "Expected an absolute Lust or Cargo guest executable");
 const native = makeNativeGuestShareDecider(binary);
-const time = (millis) => DateTime.unsafeMake(millis);
+const time = (millis) => DateTime.makeUnsafe(millis);
 const start = time(1_000);
 const thread = {
   id: "guest:test", title: "Retain untouched state",

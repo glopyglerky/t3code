@@ -71,7 +71,7 @@ function restoreDate(
   }
   if (before != null && DateTime.toEpochMillis(before) === value) return before;
   if (DateTime.toEpochMillis(now) === value) return now;
-  return DateTime.unsafeMake(value);
+  return DateTime.makeUnsafe(value);
 }
 
 /** Retain the real application's untouched fields and identity of unchanged date values.
