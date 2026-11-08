@@ -80,7 +80,8 @@ def source_hashes() -> dict[str, str]:
               REPO / "apps/server/src/orchestration-v2/ProviderRecoveryPlanner.ts",
               REPO / "apps/server/src/orchestration-v2/ProviderRuntimeRecoveryService.ts",
               REPO / "apps/server/src/processRunner.ts",
-              REPO / "apps/server/src/orchestration-v2/Orchestrator.ts"]
+              REPO / "apps/server/src/orchestration-v2/Orchestrator.ts",
+              REPO / "apps/server/src/orchestration-v2/NativeGuestShareDecider.ts"]
     hashes = {str(path.relative_to(REPO)): sha256(path) for path in sorted(files)}
     upstream = json.loads((ROOT / "upstream.lock.json").read_text())["upstream"]
     commit = upstream["commit"]
@@ -197,6 +198,7 @@ def main() -> int:
                 receipt["unit_tests"].append(test_summary(result.stdout))
             # --bin selects each example by its Cargo target name in this
             # revision (select_unit's name fallback).
+            guest_artifact = work / "t3-code-ls-guest"
             for surface, example, oracle in (
                     ("permission", "permission_matrix", "check-permissions.mjs"),
                     ("connection", "connection_matrix", "check-connection.mjs"),
@@ -214,7 +216,14 @@ def main() -> int:
                              name=f"verify Lust {surface} against the independent oracle")
                 receipt[f"{surface}_parity"] = parity.stdout.strip()
                 print(parity.stdout, end="")
-            executables = []
+                if surface == "guest_share":
+                    adapter = run(["node", "tools/check-guest-share-adapter.mjs", str(executable)],
+                                  cwd=ROOT, env=env, receipt=receipt,
+                                  name="compare Lust guest share with the real Effect DateTime application contract")
+                    receipt["guest_share_adapter"] = adapter.stdout.strip()
+                    print(adapter.stdout, end="")
+                    shutil.copy2(executable, guest_artifact)
+            executables = [guest_artifact]
             for component, verifier in (("policy", "check-policy.mjs"),
                                         ("provider", "check-provider.mjs"),
                                         ("recovery", "check-recovery-runtime.mjs")):

@@ -13,6 +13,7 @@ on:
       - apps/server/src/orchestration-v2/NativeDispatchFacts.ts
       - apps/server/src/orchestration-v2/NativeDispatchPolicy.ts
       - apps/server/src/orchestration-v2/Orchestrator.ts
+      - apps/server/src/orchestration-v2/NativeGuestShareDecider.ts
       - apps/server/src/orchestration-v2/ProviderRecoveryPlanner.ts
       - apps/server/src/orchestration-v2/ProviderRuntimeRecoveryService.ts
       - apps/server/src/processRunner.ts
@@ -36,6 +37,7 @@ on:
       - apps/server/src/orchestration-v2/NativeDispatchFacts.ts
       - apps/server/src/orchestration-v2/NativeDispatchPolicy.ts
       - apps/server/src/orchestration-v2/Orchestrator.ts
+      - apps/server/src/orchestration-v2/NativeGuestShareDecider.ts
       - apps/server/src/orchestration-v2/ProviderRecoveryPlanner.ts
       - apps/server/src/orchestration-v2/ProviderRuntimeRecoveryService.ts
       - apps/server/src/processRunner.ts
@@ -107,6 +109,10 @@ jobs:
         run: node --disable-warning=ExperimentalWarning tools/check-dispatch.mjs
       - name: Compare the guest share lifecycle with the actual upstream functions
         run: node --disable-warning=ExperimentalWarning tools/check-guest-share.mjs
+      - name: Verify guest share integration using the native application contract
+        run: |
+          cargo build --locked -p t3-code-ls-core --example guest_share_matrix
+          node --disable-warning=ExperimentalWarning tools/check-guest-share-adapter.mjs "$PWD/target/debug/examples/guest_share_matrix"
       - name: Compare recovery events with the actual upstream functions
         run: |
           cargo build --locked -p t3-code-ls-core --example provider_recovery_matrix

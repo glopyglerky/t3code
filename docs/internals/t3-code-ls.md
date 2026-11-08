@@ -88,6 +88,18 @@ The SQLite integration gate exercises persistence, reopen/replay, idempotence,
 group rollback, and cancellation. This establishes recovery integration, while
 the event store, projections, and outbox still execute in TypeScript.
 
+The selected guest-share executable now routes the live orchestrator's
+open/redeem/close, submit/dismiss, owner send, and queued-send cancellation
+transitions through the independently compared Lust decision engine. Its
+server-side adapter translates Effect UTC timestamps, preserves unrelated
+thread fields, and fails the active command on subprocess errors rather than
+falling back to the TypeScript decider. The native matrix still supplies
+Date.parse results from the server boundary; it does not parse JavaScript
+expiration strings itself. The production application must explicitly select
+the Lust-built executable with `T3_CODE_LS_GUEST_SHARE_EXECUTABLE`. The
+remaining TypeScript attachment-cleanup and attribution-stripping functions
+and guest UI do not count as ported.
+
 Source basis: [Lust's implementation contract](https://github.com/t3dotgg/lust-lang/blob/240e08d91d4aed0299639f6f11fd522912b248f9/README.md),
 [release target allowlist](https://github.com/t3dotgg/lust-lang/blob/240e08d91d4aed0299639f6f11fd522912b248f9/src/resolve/cfg.rs),
 and [C/zig release driver](https://github.com/t3dotgg/lust-lang/blob/240e08d91d4aed0299639f6f11fd522912b248f9/src/cc.rs).

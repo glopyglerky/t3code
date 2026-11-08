@@ -42,8 +42,20 @@ complete orchestrator, provider lifecycle, persistence, or UI.
 
 The guest-share decision port covers opening, redemption, expiry, submission,
 owner sending, dismissal, cancellation, attachment release, and pending-message
-and attachment limits. Expiration-string parsing remains the date adapter's
-responsibility; the port preserves its parsed result and the original string.
+and attachment limits. `T3_CODE_LS_GUEST_SHARE_EXECUTABLE` now selects the
+Lust-compiled decision engine in the live orchestrator's open, redeem, close,
+submit, dismiss, send, and cancellation paths. The temporary server adapter
+retains Effect dates and untouched thread data, supplies Date.parse results,
+runs a bounded, abortable subprocess without shell or inherited secrets, and
+fails closed instead of silently falling back to TypeScript. The upstream
+attachment cleanup and attribution stripping still execute in TypeScript; the
+complete guest-share service, persistence, clients, and server are not yet a
+Lust-only application.
+
+After running the pinned Lust gate, opt into the live path using
+`T3_CODE_LS_GUEST_SHARE_EXECUTABLE="$PWD/native/t3-code-ls/target/lust-bin/t3-code-ls-guest"`
+from the repository root. This binary is the Lust-built guest-share decision
+runner; it is not the Cargo-built Iroh adapter.
 
 The Unix provider process runtime runs JSON-RPC over a child process's standard
 streams. It is compiled and executed by Lust, including its bounded JSON codec,

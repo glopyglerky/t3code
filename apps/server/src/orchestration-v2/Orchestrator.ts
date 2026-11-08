@@ -133,6 +133,7 @@ import {
   decideGuestShareCommand,
   type GuestShareCommand,
 } from "./GuestShareDecider.ts";
+import { makeNativeGuestShareDecider } from "./NativeGuestShareDecider.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import { withCommandMetrics } from "../observability/Metrics.ts";
 import type { OrchestrationEffectRequestV2, PendingOrchestrationEffectV2 } from "./EffectOutbox.ts";
@@ -524,6 +525,10 @@ function wakeWorkStartedAt(
 }
 
 const threadPullRequestLinksEqual = Schema.toEquivalence(Schema.NullOr(ThreadLinkedPullRequest));
+// Opt in only with a Lust-built executable. Native failure aborts the command, never falls back.
+const nativeGuestShare = process.env.T3_CODE_LS_GUEST_SHARE_EXECUTABLE === undefined
+  ? null
+  : makeNativeGuestShareDecider(process.env.T3_CODE_LS_GUEST_SHARE_EXECUTABLE);
 
 /** Unfinished runs (including queued) or open requests block moving a thread to another project. */
 export function threadHasUnfinishedWork(records: {
@@ -3165,11 +3170,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const decided =
       thread.deletedAt !== null
         ? Result.fail(`Thread ${command.threadId} is deleted.`)
-        : decideGuestShareCommand({
-            thread,
-            command,
-            now,
-          });
+        : nativeGuestShare === null
+          ? decideGuestShareCommand({ thread, command, now })
+          : yield* nativeGuestShare.decideGuestShareCommand({ thread, command, now });
     if (Result.isFailure(decided)) {
       return yield* new OrchestratorDispatchError({
         commandId: command.commandId,
@@ -3200,7 +3203,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
   ) {
     const now = yield* DateTime.now;
-    const decided = decideGuestMessageSend({ thread, guestMessageId, now });
+    const decided = nativeGuestShare === null
+      ? decideGuestMessageSend({ thread, guestMessageId, now })
+      : yield* nativeGuestShare.decideGuestMessageSend({ thread, guestMessageId, now });
     if (Result.isFailure(decided)) {
       return yield* new OrchestratorDispatchError({
         commandId: command.commandId,
@@ -10135,7 +10140,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     }
     const guest = queuedMessage?.context?.guest;
     if (guest !== undefined) {
-      const thread = guestShareAfterCancelledSend(projection.thread, guest, now);
+      const thread = nativeGuestShare === null
+        ? guestShareAfterCancelledSend(projection.thread, guest, now)
+        : yield* nativeGuestShare.afterCancelledSend(projection.thread, guest, now);
       if (thread !== projection.thread) {
         yield* emitEvent({
           type: "thread.guest-share-updated",
