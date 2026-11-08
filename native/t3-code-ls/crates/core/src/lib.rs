@@ -2,6 +2,7 @@
 
 pub mod command_policy;
 pub mod connection;
+pub mod dispatch;
 pub mod guest_share;
 pub mod json;
 pub mod peers;

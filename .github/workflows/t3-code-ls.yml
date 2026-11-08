@@ -10,6 +10,9 @@ on:
       - packages/contracts/src/auth.ts
       - apps/server/src/orchestration-v2/CommandPolicy.ts
       - apps/server/src/orchestration-v2/NativeCommandPolicy.ts
+      - apps/server/src/orchestration-v2/NativeDispatchFacts.ts
+      - apps/server/src/orchestration-v2/NativeDispatchPolicy.ts
+      - apps/server/src/orchestration-v2/Orchestrator.ts
       - .github/workflows/t3-code-ls.yml
   pull_request:
     paths:
@@ -19,6 +22,9 @@ on:
       - packages/contracts/src/auth.ts
       - apps/server/src/orchestration-v2/CommandPolicy.ts
       - apps/server/src/orchestration-v2/NativeCommandPolicy.ts
+      - apps/server/src/orchestration-v2/NativeDispatchFacts.ts
+      - apps/server/src/orchestration-v2/NativeDispatchPolicy.ts
+      - apps/server/src/orchestration-v2/Orchestrator.ts
       - .github/workflows/t3-code-ls.yml
   workflow_dispatch:
 
@@ -48,7 +54,7 @@ jobs:
           git init .
           git remote add origin "https://github.com/${SOURCE_REPOSITORY}.git"
           git -c credential.helper= fetch --no-tags --depth=1 origin "$SOURCE_REVISION"
-          git sparse-checkout set --cone native/t3-code-ls packages/contracts packages/client-runtime
+          git sparse-checkout set --cone native/t3-code-ls packages/contracts packages/client-runtime apps/server/src/orchestration-v2
           git checkout --detach FETCH_HEAD
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
@@ -73,6 +79,8 @@ jobs:
         run: node --disable-warning=ExperimentalWarning tools/check-connection.mjs
       - name: Compare provider capabilities with the actual upstream functions
         run: node --disable-warning=ExperimentalWarning tools/check-policy.mjs
+      - name: Compare dispatch and goal policy with the actual upstream functions
+        run: node --disable-warning=ExperimentalWarning tools/check-dispatch.mjs
       - name: Compare the guest share lifecycle with the actual upstream functions
         run: node --disable-warning=ExperimentalWarning tools/check-guest-share.mjs
       - name: Verify JSON wire compatibility
@@ -157,10 +165,12 @@ jobs:
           node --disable-warning=ExperimentalWarning tools/check-policy.mjs "$PWD/target/lust-bin/t3-code-ls-policy"
           node --disable-warning=ExperimentalWarning tools/check-policy-adapter.mjs \
             "$PWD/target/lust-bin/t3-code-ls-policy" "$PWD/target/lust/policy-adapter-proof.json"
+          node --disable-warning=ExperimentalWarning tools/check-dispatch.mjs \
+            "$PWD/target/lust-bin/t3-code-ls-policy" --service "$PWD/target/lust/dispatch-proof.json"
           sha256sum target/lust-bin/t3-code-ls-policy
       - name: Package the verified Linux components with their receipt
         run: |
-          tar -czf target/t3-code-ls-lust-linux-x64.tar.gz -C target lust-bin lust-proof.json lust/policy-adapter-proof.json
+          tar -czf target/t3-code-ls-lust-linux-x64.tar.gz -C target lust-bin lust-proof.json lust/policy-adapter-proof.json lust/dispatch-proof.json
           sha256sum target/t3-code-ls-lust-linux-x64.tar.gz > target/t3-code-ls-lust-linux-x64.tar.gz.sha256
       - name: Retain the verified Linux Lust executables
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -179,6 +189,7 @@ jobs:
           path: |
             native/t3-code-ls/target/lust-proof.json
             native/t3-code-ls/target/lust/policy-adapter-proof.json
+            native/t3-code-ls/target/lust/dispatch-proof.json
             ${{ runner.temp }}/ls-policy-node/package-lock.json
           if-no-files-found: ignore
           retention-days: 14
@@ -208,7 +219,7 @@ jobs:
           git init .
           git remote add origin "https://github.com/${SOURCE_REPOSITORY}.git"
           git -c credential.helper= fetch --no-tags --depth=1 origin "$SOURCE_REVISION"
-          git sparse-checkout set --cone native/t3-code-ls packages/contracts packages/client-runtime
+          git sparse-checkout set --cone native/t3-code-ls packages/contracts packages/client-runtime apps/server/src/orchestration-v2
           git checkout --detach FETCH_HEAD
       - name: Install mobile, Windows, and WebAssembly standard libraries
         run: |
