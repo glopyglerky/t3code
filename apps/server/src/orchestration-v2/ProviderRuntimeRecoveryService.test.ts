@@ -1,3 +1,4 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it, vi } from "@effect/vitest";
 import {
   MessageId,
@@ -51,6 +52,7 @@ it.effect("expires orphaned runtime requests before command readiness", () => {
     nodes: [],
   } as unknown as OrchestrationV2ThreadProjection;
   const layer = ProviderRuntimeRecovery.layer.pipe(
+    Layer.provide(NodeServices.layer),
     Layer.provide(ServerSettings.layerTest()),
     Layer.provide(
       Layer.mergeAll(
@@ -103,6 +105,7 @@ it.effect("preserves async questions across startup and shutdown", () => {
   } as unknown as OrchestrationV2ThreadProjection;
   const commitCommand = vi.fn(() => Effect.die("an async question needs no process-loss write"));
   const layer = ProviderRuntimeRecovery.layer.pipe(
+    Layer.provide(NodeServices.layer),
     Layer.provide(ServerSettings.layerTest()),
     Layer.provide(
       Layer.mergeAll(
@@ -173,6 +176,7 @@ it.effect(
       ],
     } as unknown as OrchestrationV2ThreadProjection;
     const layer = ProviderRuntimeRecovery.layer.pipe(
+      Layer.provide(NodeServices.layer),
       Layer.provide(ServerSettings.layerTest()),
       Layer.provide(
         Layer.mergeAll(
@@ -318,6 +322,7 @@ it.effect(
       ],
     } as unknown as OrchestrationV2ThreadProjection;
     const layer = ProviderRuntimeRecovery.layer.pipe(
+      Layer.provide(NodeServices.layer),
       Layer.provide(ServerSettings.layerTest()),
       Layer.provide(
         Layer.mergeAll(
@@ -384,6 +389,7 @@ it.effect("cancels a stale waiting run when no checkpoint capture can finish it"
     turnItems: [],
   } as unknown as OrchestrationV2ThreadProjection;
   const layer = ProviderRuntimeRecovery.layer.pipe(
+    Layer.provide(NodeServices.layer),
     Layer.provide(ServerSettings.layerTest()),
     Layer.provide(
       Layer.mergeAll(
@@ -460,6 +466,7 @@ it.effect("recovery closes a secret card's form but leaves a link card open", ()
     ],
   } as unknown as OrchestrationV2ThreadProjection;
   const layer = ProviderRuntimeRecovery.layer.pipe(
+    Layer.provide(NodeServices.layer),
     Layer.provide(ServerSettings.layerTest()),
     Layer.provide(
       Layer.mergeAll(
@@ -595,6 +602,7 @@ it.effect.each([
     turnItems: [],
   } as unknown as OrchestrationV2ThreadProjection;
   const layer = ProviderRuntimeRecovery.layer.pipe(
+    Layer.provide(NodeServices.layer),
     Layer.provide(ServerSettings.layerTest()),
     Layer.provide(
       Layer.mergeAll(
@@ -740,6 +748,7 @@ it.effect(
       ],
     } as unknown as OrchestrationV2ThreadProjection;
     const layer = ProviderRuntimeRecovery.layer.pipe(
+      Layer.provide(NodeServices.layer),
       Layer.provide(ServerSettings.layerTest()),
       Layer.provide(
         Layer.mergeAll(
@@ -869,6 +878,7 @@ it.effect("cancels workflow members and child roots without run ids after restar
   } as unknown as OrchestrationV2ThreadProjection;
   const committed: Array<Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0]> = [];
   const layer = ProviderRuntimeRecovery.layer.pipe(
+    Layer.provide(NodeServices.layer),
     Layer.provide(ServerSettings.layerTest()),
     Layer.provide(
       Layer.mergeAll(
@@ -1034,6 +1044,7 @@ it.effect(
       ],
     } as unknown as OrchestrationV2ThreadProjection;
     const layer = ProviderRuntimeRecovery.layer.pipe(
+      Layer.provide(NodeServices.layer),
       Layer.provide(ServerSettings.layerTest()),
       Layer.provide(
         Layer.mergeAll(
@@ -1191,6 +1202,7 @@ it.effect(
       ],
     } as unknown as OrchestrationV2ThreadProjection;
     const layer = ProviderRuntimeRecovery.layer.pipe(
+      Layer.provide(NodeServices.layer),
       Layer.provide(ServerSettings.layerTest()),
       Layer.provide(
         Layer.mergeAll(
@@ -1321,6 +1333,7 @@ it.effect(
       ],
     } as unknown as OrchestrationV2ThreadProjection;
     const layer = ProviderRuntimeRecovery.layer.pipe(
+      Layer.provide(NodeServices.layer),
       Layer.provide(ServerSettings.layerTest()),
       Layer.provide(
         Layer.mergeAll(
@@ -1478,6 +1491,7 @@ it.effect("leaves delegated tasks to their own child threads after process loss"
     ],
   } as unknown as OrchestrationV2ThreadProjection;
   const layer = ProviderRuntimeRecovery.layer.pipe(
+    Layer.provide(NodeServices.layer),
     Layer.provide(ServerSettings.layerTest()),
     Layer.provide(
       Layer.mergeAll(

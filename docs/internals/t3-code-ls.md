@@ -70,10 +70,23 @@ also disables the original executable's diagnostic version fallback.
 
 Recovery event planning is a separate Lust port of the two upstream completion
 functions in `subagentProjection.ts`. It preserves event order and allocation
-failures while retaining payload fields outside its model. The caller still
-owns authoritative event storage and transactional commit. A matching planned
-batch does not establish durable recovery or wire this planner into the current
-recovery service.
+failures while retaining payload fields outside its model. The environment
+selector `T3_CODE_LS_RECOVERY_EXECUTABLE` routes startup/shutdown reconciliation
+and both live orchestration flows through the same adapter. The executable
+returns drafts without IDs, and the adapter validates the entire response before
+using the caller's allocator. JSON extensions survive schema decoding; known
+timestamp fields become the actual contract's DateTime values. The caller still
+owns authoritative event storage and transactional commit.
+
+Reconciliation combines orphaned subagents and root turns in one process per
+thread so a shutdown transaction does not start one process per record. Native
+failure aborts the existing transaction, including earlier thread writes in the
+same shutdown group. Interruption awaits child cleanup. The process receives an
+empty environment, bounded JSON over standard input, and no shell. Its fixed
+limits are 128 MiB per request/response, 65,536 output events, and 30 seconds.
+The SQLite integration gate exercises persistence, reopen/replay, idempotence,
+group rollback, and cancellation. This establishes recovery integration, while
+the event store, projections, and outbox still execute in TypeScript.
 
 Source basis: [Lust's implementation contract](https://github.com/t3dotgg/lust-lang/blob/240e08d91d4aed0299639f6f11fd522912b248f9/README.md),
 [release target allowlist](https://github.com/t3dotgg/lust-lang/blob/240e08d91d4aed0299639f6f11fd522912b248f9/src/resolve/cfg.rs),

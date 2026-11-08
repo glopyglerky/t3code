@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build pinned Lust and verify application decisions and the provider process runtime.
+"""Build pinned Lust and verify application decisions, recovery, and provider processes.
 
 Usage: python3 tools/check-lust.py --source /absolute/path/to/lust-lang
 
@@ -66,6 +66,7 @@ def verify_source(source: Path, revision: str) -> None:
 def source_hashes() -> dict[str, str]:
     files = list((ROOT / "crates/core").rglob("*.rs"))
     files += list((ROOT / "tools").glob("check-*.mjs"))
+    files += list((ROOT / "tools").glob("*-tsconfig.json"))
     files += [ROOT / "Cargo.toml", ROOT / "Cargo.lock", ROOT / "crates/core/Cargo.toml",
               ROOT / "tools/upstream-source.mjs",
               ROOT / "tools/install-server-tests.mjs",
@@ -76,6 +77,9 @@ def source_hashes() -> dict[str, str]:
               REPO / "apps/server/src/orchestration-v2/NativeDispatchPolicy.ts",
               REPO / "apps/server/src/orchestration-v2/NativeCommandPolicy.ts",
               REPO / "apps/server/src/orchestration-v2/CommandPolicy.ts",
+              REPO / "apps/server/src/orchestration-v2/ProviderRecoveryPlanner.ts",
+              REPO / "apps/server/src/orchestration-v2/ProviderRuntimeRecoveryService.ts",
+              REPO / "apps/server/src/processRunner.ts",
               REPO / "apps/server/src/orchestration-v2/Orchestrator.ts"]
     hashes = {str(path.relative_to(REPO)): sha256(path) for path in sorted(files)}
     upstream = json.loads((ROOT / "upstream.lock.json").read_text())["upstream"]
@@ -135,7 +139,7 @@ def main() -> int:
     source = args.source.resolve()
     receipt = {"schema": 1, "status": "failed", "steps": [],
                "generated_at": datetime.now(timezone.utc).isoformat(),
-               "scope": "Lust application decisions, JSON codec, and Unix provider process runtime; "
+               "scope": "Lust application decisions, recovery wire, JSON codec, and Unix provider process runtime; "
                         "full application, UI, mobile, and Iroh qualification excluded"}
     try:
         pin = json.loads(PIN_FILE.read_text())
@@ -211,7 +215,9 @@ def main() -> int:
                 receipt[f"{surface}_parity"] = parity.stdout.strip()
                 print(parity.stdout, end="")
             executables = []
-            for component in ("policy", "provider"):
+            for component, verifier in (("policy", "check-policy.mjs"),
+                                        ("provider", "check-provider.mjs"),
+                                        ("recovery", "check-recovery-runtime.mjs")):
                 name = f"t3-code-ls-{component}"
                 executable = work / name
                 run([str(lust), "build", f"crates/core/src/bin/{name}.rs",
@@ -219,7 +225,7 @@ def main() -> int:
                      "-o", str(executable), "--json"], cwd=ROOT, env=env, receipt=receipt,
                     name=f"build {component} executable with Lust")
                 receipt[f"{component}_binary_sha256"] = sha256(executable)
-                parity = run(["node", f"tools/check-{component}.mjs", str(executable)],
+                parity = run(["node", f"tools/{verifier}", str(executable)],
                              cwd=ROOT, env=env, receipt=receipt,
                              name=f"verify the Lust-built {component} executable")
                 receipt[f"{component}_verification"] = parity.stdout.strip()

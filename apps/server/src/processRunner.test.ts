@@ -17,6 +17,8 @@ type ChildProcessCommand = {
   readonly args: ReadonlyArray<string>;
   readonly options: {
     readonly shell?: boolean | string;
+    readonly env?: NodeJS.ProcessEnv | undefined;
+    readonly extendEnv?: boolean | undefined;
   };
 };
 
@@ -77,46 +79,67 @@ const runWith =
     );
 
 describe("runProcess", () => {
-  it.effect("resolves and escapes Windows command shims before spawning", () => {
-    const spawner = makeSpawner((command) =>
-      Effect.sync(() => {
-        expect(command.command).toBe(
-          [
-            '^"C:\\Users\\tester\\AppData\\Roaming\\npm\\az.cmd^"',
-            '^"repos^"',
-            '^"pr^"',
-            '^"list^"',
-            '^"--source-branch^"',
-            '^"feature^ ^&^ release^"',
-          ].join(" "),
-        );
-        expect(command.args).toEqual([]);
-        expect(command.options.shell).toBe(true);
-        return makeHandle({ stdout: "[]" });
-      }),
-    );
-
-    return runWith(spawner)({
-      command: "az",
-      args: ["repos", "pr", "list", "--source-branch", "feature & release"],
-      env: { AZURE_CONFIG_DIR: "C:\\Users\\tester\\.azure" },
-    }).pipe(
-      Effect.provideService(HostProcess.Platform, "win32"),
-      Effect.provideService(HostProcess.Environment, {
+  it.effect("resolves and escapes Windows command shims using the selected environment", () =>
+    Effect.gen(function* () {
+      const hostEnvironment = {
         PATH: "C:\\Users\\tester\\AppData\\Roaming\\npm",
         PATHEXT: ".COM;.EXE;.BAT;.CMD",
-      }),
-      Effect.provideService(SpawnExecutableResolution, (_command, _platform, env) =>
-        env.PATH === "C:\\Users\\tester\\AppData\\Roaming\\npm" &&
-        env.AZURE_CONFIG_DIR === "C:\\Users\\tester\\.azure"
-          ? "C:\\Users\\tester\\AppData\\Roaming\\npm\\az.cmd"
-          : undefined,
-      ),
-      Effect.map((result) => {
+        PARENT_ONLY: "must-not-reach-isolated-child",
+      };
+      const args = ["repos", "pr", "list", "--source-branch", "feature & release"];
+      for (const input of [
+        {
+          env: { AZURE_CONFIG_DIR: "C:\\Users\\tester\\.azure" },
+          extendEnv: undefined,
+          executable: "C:\\Users\\tester\\AppData\\Roaming\\npm\\az.cmd",
+        },
+        { env: {}, extendEnv: false, executable: undefined },
+        {
+          env: { PATH: "C:\\isolated\\bin", AZURE_CONFIG_DIR: "C:\\isolated\\.azure" },
+          extendEnv: false,
+          executable: "C:\\isolated\\bin\\az.cmd",
+        },
+      ]) {
+        const spawner = makeSpawner((command) =>
+          Effect.sync(() => {
+            expect(command.command).toBe(
+              input.executable === undefined
+                ? "az"
+                : [
+                    `^"${input.executable}^"`,
+                    '^"repos^"',
+                    '^"pr^"',
+                    '^"list^"',
+                    '^"--source-branch^"',
+                    '^"feature^ ^&^ release^"',
+                  ].join(" "),
+            );
+            expect(command.args).toEqual(input.executable === undefined ? args : []);
+            expect(command.options.shell).toBe(input.executable !== undefined);
+            expect(command.options.env).toEqual(input.env);
+            expect(command.options.extendEnv).toBe(input.extendEnv ?? true);
+            return makeHandle({ stdout: "[]" });
+          }),
+        );
+        const result = yield* runWith(spawner)({
+          command: "az",
+          args,
+          env: input.env,
+          extendEnv: input.extendEnv,
+        }).pipe(
+          Effect.provideService(HostProcess.Platform, "win32"),
+          Effect.provideService(HostProcess.Environment, hostEnvironment),
+          Effect.provideService(SpawnExecutableResolution, (_command, _platform, env) => {
+            expect(env).toEqual(
+              input.extendEnv === false ? input.env : { ...hostEnvironment, ...input.env },
+            );
+            return input.executable;
+          }),
+        );
         expect(result.stdout).toBe("[]");
-      }),
-    );
-  });
+      }
+    }),
+  );
 
   it.effect("types spawn failures that the platform spawner throws synchronously", () =>
     Effect.gen(function* () {

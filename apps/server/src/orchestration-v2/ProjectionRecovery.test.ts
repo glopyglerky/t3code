@@ -1,3 +1,4 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
@@ -41,6 +42,7 @@ const layerTest = Layer.mergeAll(ProjectionStore.layer, EffectOutbox.layer).pipe
   Layer.provideMerge(SqlitePersistence.layerMemory),
 );
 const layerRecoveryTest = ProviderRuntimeRecovery.layer.pipe(
+  Layer.provide(NodeServices.layer),
   Layer.provideMerge(
     EventSink.layer.pipe(
       Layer.provideMerge(

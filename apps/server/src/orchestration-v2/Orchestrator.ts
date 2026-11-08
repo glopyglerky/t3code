@@ -103,11 +103,7 @@ import {
   SHARED_WORKSPACE_RESTORE_MESSAGE,
 } from "./CheckpointRestoreSafety.ts";
 import { CheckpointServiceV2 } from "./CheckpointService.ts";
-import {
-  CommandPolicyV2,
-  isActiveRun,
-  isNativeMaintenanceCommand,
-} from "./CommandPolicy.ts";
+import { CommandPolicyV2, isActiveRun, isNativeMaintenanceCommand } from "./CommandPolicy.ts";
 import { CommandReceiptStoreV2, type CommandReceiptV2 } from "./CommandReceiptStore.ts";
 import {
   ContextHandoffServiceV2,
@@ -170,13 +166,13 @@ import { ProviderAdapterRegistryV2 } from "./ProviderAdapterRegistry.ts";
 import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import * as RunExecutionService from "./RunExecutionService.ts";
+import * as ProviderRecoveryPlanner from "./ProviderRecoveryPlanner.ts";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import { ProviderSessionManagerV2 } from "./ProviderSessionManager.ts";
 import { ProviderSwitchServiceV2 } from "./ProviderSwitchService.ts";
 import { isAutomaticCompletionRun, queuedRunsInDeliveryOrder } from "./QueuedRunOrder.ts";
 import { isRuntimePolicyAboveCeilingError, RuntimePolicyV2 } from "./RuntimePolicy.ts";
 import {
-  endOrphanedNativeSubagent,
-  endRunlessRootTurns,
   makeSubagentChildThread,
   subagentResultForRun,
   delegatedTaskProgress,
@@ -1094,6 +1090,7 @@ function lastDeliveredRunForProviderThread(
 
 const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(function* () {
   const checkpointService = yield* CheckpointServiceV2;
+  const recoveryPlanner = yield* ProviderRecoveryPlanner.make();
   const commandPolicy = yield* CommandPolicyV2;
   const contextHandoffService = yield* ContextHandoffServiceV2;
   const eventSink = yield* EventSinkV2;
@@ -10725,14 +10722,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         >;
       }> = [{ projection: input.projection, subagent: item }];
       for (const { projection, subagent } of dying) {
-        const ended = yield* endOrphanedNativeSubagent({
-          projection,
-          subagentId: subagent.subagentId,
-          status: "interrupted",
-          now: input.now,
-          emitted: yield* Ref.get(input.events),
-          allocateEventId,
-        }).pipe(mapDispatchError(input.command));
+        const ended = yield* recoveryPlanner
+          .endOrphanedNativeSubagent({
+            projection,
+            subagentId: subagent.subagentId,
+            status: "interrupted",
+            now: input.now,
+            emitted: yield* Ref.get(input.events),
+            allocateEventId,
+          })
+          .pipe(mapDispatchError(input.command));
         yield* Ref.update(input.events, (events) => [...events, ...ended]);
         const childThreadId = subagent.childThreadId;
         if (
@@ -10754,15 +10753,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             mapDispatchError(input.command),
           );
         if (child === null) continue;
-        const childEnded = yield* endRunlessRootTurns({
-          threadId: childThreadId,
-          providerInstanceId: subagent.providerInstanceId,
-          projection: child,
-          status: "interrupted",
-          now: input.now,
-          emitted: yield* Ref.get(input.events),
-          allocateEventId,
-        }).pipe(mapDispatchError(input.command));
+        const childEnded = yield* recoveryPlanner
+          .endRunlessRootTurns({
+            threadId: childThreadId,
+            providerInstanceId: subagent.providerInstanceId,
+            projection: child,
+            status: "interrupted",
+            now: input.now,
+            emitted: yield* Ref.get(input.events),
+            allocateEventId,
+          })
+          .pipe(mapDispatchError(input.command));
         yield* Ref.update(input.events, (events) => [...events, ...childEnded]);
         for (const nested of child.turnItems) {
           if (nested.type === "subagent") dying.push({ projection: child, subagent: nested });
@@ -11347,16 +11348,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             threadId: command.threadId,
             commandId: command.commandId,
           });
-        const ended = yield* endOrphanedNativeSubagent({
-          projection,
-          subagentId: subagent.id,
-          result: outcome.result,
-          status: outcome.status,
-          completedAt: outcome.completedAt,
-          now,
-          emitted: yield* Ref.get(events),
-          allocateEventId,
-        }).pipe(mapDispatchError(command));
+        const ended = yield* recoveryPlanner
+          .endOrphanedNativeSubagent({
+            projection,
+            subagentId: subagent.id,
+            result: outcome.result,
+            status: outcome.status,
+            completedAt: outcome.completedAt,
+            now,
+            emitted: yield* Ref.get(events),
+            allocateEventId,
+          })
+          .pipe(mapDispatchError(command));
         yield* Ref.update(events, (current) => [...current, ...ended]);
         if (subagent.childThreadId !== null) {
           const child = yield* projectionStore
@@ -11369,16 +11372,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               mapDispatchError(command),
             );
           if (child !== null) {
-            const childEnded = yield* endRunlessRootTurns({
-              threadId: subagent.childThreadId,
-              providerInstanceId: subagent.providerInstanceId,
-              projection: child,
-              status: outcome.status,
-              completedAt: outcome.completedAt,
-              now,
-              emitted: yield* Ref.get(events),
-              allocateEventId,
-            }).pipe(mapDispatchError(command));
+            const childEnded = yield* recoveryPlanner
+              .endRunlessRootTurns({
+                threadId: subagent.childThreadId,
+                providerInstanceId: subagent.providerInstanceId,
+                projection: child,
+                status: outcome.status,
+                completedAt: outcome.completedAt,
+                now,
+                emitted: yield* Ref.get(events),
+                allocateEventId,
+              })
+              .pipe(mapDispatchError(command));
             yield* Ref.update(events, (current) => [...current, ...childEnded]);
           }
         }
@@ -14584,6 +14589,7 @@ export const layer: Layer.Layer<
   OrchestratorV2,
   never,
   | CheckpointServiceV2
+  | ChildProcessSpawner.ChildProcessSpawner
   | FileSystem.FileSystem
   | Path.Path
   | CommandPolicyV2

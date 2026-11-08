@@ -235,15 +235,38 @@ pub fn end_orphaned_native_subagent<Payload: Clone, Time: Clone, Error>(
     emitted: &[EmittedUpdate],
     allocate_event_id: &mut impl FnMut() -> Result<String, Error>,
 ) -> Result<Vec<Event<Payload, Time>>, Error> {
+    let mut events = Vec::new();
+    visit_orphaned_native_subagent(
+        projection,
+        input,
+        emitted,
+        allocate_event_id,
+        &mut |event| {
+            events.push(event);
+            Ok(())
+        },
+    )?;
+    Ok(events)
+}
+
+/// Visit events in their allocation order without retaining the complete batch.
+/// A sink failure stops planning immediately, just like an allocation failure.
+pub fn visit_orphaned_native_subagent<Payload: Clone, Time: Clone, Error>(
+    projection: &Projection<Payload, Time>,
+    input: NativeSubagentEnd<'_, Time>,
+    emitted: &[EmittedUpdate],
+    allocate_event_id: &mut impl FnMut() -> Result<String, Error>,
+    emit: &mut impl FnMut(Event<Payload, Time>) -> Result<(), Error>,
+) -> Result<(), Error> {
     let Some(subagent) = projection
         .subagents
         .iter()
         .find(|entry| entry.id == input.subagent_id)
     else {
-        return Ok(Vec::new());
+        return Ok(());
     };
     if subagent.origin != SubagentOrigin::ProviderNative {
-        return Ok(Vec::new());
+        return Ok(());
     }
     let node = projection
         .nodes
@@ -263,7 +286,6 @@ pub fn end_orphaned_native_subagent<Payload: Clone, Time: Clone, Error>(
         occurred_at: completion.now.clone(),
         payload,
     };
-    let mut events = Vec::new();
     if subagent.status.is_active()
         && !written_ids(emitted, UpdateKind::Subagent).contains(input.subagent_id)
     {
@@ -275,7 +297,7 @@ pub fn end_orphaned_native_subagent<Payload: Clone, Time: Clone, Error>(
         if let Some(result) = &input.result {
             ended.result = result.clone();
         }
-        events.push(scope(id, EventPayload::Subagent(ended)));
+        emit(scope(id, EventPayload::Subagent(ended)))?;
     }
     if let Some(node) = node
         && node.status.is_active()
@@ -285,7 +307,7 @@ pub fn end_orphaned_native_subagent<Payload: Clone, Time: Clone, Error>(
         let mut ended = node.clone();
         ended.status = completion.status.work_status();
         ended.completed_at = Some(completion.completed_at());
-        events.push(scope(id, EventPayload::Node(ended)));
+        emit(scope(id, EventPayload::Node(ended)))?;
     }
     if let Some(item) = item
         && item.status.is_active()
@@ -301,9 +323,9 @@ pub fn end_orphaned_native_subagent<Payload: Clone, Time: Clone, Error>(
         {
             *result = next_result.clone();
         }
-        events.push(scope(id, EventPayload::TurnItem(ended)));
+        emit(scope(id, EventPayload::TurnItem(ended)))?;
     }
-    Ok(events)
+    Ok(())
 }
 
 /// End active runless roots and their unresolved work in projection order.
@@ -315,6 +337,29 @@ pub fn end_runless_root_turns<Payload: Clone, Time: Clone, Error>(
     emitted: &[EmittedUpdate],
     allocate_event_id: &mut impl FnMut() -> Result<String, Error>,
 ) -> Result<Vec<Event<Payload, Time>>, Error> {
+    let mut events = Vec::new();
+    visit_runless_root_turns(
+        projection,
+        input,
+        emitted,
+        allocate_event_id,
+        &mut |event| {
+            events.push(event);
+            Ok(())
+        },
+    )?;
+    Ok(events)
+}
+
+/// Stream planned records to a bounded sink while retaining the exclusions
+/// captured on entry, rather than newly emitted updates.
+pub fn visit_runless_root_turns<Payload: Clone, Time: Clone, Error>(
+    projection: &Projection<Payload, Time>,
+    input: RootTurnsEnd<Time>,
+    emitted: &[EmittedUpdate],
+    allocate_event_id: &mut impl FnMut() -> Result<String, Error>,
+    emit: &mut impl FnMut(Event<Payload, Time>) -> Result<(), Error>,
+) -> Result<(), Error> {
     let ended_nodes = written_ids(emitted, UpdateKind::Node);
     let ended_items = written_ids(emitted, UpdateKind::TurnItem);
     let ended_turns = written_ids(emitted, UpdateKind::ProviderTurn);
@@ -328,7 +373,6 @@ pub fn end_runless_root_turns<Payload: Clone, Time: Clone, Error>(
         occurred_at: completion.now.clone(),
         payload,
     };
-    let mut events = Vec::new();
     for node in &projection.nodes {
         if node.kind != NodeKind::RootTurn || node.run_id.is_some() || !node.status.is_active() {
             continue;
@@ -338,7 +382,7 @@ pub fn end_runless_root_turns<Payload: Clone, Time: Clone, Error>(
             let mut ended = node.clone();
             ended.status = completion.status.work_status();
             ended.completed_at = Some(completion.completed_at());
-            events.push(scope(id, &node.id, EventPayload::Node(ended)));
+            emit(scope(id, &node.id, EventPayload::Node(ended)))?;
         }
         for item in &projection.turn_items {
             if item.node_id.as_deref() != Some(node.id.as_str())
@@ -366,7 +410,7 @@ pub fn end_runless_root_turns<Payload: Clone, Time: Clone, Error>(
                 | TurnItemKind::AssistantMessage { streaming } => *streaming = false,
                 _ => {}
             }
-            events.push(scope(id, &node.id, EventPayload::TurnItem(ended)));
+            emit(scope(id, &node.id, EventPayload::TurnItem(ended)))?;
         }
         for provider_turn in &projection.provider_turns {
             if provider_turn.node_id != node.id
@@ -380,8 +424,8 @@ pub fn end_runless_root_turns<Payload: Clone, Time: Clone, Error>(
             let mut ended = provider_turn.clone();
             ended.status = completion.status.work_status();
             ended.completed_at = Some(completion.completed_at());
-            events.push(scope(id, &node.id, EventPayload::ProviderTurn(ended)));
+            emit(scope(id, &node.id, EventPayload::ProviderTurn(ended)))?;
         }
     }
-    Ok(events)
+    Ok(())
 }

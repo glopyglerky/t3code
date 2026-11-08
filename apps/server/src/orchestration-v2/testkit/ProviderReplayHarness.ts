@@ -560,6 +560,7 @@ export function layerWithRegistry<Error>(
           ).pipe(Effect.orDie),
         ).pipe(
           Layer.provide(ProviderRuntimeRecoveryService.layer),
+          Layer.provide(NodeServices.layer),
           Layer.provide(
             Layer.mergeAll(
               layerStores,

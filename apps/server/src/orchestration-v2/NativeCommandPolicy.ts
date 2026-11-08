@@ -1,5 +1,6 @@
-import { execFile } from "node:child_process";
-import { isAbsolute } from "node:path";
+// @effect-diagnostics nodeBuiltinImport:off -- This existing policy adapter starts a bounded native executable on the host OS.
+import * as NodeChildProcess from "node:child_process";
+import * as NodePath from "node:path";
 import * as Effect from "effect/Effect";
 import { makeNativeDispatchPolicy } from "./NativeDispatchPolicy.ts";
 
@@ -43,7 +44,7 @@ function execute(executable: string, args: ReadonlyArray<string>, signal: AbortS
       reject(new Error("Native provider policy was interrupted before execution"));
       return;
     }
-    execFile(
+    NodeChildProcess.execFile(
       executable,
       args,
       {
@@ -71,7 +72,7 @@ export function makeNativeCommandPolicy(
   executable: string,
   unsupported: Rejection,
 ): CommandPolicyV2Shape {
-  if (!isAbsolute(executable) || executable.includes("\0")) {
+  if (!NodePath.isAbsolute(executable) || executable.includes("\0")) {
     throw new Error("T3_CODE_LS_POLICY_EXECUTABLE must be an absolute executable path");
   }
 
@@ -95,7 +96,12 @@ export function makeNativeCommandPolicy(
           }
         }
         const detail = fields[2];
-        if (fields[0] === "unsupported" && fields.length === 3 && typeof detail === "string" && detail !== "") {
+        if (
+          fields[0] === "unsupported" &&
+          fields.length === 3 &&
+          typeof detail === "string" &&
+          detail !== ""
+        ) {
           for (const capability of refusals) {
             if (fields[1] === capability) {
               return Effect.fail(unsupported(input, capability, detail));
@@ -114,29 +120,44 @@ export function makeNativeCommandPolicy(
     ),
     decideSteeringExecution: Effect.fn("NativeCommandPolicy.decideSteeringExecution")(
       (input: Parameters<CommandPolicyV2Shape["decideSteeringExecution"]>[0]) =>
-        decide(input, "steering", [input.forceRestart ? "1" : "0"], [
-          "active_steering",
-          "interrupt_restart",
-        ] as const, ["active_steering", "interrupt_restart_steering"]),
+        decide(
+          input,
+          "steering",
+          [input.forceRestart ? "1" : "0"],
+          ["active_steering", "interrupt_restart"] as const,
+          ["active_steering", "interrupt_restart_steering"],
+        ),
     ),
     ensureInterrupt: Effect.fn("NativeCommandPolicy.ensureInterrupt")((input: Input) =>
       decide(input, "interrupt", [], ["-"], ["interrupt"]).pipe(Effect.asVoid),
     ),
     ensureNativeFork: Effect.fn("NativeCommandPolicy.ensureNativeFork")(
       (input: Parameters<CommandPolicyV2Shape["ensureNativeFork"]>[0]) =>
-        decide(input, "native-fork", [input.fromSpecificTurn ? "1" : "0"], ["-"], [
-          "native_fork", "fork_from_turn",
-        ]).pipe(Effect.asVoid),
+        decide(
+          input,
+          "native-fork",
+          [input.fromSpecificTurn ? "1" : "0"],
+          ["-"],
+          ["native_fork", "fork_from_turn"],
+        ).pipe(Effect.asVoid),
     ),
     decideForkExecution: Effect.fn("NativeCommandPolicy.decideForkExecution")(
       (input: Parameters<CommandPolicyV2Shape["decideForkExecution"]>[0]) =>
-        decide(input, "fork", [
-          input.sameProvider ? "1" : "0",
-          input.hasStrongNativeSource ? "1" : "0",
-          input.sourceRunStatus === "completed" || input.sourceRunStatus === "waiting" ? "1" : "0",
-          input.fromSpecificTurn ? "1" : "0",
-          input.sourceBusy ? "1" : "0",
-        ], ["native_fork", "portable_context"] as const, ["context_handoff"]),
+        decide(
+          input,
+          "fork",
+          [
+            input.sameProvider ? "1" : "0",
+            input.hasStrongNativeSource ? "1" : "0",
+            input.sourceRunStatus === "completed" || input.sourceRunStatus === "waiting"
+              ? "1"
+              : "0",
+            input.fromSpecificTurn ? "1" : "0",
+            input.sourceBusy ? "1" : "0",
+          ],
+          ["native_fork", "portable_context"] as const,
+          ["context_handoff"],
+        ),
     ),
     ensureRollback: Effect.fn("NativeCommandPolicy.ensureRollback")((input: Input) =>
       decide(input, "rollback", [], ["-"], ["rollback", "rollback_snapshot"]).pipe(Effect.asVoid),

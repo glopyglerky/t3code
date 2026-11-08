@@ -59,8 +59,11 @@ this selection.
 The recovery planner ports orphaned native subagent and runless root-turn
 completion. Its oracle compares complete event batches, allocator failures, and
 replayed recovery cases against the immutable upstream functions using the real
-Effect runtime. These functions plan events; production recovery-service wiring
-and durable event commits remain separate work.
+Effect runtime. `T3_CODE_LS_RECOVERY_EXECUTABLE` selects the Lust executable for
+startup and shutdown recovery and the live orchestrator's subagent completion
+and stop flows. The existing event sink still owns the SQLite transaction,
+projection updates, command receipt, and outbox. The integration checks cover
+durable replay, repeated recovery, failure rollback, and child cleanup.
 
 The native transport carries a fixed loopback service's HTTP, WebSocket, and
 binary traffic over authenticated Iroh connections. Each host explicitly admits
@@ -153,6 +156,34 @@ approval exchanges, notifications, cancelled requests on a continuing session,
 terminal errors, and scope cleanup. They do not establish a complete server,
 provider conversation, or client application port.
 
+## Use the Lust recovery planner
+
+Build the verified Linux components, then select the recovery executable in the
+server's environment. From the repository root:
+
+```sh
+T3CODE_DEV_SEED=0 \
+T3_CODE_LS_RECOVERY_EXECUTABLE="$PWD/native/t3-code-ls/target/lust-bin/t3-code-ls-recovery" \
+vp run dev
+```
+
+The selector is independent of the policy and provider selectors. Only an unset
+value retains upstream recovery planning. An empty or relative path, a failed
+process, or an invalid response fails the operation. The planner receives its
+projection on standard input with an empty environment and no shell. It returns
+event drafts without IDs. The adapter validates every draft with the real event
+schema and its source scope before allocating IDs, then the caller commits the
+batch through the existing event sink. Recovery uses one native process per
+thread; shutdown retains the existing grouped transaction and rolls back the
+group when a planner fails.
+
+Each request and response is limited to 128 MiB, each response to 65,536 events,
+and execution to 30 seconds. Native parsing also bounds nesting and value count,
+rejects duplicate object keys, and requires Unicode scalar strings. Interruption
+closes and reaps the owned process before returning. The verified artifact is
+Linux x86-64; other hosts need their own compilation and runtime qualification.
+This ports recovery decisions while the persistence engine remains TypeScript.
+
 ## Connect two machines
 
 The bridge currently makes every backend connection from loopback. Upstream
@@ -224,6 +255,8 @@ node --disable-warning=ExperimentalWarning tools/check-dispatch.mjs
 node --disable-warning=ExperimentalWarning tools/check-guest-share.mjs
 cargo build --locked -p t3-code-ls-core --example provider_recovery_matrix
 node --disable-warning=ExperimentalWarning tools/check-provider-recovery.mjs target/debug/examples/provider_recovery_matrix
+cargo build --locked -p t3-code-ls-core --bin t3-code-ls-recovery
+node --disable-warning=ExperimentalWarning tools/check-recovery-runtime.mjs target/debug/t3-code-ls-recovery
 node tools/check-json.mjs
 cargo build --locked -p t3-code-ls-core --bin t3-code-ls-provider
 node tools/check-provider.mjs target/debug/t3-code-ls-provider
@@ -237,11 +270,13 @@ in [lust-toolchain.json](./lust-toolchain.json), then run:
 python3 tools/check-lust.py --source /absolute/path/to/lust-lang --artifacts target/lust-bin
 tools/server-test-runtime/node_modules/.bin/effect-tsgo tsrs --noEmit --project tools/provider-tsconfig.json
 node tools/check-provider-adapter.mjs "$PWD/target/lust-bin/t3-code-ls-provider"
+tools/server-test-runtime/node_modules/.bin/effect-tsgo tsrs --noEmit --project tools/recovery-tsconfig.json
+node tools/check-recovery-adapter.mjs "$PWD/target/lust-bin/t3-code-ls-recovery"
 ```
 
 The gate builds the pinned compiler and TinyCC, checks the unchanged core, runs
 its unit tests through Lust, and compiles and executes the application oracles
-and provider subprocess fixtures. It rejects a dirty or wrong compiler checkout,
+and provider and recovery subprocess fixtures. It rejects a dirty or wrong compiler checkout,
 ignored tests, source changes during verification, and mismatched behavior. The
 receipt records hashes of the exact Git blobs, binaries, and command results at
 `target/lust-proof.json`. There is no Cargo fallback for these Lust checks.
@@ -256,9 +291,10 @@ are service and call-site integration checks, not a complete orchestrator,
 application, provider-session, browser, or mobile qualification.
 
 After a successful run, `target/lust-bin` contains the standalone Linux x86-64
-`t3-code-ls-policy` and `t3-code-ls-provider` executables. CI retains these verified
-components and their proof receipts as an artifact, including the dispatch-service
-receipt. They are development components, not desktop or mobile installers.
+`t3-code-ls-policy`, `t3-code-ls-provider`, and `t3-code-ls-recovery` executables.
+CI retains these verified components and their proof receipts as an artifact,
+including the dispatch and SQLite recovery receipts. They are development
+components, not desktop or mobile installers.
 
 The provider component accepts Codex app-server JSONL on standard input and
 returns responses, notifications, and approval requests on standard output:

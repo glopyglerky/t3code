@@ -11,7 +11,7 @@ NodeChildProcess.execFileSync("npm", ["ci", "--ignore-scripts", "--no-audit", "-
   stdio: "inherit",
 });
 
-// These imports reach the production Markdown modules through CodexAdapterV2.
+// Production adapters and recovery imports reach Markdown and provider SDKs.
 // Apply the same pinned patches as the workspace installation before importing.
 const patches = [
   ["mdast-util-math", "3.0.0"],
@@ -19,6 +19,7 @@ const patches = [
   ["micromark-extension-gfm-table", "2.1.1"],
   ["micromark", "4.0.2"],
   ["mdast-util-to-hast", "13.2.1"],
+  ["@muse-code/sdk", "1.4.6"],
 ];
 for (const [name, version, installedName = name] of patches) {
   const directory = NodePath.join(runtime, "node_modules", installedName);
@@ -33,7 +34,7 @@ for (const [name, version, installedName = name] of patches) {
       "--forward",
       "-p1",
       "-i",
-      NodePath.join(root, "patches", `${name}@${version}.patch`),
+      NodePath.join(root, "patches", `${name.replace("/", "__")}@${version}.patch`),
     ],
     {
       cwd: directory,

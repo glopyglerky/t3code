@@ -10,3 +10,4 @@ pub mod permissions;
 #[cfg(unix)]
 pub mod provider_process;
 pub mod provider_recovery;
+pub mod provider_recovery_wire;

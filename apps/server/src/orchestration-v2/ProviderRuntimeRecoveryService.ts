@@ -26,10 +26,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import { restartContinuationRun } from "./RestartContinuation.ts";
 import { isBufferedProviderNotification } from "./NotificationMailbox.ts";
 import { queuedRunsInDeliveryOrder } from "./QueuedRunOrder.ts";
-import {
-  endOrphanedNativeSubagent,
-  endRunlessRootTurns,
-} from "@t3tools/provider-core/server/subagentProjection";
+import * as ProviderRecoveryPlanner from "./ProviderRecoveryPlanner.ts";
 import {
   awaitingProviderThreadId,
   cancelledRosterTaskWork,
@@ -183,6 +180,7 @@ function latestStartedRun(
 }
 
 export const make = Effect.gen(function* () {
+  const recoveryPlanner = yield* ProviderRecoveryPlanner.make();
   const settings = yield* ServerSettings.ServerSettingsService;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const eventSink = yield* EventSink.EventSinkV2;
@@ -702,22 +700,10 @@ export const make = Effect.gen(function* () {
           }
         }
       }
-      // No provider process survives the server; open native subagents can never report completion.
-      for (const subagent of projection.subagents ?? []) {
-        events.push(
-          ...(yield* endOrphanedNativeSubagent({
-            projection,
-            subagentId: subagent.id,
-            status: "cancelled",
-            now,
-            emitted: events,
-            allocateEventId,
-          })),
-        );
-      }
-      // Native subagent threads have no runs to settle their runless root turns.
+      // Reconcile native subagents and runless roots in one planning call while
+      // keeping allocation and the durable event/outbox transaction here.
       events.push(
-        ...(yield* endRunlessRootTurns({
+        ...(yield* recoveryPlanner.reconcile({
           threadId: projection.thread.id,
           providerInstanceId: projection.thread.providerInstanceId,
           projection,
