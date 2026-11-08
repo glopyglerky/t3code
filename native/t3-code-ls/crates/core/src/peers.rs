@@ -32,6 +32,43 @@ impl PeerPolicy {
         true
     }
 
+    /// Replace the complete peer allowlist as one transaction. Unchanged peers retain
+    /// their connection generation; rejected input cannot partly revoke or grant.
+    /// The bounded list is administrative state, not a hot-path packet operation.
+    pub fn reconcile(&mut self, wanted: &[[u8; 32]]) -> Result<bool, &'static str> {
+        if wanted.len() > 1024 {
+            return Err("peer allowlist exceeds 1024 entries");
+        }
+        for index in 0..wanted.len() {
+            if wanted[..index].contains(&wanted[index]) {
+                return Err("duplicate endpoint in peer allowlist");
+            }
+        }
+        let mut additions = 0_u64;
+        for peer in wanted {
+            if !self.permits(peer) {
+                additions += 1;
+            }
+        }
+        if self.next_generation.checked_add(additions).is_none() {
+            return Err("peer generation space exhausted");
+        }
+        let before = self.peers.len();
+        self.peers.retain(|grant| wanted.contains(&grant.peer));
+        let mut changed = self.peers.len() != before;
+        for peer in wanted {
+            if !self.permits(peer) {
+                self.next_generation += 1;
+                self.peers.push(Grant {
+                    peer: *peer,
+                    generation: self.next_generation,
+                });
+                changed = true;
+            }
+        }
+        Ok(changed)
+    }
+
     pub fn revoke(&mut self, peer: &[u8; 32]) -> bool {
         let mut index = 0;
         while index < self.peers.len() {
@@ -87,6 +124,54 @@ mod tests {
         assert!(policy.is_empty());
         assert!(policy.grant(alice));
         assert_ne!(policy.generation(&alice), first_grant);
+    }
+
+    #[test]
+    fn reconciled_allowlists_revoke_and_add_without_regranting_survivors() {
+        let mut policy = PeerPolicy::new();
+        let alice = [1; 32];
+        let bob = [2; 32];
+        let carol = [3; 32];
+        assert!(policy.reconcile(&[alice, bob]).unwrap());
+        let original = policy.generation(&alice).unwrap();
+        let revoked = policy.generation(&bob).unwrap();
+        assert!(!policy.reconcile(&[alice, bob]).unwrap());
+        assert_eq!(policy.generation(&alice), Some(original));
+        assert!(policy.reconcile(&[carol, alice]).unwrap());
+        assert_eq!(policy.generation(&alice), Some(original));
+        assert!(!policy.permits(&bob));
+        assert!(policy.permits(&carol));
+        assert!(policy.reconcile(&[alice, bob]).unwrap());
+        assert_ne!(policy.generation(&bob), Some(revoked));
+    }
+
+    #[test]
+    fn invalid_reconciliation_is_atomic_including_generation_overflow() {
+        let mut policy = PeerPolicy::new();
+        let alice = [1; 32];
+        let bob = [2; 32];
+        assert!(policy.grant(alice));
+        let generation = policy.generation(&alice);
+        assert_eq!(
+            policy.reconcile(&[alice, alice]),
+            Err("duplicate endpoint in peer allowlist")
+        );
+        assert_eq!(
+            policy.reconcile(&vec![[3; 32]; 1025]),
+            Err("peer allowlist exceeds 1024 entries")
+        );
+        assert_eq!(policy.generation(&alice), generation);
+        assert!(!policy.permits(&bob));
+        policy.next_generation = u64::MAX;
+        assert_eq!(
+            policy.reconcile(&[bob]),
+            Err("peer generation space exhausted")
+        );
+        assert_eq!(policy.generation(&alice), generation);
+        assert!(!policy.permits(&bob));
+        assert!(policy.reconcile(&[]).unwrap());
+        assert!(!policy.permits(&alice));
+        assert!(!policy.reconcile(&[]).unwrap());
     }
 
     #[test]

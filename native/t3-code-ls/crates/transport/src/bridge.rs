@@ -191,6 +191,25 @@ impl Admission {
         self.policy
             .send_if_modified(|policy| policy.revoke(peer.as_bytes()))
     }
+    /// Publish a validated full allowlist in one watch notification. Existing
+    /// QUIC sessions are bound to generations and close on revoked membership.
+    pub fn reconcile(&self, peers: &[EndpointId]) -> Result<bool, BridgeError> {
+        let wanted: Vec<[u8; 32]> = peers.iter().map(|peer| *peer.as_bytes()).collect();
+        let mut error = None;
+        let changed = self
+            .policy
+            .send_if_modified(|policy| match policy.reconcile(&wanted) {
+                Ok(changed) => changed,
+                Err(reason) => {
+                    error = Some(reason);
+                    false
+                }
+            });
+        match error {
+            Some(reason) => Err(BridgeError::Configuration(reason)),
+            None => Ok(changed),
+        }
+    }
     pub fn permits(&self, peer: EndpointId) -> bool {
         self.policy.borrow().permits(peer.as_bytes())
     }

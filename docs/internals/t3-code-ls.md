@@ -99,6 +99,17 @@ scope-limited pairing is the tested path. Completing the integration requires
 trusted, authenticated Iroh endpoint metadata at the application boundary;
 accepting arbitrary forwarded headers would not establish that trust.
 
+The standalone Iroh host can now read a bounded, owner-controlled endpoint
+allowlist using `serve --allow-file PATH`. On Unix, SIGHUP reloads the file
+without restarting the QUIC endpoint. A reload parses and validates the complete
+file before publishing one atomic policy replacement; syntax, duplicate, size,
+permission, and missing-file errors leave the old allowlist in force and are
+reported on stderr. Operators must resolve a failed revocation immediately;
+failed reloads deliberately do not produce partial authorization changes.
+Existing peers retain their generation when they remain authorized. The
+actual peer reload control plane is implemented by the native Rust Iroh adapter,
+not yet compiled by Lust, and it is not the upstream Connect account UI.
+
 The allowlist denies by default. Each new grant has a unique generation. An
 existing connection binds that generation, so revoking and immediately
 regranting an endpoint cannot preserve its old connection. Revocation must close

@@ -2,7 +2,8 @@ use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 use clap::{Args, Parser, Subcommand};
 use t3_code_ls_transport::{
-    Admission, EndpointAddr, EndpointId, Forwarder, Host, HostConfig, Limits, Network, RelayUrl,
+    Admission, AdmissionFile, EndpointAddr, EndpointId, Forwarder, Host, HostConfig, Limits,
+    Network, RelayUrl,
     load_or_create_identity,
 };
 
@@ -58,8 +59,12 @@ enum Command {
         #[arg(long)]
         target: SocketAddr,
         /// Endpoint ID to grant. Repeat for each client; empty means deny everyone.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "allow_file")]
         allow: Vec<EndpointId>,
+        /// File containing one peer endpoint ID per line; SIGHUP reloads it on Unix.
+        /// Rejected reloads retain the previous complete allowlist.
+        #[arg(long, conflicts_with = "allow")]
+        allow_file: Option<PathBuf>,
         #[command(flatten)]
         routing: Routing,
     },
@@ -93,13 +98,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             identity,
             target,
             allow,
+            allow_file,
             routing,
         } => {
             let key = load_or_create_identity(&identity)?;
             let admission = Admission::new();
-            for peer in allow {
-                admission.grant(peer);
+            #[cfg(not(unix))]
+            if allow_file.is_some() {
+                return Err("--allow-file requires Unix SIGHUP support".into());
             }
+            let reload = if let Some(path) = allow_file {
+                Some(AdmissionFile::load(path, admission.clone())?)
+            } else {
+                admission.reconcile(&allow)?;
+                None
+            };
             let host =
                 Host::bind(key, routing.network(), HostConfig::new(target, admission)).await?;
             if routing.uses_relay() {
@@ -109,7 +122,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "{}",
                 serde_json::json!({"endpoint": host.addr(), "target": target.to_string()})
             );
-            tokio::signal::ctrl_c().await?;
+            #[cfg(unix)]
+            if let Some(reload) = reload {
+                use tokio::signal::unix::{SignalKind, signal};
+                let mut hup = signal(SignalKind::hangup())?;
+                loop {
+                    tokio::select! {
+                        result = tokio::signal::ctrl_c() => {
+                            result?;
+                            break;
+                        }
+                        received = hup.recv() => {
+                            if received.is_none() {
+                                return Err("SIGHUP monitoring stopped".into());
+                            }
+                            match reload.reload() {
+                                Ok(changed) => eprintln!("t3-code-ls: peer allowlist reloaded (changed={changed})"),
+                                Err(error) => eprintln!("t3-code-ls: peer allowlist reload rejected; previous grants preserved: {error}"),
+                            }
+                        }
+                    }
+                }
+            } else {
+                tokio::signal::ctrl_c().await?;
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = reload;
+                tokio::signal::ctrl_c().await?;
+            }
             host.shutdown().await?;
         }
         Command::Forward {
