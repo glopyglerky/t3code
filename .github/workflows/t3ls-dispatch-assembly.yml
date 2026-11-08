@@ -27,7 +27,16 @@ jobs:
           git sparse-checkout set --cone .github native/t3-code-ls apps/server/src/orchestration-v2
           git checkout --detach "$SOURCE_REVISION"
       - name: Assemble bounded edits
-        run: python3 .github/t3ls-dispatch-assembly.py
+        run: |
+          python3 .github/t3ls-dispatch-assembly.py
+          python3 - <<'PY'
+          from pathlib import Path
+          file = Path('.github/t3ls-dispatch-assembly.py')
+          text = file.read_text()
+          old = 'result = post("trees", {"base_tree": TREE, "tree": entries})'
+          assert text.count(old) == 1
+          file.write_text(text.replace(old, 'print(json.dumps({"base_tree": TREE, "base_commit": BASE, "entries": entries})); raise SystemExit(0)'))
+          PY
       - name: Install pinned formatter and compiler
         run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt,clippy
       - name: Format and test the native core
@@ -36,7 +45,7 @@ jobs:
           cargo fmt --all
           cargo clippy --locked -p t3-code-ls-core --all-targets -- -D warnings
           cargo test --locked -p t3-code-ls-core --all-targets
-      - name: Store candidate objects without moving any branch
+      - name: Store candidate blobs without changing workflows or refs
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 .github/t3ls-dispatch-assembly.py --publish
