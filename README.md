@@ -1,4 +1,16 @@
-# T3 Code
+# t3 code ls
+
+This branch develops a Lust-compatible port of T3 Code with Iroh transport.
+The native code, build commands, and current limits are in
+[native/t3-code-ls](./native/t3-code-ls/README.md).
+
+The source baseline is T3 Code nightly `0.1.8-nightly.20261108.4367` at
+`6417151c093e54dbba0e6c824c69d03983793b9a`. The existing web, desktop, server,
+and mobile applications below remain upstream TypeScript, React, Electron, and
+React Native. They have not been replaced by complete Lust applications.
+The store links and installers below install upstream T3 Code, not t3 code ls.
+
+## Upstream T3 Code
 
 T3 Code is an "agent harness control surface". It enables control of the agents on your machine with a best-in-class mobile app ([iOS](https://apps.apple.com/us/app/t3-code-remote-claude-more/id6787819824), [Android](https://play.google.com/store/apps/details?id=com.t3tools.t3code)), [web app](https://app.t3.codes) and [Electron-based desktop app](https://t3.codes).
 

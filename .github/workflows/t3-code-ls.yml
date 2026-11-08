@@ -1,0 +1,114 @@
+name: t3 code ls
+
+on:
+  push:
+    branches: [main, t3-code-ls]
+    paths:
+      - native/t3-code-ls/**
+      - packages/contracts/src/auth.ts
+      - .github/workflows/t3-code-ls.yml
+  pull_request:
+    paths:
+      - native/t3-code-ls/**
+      - packages/contracts/src/auth.ts
+      - .github/workflows/t3-code-ls.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: t3-code-ls-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    name: Native transport and upstream permission parity
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: native/t3-code-ls
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt,clippy
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Check native code
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Test native code
+        run: cargo test --locked --all-targets
+      - name: Compare permissions with the actual upstream functions
+        run: node --disable-warning=ExperimentalWarning tools/check-permissions.mjs
+      - name: Test nightly selection and complete source comparison
+        run: python3 -m unittest discover -s tools -p 'test_*.py'
+      - name: Build the bridge executable
+        run: cargo build --locked -p t3-code-ls-transport --bin t3-code-ls
+      - name: Verify against the official nightly runtime
+        run: |
+          curl --fail --location --retry 3 \
+            https://github.com/pingdotgg/t3code/releases/download/v0.1.8-nightly.20261108.4367/t3-0.1.8-nightly.20261108.4367-linux-x64.tar.gz \
+            --output "$RUNNER_TEMP/t3-nightly-linux-x64.tar.gz"
+          python3 tools/verify-upstream.py \
+            --archive "$RUNNER_TEMP/t3-nightly-linux-x64.tar.gz" \
+            --output "$RUNNER_TEMP/t3-code-ls-upstream-verification.json"
+      - name: Retain runtime verification evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: t3-code-ls-upstream-verification
+          path: ${{ runner.temp }}/t3-code-ls-upstream-verification.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+  lust:
+    name: Pinned Lust compilation and behavioral parity
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: native/t3-code-ls
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal
+      - name: Fetch the pinned Lust compiler
+        run: |
+          git init "$RUNNER_TEMP/lust-lang"
+          git -C "$RUNNER_TEMP/lust-lang" remote add origin https://github.com/t3dotgg/lust-lang.git
+          git -C "$RUNNER_TEMP/lust-lang" fetch --depth 1 origin 240e08d91d4aed0299639f6f11fd522912b248f9
+          git -C "$RUNNER_TEMP/lust-lang" checkout --detach FETCH_HEAD
+      - name: Compile and execute the core through Lust
+        run: python3 tools/check-lust.py --source "$RUNNER_TEMP/lust-lang"
+
+  portable-core:
+    name: Portable core target checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: native/t3-code-ls
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install mobile, Windows, and WebAssembly standard libraries
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup target add aarch64-apple-ios aarch64-apple-ios-sim aarch64-linux-android x86_64-pc-windows-gnu wasm32-unknown-unknown
+      - name: Check the core on each target
+        run: |
+          for target in aarch64-apple-ios aarch64-apple-ios-sim aarch64-linux-android x86_64-pc-windows-gnu wasm32-unknown-unknown; do
+            cargo check --locked -p t3-code-ls-core --target "$target"
+          done
