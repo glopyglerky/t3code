@@ -30,6 +30,17 @@ existing service contract; the policy decisions execute in Lust. This does not
 port provider sessions, persistence, message-dispatch helpers, or the rest of the
 server. The repository is still mixed-language, not an all-Lust application.
 
+The same executable now owns message-delivery precedence (queue, steer, restart,
+and immediate start) and goal-command stop decisions. The orchestrator awaits
+these operations through `CommandPolicyV2`, including both goal-stop paths.
+The temporary adapter still joins projection records and classifies maintenance
+messages; it sends only bounded capability/status facts, not prompts or IDs.
+The Lust resolver preserves absent versus explicit delivery intent, the requested
+versus latest-active target, preparation gaps, missing sessions, and maintenance
+commands. Its decisions are compared with the pinned upstream implementation
+through the production fact adapter. This is not a port of the complete
+orchestrator, provider lifecycle, persistence, or UI.
+
 The native transport carries a fixed loopback service's HTTP, WebSocket, and
 binary traffic over authenticated Iroh connections. Each host explicitly admits
 client endpoint identities. Admitting a peer does not issue a T3 application
@@ -79,6 +90,7 @@ T3 state:
 
 ```sh
 node tools/check-policy-adapter.mjs "$PWD/target/lust/t3-code-ls-policy"
+node tools/check-dispatch.mjs "$PWD/target/lust/t3-code-ls-policy" --service
 ```
 
 To select the executable in a development server, run from the repository root:
@@ -165,6 +177,7 @@ cargo clippy --locked --all-targets -- -D warnings
 node --disable-warning=ExperimentalWarning tools/check-permissions.mjs
 node --disable-warning=ExperimentalWarning tools/check-connection.mjs
 node --disable-warning=ExperimentalWarning tools/check-policy.mjs
+node --disable-warning=ExperimentalWarning tools/check-dispatch.mjs
 python3 -B -m unittest discover -s tools -p 'test_*.py'
 ```
 

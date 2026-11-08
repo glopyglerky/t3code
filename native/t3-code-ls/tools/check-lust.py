@@ -69,6 +69,11 @@ def source_hashes() -> dict[str, str]:
               ROOT / "tools/check-permissions.mjs", ROOT / "tools/check-connection.mjs",
               ROOT / "tools/check-policy.mjs", ROOT / "tools/upstream-source.mjs",
               ROOT / "upstream.lock.json", Path(__file__).resolve(), PIN_FILE]
+    files += [ROOT / "tools/check-dispatch.mjs",
+              REPO / "apps/server/src/orchestration-v2/NativeDispatchFacts.ts",
+              REPO / "apps/server/src/orchestration-v2/NativeDispatchPolicy.ts",
+              REPO / "apps/server/src/orchestration-v2/CommandPolicy.ts",
+              REPO / "apps/server/src/orchestration-v2/Orchestrator.ts"]
     hashes = {str(path.relative_to(REPO)): sha256(path) for path in sorted(files)}
     upstream = json.loads((ROOT / "upstream.lock.json").read_text())["upstream"]
     commit = upstream["commit"]
@@ -197,13 +202,18 @@ def main() -> int:
                          name="compare Lust provider policies to pinned upstream TypeScript")
             receipt["policy_parity"] = parity.stdout.strip()
             print(parity.stdout, end="")
+            dispatch = run(["node", "tools/check-dispatch.mjs", str(executable)],
+                           cwd=ROOT, env=env, receipt=receipt,
+                           name="compare Lust message dispatch and goal policy to upstream")
+            receipt["dispatch_parity"] = dispatch.stdout.strip()
+            print(dispatch.stdout, end="")
 
         verify_source(source, pin["revision"])
         if source_hashes() != receipt["inputs"]:
             raise RuntimeError("Core or upstream oracle inputs changed during validation; run again")
         receipt["status"] = "passed"
         total = sum(item["passed"] for item in receipt["unit_tests"])
-        print(f"Lust check passed; {total} unit tests passed; all three differential oracles passed.")
+        print(f"Lust check passed; {total} unit tests passed; all four differential oracles passed.")
         return 0
     except (RuntimeError, subprocess.SubprocessError, OSError, ValueError, KeyError) as error:
         receipt["error"] = str(error)
