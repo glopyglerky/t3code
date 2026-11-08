@@ -1,0 +1,12 @@
+{
+  "product": "SurrealDB",
+  "version": "4.0.0",
+  "sourceCommit": "284fe93afc851c3baec2c262c01289602021a70d",
+  "localStorageEngine": "SurrealKV",
+  "localDurability": "sync=every",
+  "linuxAmd64": {
+    "url": "https://github.com/surrealdb/surrealdb/releases/download/v4.0.0/surreal-v4.0.0.linux-amd64.tgz",
+    "sha256": "e910760179b9f13d0773ce98ac50f9a537051156365239284c2dc687adf3049d"
+  },
+  "futureDistributedStorage": "SurrealDS through SurrealDB Enterprise or Cloud Scale; separate paid licensing and deployment qualification required"
+}

@@ -104,6 +104,7 @@ def source_hashes() -> dict[str, str]:
                  "apps/server/src/orchestration-v2/CommandPolicy.ts",
                  "apps/server/src/orchestration-v2/GuestShareDecider.ts",
                  "apps/server/src/orchestration-v2/ProjectCommands.ts",
+                 "apps/server/src/orchestration-v2/ProjectStore.ts",
                  "packages/contracts/src/baseSchemas.ts",
                  "packages/contracts/src/keybindings.ts",
                  "packages/contracts/src/guestShare.ts",
@@ -215,6 +216,7 @@ def main() -> int:
                     ("connection", "connection_matrix", "check-connection.mjs"),
                     ("guest_share", "guest_share_matrix", "check-guest-share.mjs"),
                     ("project_commands", "project_commands_matrix", "check-project-commands.mjs"),
+                    ("project_persistence", "project_persistence_matrix", "check-project-persistence.mjs"),
                     ("provider_recovery", "provider_recovery_matrix", "check-provider-recovery.mjs"),
                     ("json", "json_round_trip", "check-json.mjs")):
                 executable = work / f"{surface}-matrix-lust"
@@ -233,7 +235,8 @@ def main() -> int:
                                         ("provider", "check-provider.mjs"),
                                         ("recovery", "check-recovery-runtime.mjs"),
                                         ("guest-share", "check-guest-share-runtime.mjs"),
-                                        ("project", "check-project-runtime.mjs")):
+                                        ("project", "check-project-runtime.mjs"),
+                                        ("project-store", "check-project-persistence.mjs")):
                 name = f"t3-code-ls-{component}"
                 executable = work / name
                 run([str(lust), "build", f"crates/core/src/bin/{name}.rs",
@@ -241,7 +244,8 @@ def main() -> int:
                      "-o", str(executable), "--json"], cwd=ROOT, env=env, receipt=receipt,
                     name=f"build {component} executable with Lust")
                 receipt[f"{component}_binary_sha256"] = sha256(executable)
-                parity = run(["node", f"tools/{verifier}", str(executable)],
+                verifier_args = ["--single"] if component == "project-store" else []
+                parity = run(["node", f"tools/{verifier}", str(executable), *verifier_args],
                              cwd=ROOT, env=env, receipt=receipt,
                              name=f"verify the Lust-built {component} executable")
                 receipt[f"{component}_verification"] = parity.stdout.strip()

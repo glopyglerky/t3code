@@ -100,7 +100,7 @@ jobs:
           git init .
           git remote add origin "https://github.com/${SOURCE_REPOSITORY}.git"
           git -c credential.helper= fetch --no-tags --depth=1 origin "$SOURCE_REVISION"
-          git sparse-checkout set --cone native/t3-code-ls packages patches apps/server/src/orchestration-v2
+          git sparse-checkout set --cone native/t3-code-ls packages patches apps/server
           git checkout --detach FETCH_HEAD
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
@@ -143,6 +143,10 @@ jobs:
         run: |
           cargo build --locked -p t3-code-ls-core --bin t3-code-ls-project
           node --disable-warning=ExperimentalWarning tools/check-project-runtime.mjs target/debug/t3-code-ls-project
+      - name: Compare native project projections with the actual upstream SQLite store
+        run: |
+          cargo build --locked -p t3-code-ls-core --example project_persistence_matrix --bin t3-code-ls-project-store
+          node --disable-warning=ExperimentalWarning tools/check-project-persistence.mjs target/debug/examples/project_persistence_matrix target/debug/t3-code-ls-project-store
       - name: Compare recovery events with the actual upstream functions
         run: |
           cargo build --locked -p t3-code-ls-core --example provider_recovery_matrix
@@ -293,6 +297,87 @@ jobs:
           name: t3-code-ls-policy-linux-x64
           path: native/t3-code-ls/target/lust-bin/t3-code-ls-policy
           if-no-files-found: error
+          retention-days: 14
+
+  database:
+    name: Rust database concurrency, recovery, and Lust project persistence
+    needs: lust
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: native/t3-code-ls
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+      T3_CODE_LS_SURREAL_EXECUTABLE: ${{ runner.temp }}/surreal/surreal
+      T3_CODE_LS_TEST_TMPDIR: ${{ runner.temp }}
+    steps:
+      - name: Check out the exact public source
+        working-directory: ${{ github.workspace }}
+        env:
+          SOURCE_REPOSITORY: ${{ github.repository }}
+          SOURCE_REVISION: ${{ github.sha }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          git init .
+          git remote add origin "https://github.com/${SOURCE_REPOSITORY}.git"
+          git -c credential.helper= fetch --no-tags --depth=1 origin "$SOURCE_REVISION"
+          git sparse-checkout set --cone native/t3-code-ls
+          git checkout --detach FETCH_HEAD
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 26.12.1
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal --component rustfmt,clippy
+      - name: Download the verified Lust components from this exact workflow run
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: t3-code-ls-lust-linux-x64
+          path: native/t3-code-ls/target
+      - name: Unpack and verify the selected Lust executable
+        run: |
+          sha256sum --check target/t3-code-ls-lust-linux-x64.tar.gz.sha256
+          tar -xzf target/t3-code-ls-lust-linux-x64.tar.gz -C target
+          test -x target/lust-bin/t3-code-ls-project-store
+      - name: Fetch the checksum-pinned Rust database engine
+        run: |
+          database_url="$(python3 -c 'import json; print(json.load(open("database.lock.json"))["linuxAmd64"]["url"])')"
+          database_sha="$(python3 -c 'import json; print(json.load(open("database.lock.json"))["linuxAmd64"]["sha256"])')"
+          curl --fail --location --retry 3 "$database_url" --output "$RUNNER_TEMP/surreal.tgz"
+          echo "$database_sha  $RUNNER_TEMP/surreal.tgz" | sha256sum --check --
+          mkdir -p "$RUNNER_TEMP/surreal"
+          tar -xzf "$RUNNER_TEMP/surreal.tgz" -C "$RUNNER_TEMP/surreal"
+          "$T3_CODE_LS_SURREAL_EXECUTABLE" version
+      - name: Check database code
+        run: cargo clippy --locked -p t3-code-ls-storage --all-targets -- -D warnings
+      - name: Test real database transactions and recovery
+        run: cargo test --locked -p t3-code-ls-storage --all-targets -- --test-threads=2
+      - name: Test read-only SQLite export and exact typed values
+        run: node --disable-warning=ExperimentalWarning --test tools/export-sqlite-state.test.mjs
+      - name: Verify independent clients, Lust persistence, crash and archive recovery
+        run: |
+          cargo build --locked -p t3-code-ls-storage --bin t3-code-ls-db
+          node --disable-warning=ExperimentalWarning tools/check-database.mjs \
+            "$PWD/target/debug/t3-code-ls-db" "$PWD/target/lust-bin/t3-code-ls-project-store" \
+            "$T3_CODE_LS_SURREAL_EXECUTABLE" "$PWD/target/database-proof.json"
+      - name: Package the verified database client and receipt
+        run: |
+          tar -czf target/t3-code-ls-database-linux-x64.tar.gz \
+            database.lock.json -C target database-proof.json lust-proof.json -C debug t3-code-ls-db
+          sha256sum target/t3-code-ls-database-linux-x64.tar.gz > target/t3-code-ls-database-linux-x64.tar.gz.sha256
+      - name: Retain database verification and Linux client
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: t3-code-ls-database-linux-x64
+          path: |
+            native/t3-code-ls/target/database-proof.json
+            native/t3-code-ls/target/t3-code-ls-database-linux-x64.tar.gz
+            native/t3-code-ls/target/t3-code-ls-database-linux-x64.tar.gz.sha256
+          if-no-files-found: ignore
           retention-days: 14
 
   portable-core:

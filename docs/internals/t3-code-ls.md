@@ -128,6 +128,136 @@ Source basis: [Lust's implementation contract](https://github.com/t3dotgg/lust-l
 [release target allowlist](https://github.com/t3dotgg/lust-lang/blob/240e08d91d4aed0299639f6f11fd522912b248f9/src/resolve/cfg.rs),
 and [C/zig release driver](https://github.com/t3dotgg/lust-lang/blob/240e08d91d4aed0299639f6f11fd522912b248f9/src/cc.rs).
 
+## Database decision
+
+The native authoritative database target is **SurrealDB 4.0.0**, using
+**SurrealKV** on a single node now and the supported **SurrealDS** distributed
+backend for a future active-active deployment. The database service and local
+storage engine are Rust. The application uses the database's authenticated
+network API so independent application processes share a service rather than
+opening the same local files. Local tests use `sync=every` and explicitly verify
+recovery after killing both the database process and its clients.
+
+SurrealKV itself is not replicated HA. SurrealDS is available through SurrealDB
+Enterprise and Cloud Scale, with paid licensing required for that path. This
+choice accepts that future commercial dependency; it does not implement a
+cluster or claim that the free single-node engine provides active-active HA.
+The engine version, official Linux archive, and checksum are pinned in
+`native/t3-code-ls/database.lock.json`.
+
+The choice preserves one query/transaction API when the storage deployment
+changes. SurrealDB's single-node SurrealKV configuration uses snapshot isolation,
+not general serializability. The application therefore compares and updates a
+global revision record inside every write transaction. Independent commands
+that read the same revision cannot both commit, even when they modify different
+projects. This prevents write skew from decisions such as "no other project owns
+this workspace." It also serializes successful commits across the entire store.
+Removing that bottleneck requires a separately tested partition/constraint
+design; concurrent clients alone are not evidence of higher throughput.
+SurrealDS accepts transactions at any node but routes commits through one
+sequencer with a durable acknowledgement from another zone. Adding nodes
+increases read/query capacity and failover options, not write capacity. This
+supports active application nodes; it does not promise horizontal write scaling.
+
+Turso's Rust engine remains a plausible SQLite-compatible option for local
+applications. Its documented offline synchronization conflict resolution uses
+rollback/replay and last-push-wins behavior, which is not sufficient for this
+application's authoritative ownership and event-ordering contracts. CRDT stores
+or Iroh docs likewise do not replace a transactional event log. SurrealDB's
+PostgreSQL/MySQL compatibility layer does not make it a SQLite driver replacement.
+FTS5, SQLite JSON expressions, `INDEXED BY`, AUTOINCREMENT, migrations, savepoints,
+and SQLite-specific schemas all require repository work.
+
+### Implemented native transaction boundary
+
+`t3-code-ls-storage` commits an immutable command receipt, ordered immutable
+events, projection mutations, pending outbox entries, and revision/sequence
+counters in one database transaction. A failure after an earlier write rolls
+the entire transaction back. Commands carry a digest of their validated intent;
+replay returns the original receipt, while reuse of the ID with another digest
+fails. Event and outbox IDs use create-only writes. The client distinguishes
+an explicit conflict from an unknown commit outcome and performs no blind
+automatic retry. Callers resolve uncertainty by the original receipt ID.
+
+The bounded JSONL client supports local authenticated loopback connections and
+TLS remote connections. Initialization is explicit, versioned, and limited to
+the native namespace/database. Read operations validate stored sizes before
+fetching payloads and reject oversized snapshots rather than truncating them.
+Project planning reads a revision-consistent snapshot of the indexed
+`project/` key range, so unrelated domains do not consume its allowance. This
+initial project snapshot is bounded to 16 MiB and 65,536 rows; it needs direct
+project/workspace queries before it can replace larger production stores.
+The outbox has durable pending records and read operations, but no distributed
+claim/lease/ack worker yet.
+
+The standalone native project service accepts creation and metadata updates.
+It reads projects and workspace ownership from the actual database snapshot,
+runs the new Lust-built `t3-code-ls-project-store` executable, and commits its
+event and projected row with the receipt. The executable ports both the nightly
+planner and the `ProjectStoreV2.apply` row behavior, including omission versus
+null and the persistence schema's handling of nested metadata. A separate oracle
+executes immutable upstream code with its real contracts, Effect runtime, and
+SQLite project store, then compares complete events and rows.
+Callers must normalize workspace paths using the production service's path
+rules before invoking this low-level API. Its ownership comparisons use exact
+stored strings; filesystem resolution and repository enrichment are not ported.
+
+The Cargo host validates input contracts and computes Unicode grapheme counts.
+For this new store it also evaluates the portable planner/projector to validate
+the complete selected executable response before writing. This duplicates
+decision evaluation in Rust; it is response validation, not a fallback when
+Lust fails, and is not an all-Lust database host. The original production
+TypeScript adapter retains its existing validation approach. Native project
+deletion is rejected because its child-thread lifecycle, cleanup and partial
+progress/retry semantics have not yet been migrated. The production project's
+previously ported deletion path is unchanged.
+
+### Data migration and remaining cutover
+
+The SQLite exporter opens a consistent read transaction and emits a versioned,
+bounded, checksummed NDJSON representation. It preserves schema and migration
+metadata, sequences, exact integer/real values, text including invalid UTF-8,
+blobs, and nulls. Only the known T3 contentless message-search index and its
+SQLite-reported shadow tables are excluded after checking the exact schema and
+backing message table. Other virtual tables, including FTS that may contain
+authoritative text, fail rather than silently lose data.
+The importer validates the complete format, stores immutable content-addressed
+chunks, verifies a second pass over the same file and database readback, and
+only then creates a completed archive record. Recovery verifies all stored
+chunks and the full export before publishing a new NDJSON file exclusively.
+
+These archives are a data-preservation prerequisite. They do not translate the
+upstream SQL repositories into native projections or activate a production
+database. Existing application data must not be split across independently
+committing stores. In particular, `EventSink.ts` atomically combines events,
+project/thread projections, command receipts, and outbox work; those participants
+must migrate together.
+
+| Database surface                                      | Current state                                           | Required work before replacement                                                                                 |
+| ----------------------------------------------------- | ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Native event/projection/receipt/outbox store          | SurrealDB/SurrealKV with atomic revision-guarded writes | Domain repositories, indexed reads, outbox execution and application integration                                 |
+| Production server `statev2.sqlite`                    | Existing TypeScript/SQLite remains authoritative        | Migrate all transaction participants, typed row transforms, read parity, verified backup/restore and cutover     |
+| Mobile SQLite caches and preferences                  | Existing Expo/platform adapters                         | Cache schema and lifecycle port; local offline storage is a different role from the server's authoritative store |
+| Relay PostgreSQL and Cloudflare Durable Object SQLite | Existing hosted infrastructure                          | Rewrite the relay's account/session/device/delivery repositories and deploy its replacement                      |
+| Browser IndexedDB and nonexportable key storage       | Existing browser adapters                               | Preserve browser lifecycle and key protection; a server database cannot replace platform key storage             |
+| External SQLite formats read by integrations          | Remain readers of their owners' formats                 | Keep SQLite import/read adapters where interoperability requires them                                            |
+
+Future active-active application work also includes durable cross-node event
+notification, outbox leases/fencing, provider-session ownership, workspace
+side-effect coordination, failover and backup testing. Upstream in-process
+PubSub and startup-wide outbox resetting are not safe substitutes for those
+mechanisms. Database multiwriter support does not make the current application
+an active-active system. No performance gain, HA result, complete database
+replacement, or full application port is claimed by this component.
+
+Sources: [SurrealDB architecture](https://surrealdb.com/docs/learn/data-models/architecture),
+[SurrealDS commit and scaling model](https://surrealdb.com/docs/manage/enterprise/product/surrealds),
+[deployment models](https://surrealdb.com/docs/manage/self-hosted/deployment-models),
+[Enterprise licensing](https://surrealdb.com/docs/manage/enterprise/product/licensing),
+[transactions](https://surrealdb.com/docs/learn/querying/concepts-and-guides/transactions),
+[SQL compatibility](https://surrealdb.com/docs/reference/rest-api/sql-compatibility),
+and [Turso sync conflict resolution](https://docs.turso.tech/sync/conflict-resolution).
+
 ## Admission and application authority
 
 The Iroh handshake authenticates an endpoint key. A local allowlist decides

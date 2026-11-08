@@ -80,6 +80,17 @@ contract validators. The production project service still owns locks, enrichment
 SQLite events, projections, and command receipts. Unicode grapheme segmentation
 remains an explicit adapter input for the monogram-length rule.
 
+The native persistence component uses SurrealDB 4.0.0 with SurrealKV through the
+database's authenticated network API. Independent application processes share
+one database service. A revision check commits events, projections, command
+receipts, and outbox entries atomically, and rejects stale plans. The new
+`t3-code-ls-project-store` executable plans project commands and projects their
+rows through Lust. The Cargo-built `t3-code-ls-db` service validates the complete
+response and persists native project creation and metadata updates. This is a
+standalone native storage path; the existing production server still uses SQLite.
+Its thread lifecycle and transaction participants must migrate together before
+cutover. Native project deletion is explicitly unavailable until that work lands.
+
 The native transport carries a fixed loopback service's HTTP, WebSocket, and
 binary traffic over authenticated Iroh connections. Each host explicitly admits
 client endpoint identities. Admitting a peer does not issue a T3 application
@@ -259,6 +270,149 @@ sink, project store, command receipts, and thread deletion path. Storage,
 workspace normalization, repository enrichment, and client UI remain upstream
 implementations. The verified executable is Linux x86-64.
 
+## Run the native database component
+
+The selected database and binary checksum are pinned in
+[database.lock.json](./database.lock.json). SurrealDB and SurrealKV are written
+in Rust. One authenticated database service owns the local SurrealKV directory;
+application processes connect over WebSocket instead of opening the files
+independently. This supports concurrent clients on one node. Future active-active
+deployment uses SurrealDB's distributed SurrealDS backend, available through
+Enterprise or Cloud Scale. That requires paid licensing and its own deployment
+qualification; the local SurrealKV configuration is not a replicated HA cluster.
+SurrealDS accepts transactions on any node but uses one commit sequencer; adding
+nodes does not increase write capacity.
+See the [database decision](../../docs/internals/t3-code-ls.md#database-decision).
+
+From `native/t3-code-ls`, build the Cargo client and use the Lust-built projector
+from the verification gate:
+
+```sh
+cargo build --locked --release -p t3-code-ls-storage --bin t3-code-ls-db
+export T3_CODE_LS_SURREAL_EXECUTABLE=/absolute/path/to/verified/surreal
+export T3_CODE_LS_PROJECT_STORE_EXECUTABLE="$PWD/target/lust-bin/t3-code-ls-project-store"
+```
+
+Start the pinned database with a new, dedicated data directory. Set a username
+and strong password in `SURREAL_USER` and `SURREAL_PASS`; credentials are passed
+through the environment rather than process arguments:
+
+```sh
+"$T3_CODE_LS_SURREAL_EXECUTABLE" start \
+  --bind 127.0.0.1:8000 --deny-net --deny-scripting \
+  'surrealkv:///absolute/path/to/new-t3-ls-database?sync=every'
+```
+
+`sync=every` requests durable acknowledgement for each commit. The tests kill
+and reopen the database process after acknowledged writes; they do not simulate
+a machine losing power or qualify filesystem and hardware behavior.
+
+In a separate shell with the same credentials, obtain a token and initialize
+the native schema explicitly. This command creates only the fixed
+`t3_code_ls` namespace and `state` database:
+
+```sh
+export T3_CODE_LS_DATABASE_TOKEN="$(node --input-type=module -e '
+const response = await fetch("http://127.0.0.1:8000/signin", {
+  method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" },
+  body: JSON.stringify({ user: process.env.SURREAL_USER, pass: process.env.SURREAL_PASS })
+});
+if (!response.ok) throw new Error("Database authentication failed");
+const { token } = await response.json();
+if (typeof token !== "string") throw new Error("Missing database token");
+process.stdout.write(token);
+')"
+printf '%s\n' '{"operation":"snapshot"}' | \
+  target/release/t3-code-ls-db initialize-loopback ws://127.0.0.1:8000
+```
+
+Subsequent clients use `loopback ws://127.0.0.1:8000`. Loopback mode requires a
+numeric loopback address and token. `remote wss://host` requires TLS, a token,
+and an already initialized compatible database. Neither connect mode creates
+or resets the schema. Root credentials above are for local schema bootstrap;
+a deployed application should use a database-scoped service identity.
+
+The CLI consumes one JSON request per line and emits one JSON response per
+line. A native project command looks like this:
+
+```json
+{
+  "operation": "project",
+  "request": {
+    "command": {
+      "type": "project.create",
+      "commandId": "create-1",
+      "projectId": "project-1",
+      "title": "Example",
+      "workspaceRoot": "/workspace/example"
+    },
+    "event_id": "event-1",
+    "now": 1794139200123
+  }
+}
+```
+
+`project.meta.update` uses the same decoded command fields as the upstream
+planner. The caller supplies the timestamp and event ID. The service computes
+Unicode grapheme counts, validates the selected executable's complete event and
+projection, and stores both accepted and rejected command outcomes. Reusing a
+command ID with different intent fails. Retrying the same intent reads its
+original receipt before looking at a new snapshot; timestamps and event IDs
+allocated for the retry do not replace the committed result.
+
+The caller must first apply the application's workspace-path normalization.
+This low-level service trims contract strings and compares workspace paths
+exactly; it does not resolve relative paths, `..`, aliases, or symlinks, or
+perform the production service's repository enrichment.
+
+The `snapshot`, `receipt`, `events`, and `pending_effects` operations expose
+bounded reads. `commit` is a trusted application API for an atomic batch at an
+expected revision, not an authorization boundary for end users. Every writer
+must use the transaction protocol. Conflicts require a fresh snapshot and
+replanning. An unknown commit outcome requires looking up the original receipt
+before retrying; the client never blindly repeats an uncertain commit.
+
+The initial revision guard serializes successful commits across the store. It
+protects workspace ownership and other decisions based on absence as well as
+existing rows. Snapshot size is limited to 16 MiB and 65,536 projections, batch
+size to 16 MiB, and event/effect pages to 4,096 records and 16 MiB. Project planning
+reads only the indexed project key range, so unrelated projections do not consume
+its snapshot allowance. The project
+planner has a 30-second deadline. This is a correctness foundation, not a
+measured throughput improvement or a completed outbox worker.
+
+### Preserve existing SQLite data
+
+The exporter reads a consistent SQLite snapshot without modifying the source:
+
+```sh
+node --disable-warning=ExperimentalWarning tools/export-sqlite-state.mjs \
+  /absolute/path/to/source.sqlite /absolute/path/to/fresh-export.ndjson
+```
+
+It preserves schema SQL, migration records, AUTOINCREMENT high-water marks,
+signed 64-bit integers, binary floating-point representations, blobs, text,
+and explicit nulls. Only the known T3 contentless message-search index and its
+SQLite-identified shadow tables are excluded, after validating the migration's
+schema and backing message table. Other virtual tables, including FTS tables
+that might hold the only copy of their text, fail explicitly. The default
+export/import ceiling is 512 MiB; the library supports
+an explicit ceiling up to 4 GiB. The exporter never overwrites its destination.
+
+Send `{"operation":"archive_sqlite","path":"/absolute/path/to/fresh-export.ndjson"}`
+to `t3-code-ls-db`. The importer verifies every record and checksum, stores
+immutable chunks, and publishes the archive only after a second complete read
+and stored-chunk verification. Interrupted imports are retryable. Send
+`{"operation":"restore_sqlite_export","archive_id":"RETURNED_ID","destination":"/absolute/path/to/fresh-recovered.ndjson"}`
+to recover the exact verified export bytes without overwriting a file.
+
+This recovery archive does not activate imported rows as native projections,
+rebuild a live SQLite database, or change the application's database selector.
+The original SQLite data remains the application's authority until a complete
+repository migration, read comparison, and cutover/recovery procedure are
+implemented. The exporter is a Node SQLite adapter and the database SDK is
+Cargo-built Rust; neither is qualified as Lust code.
+
 ## Connect two machines
 
 The bridge currently makes every backend connection from loopback. Upstream
@@ -334,6 +488,8 @@ cargo build --locked -p t3-code-ls-core --example project_commands_matrix
 node --disable-warning=ExperimentalWarning tools/check-project-commands.mjs target/debug/examples/project_commands_matrix
 cargo build --locked -p t3-code-ls-core --bin t3-code-ls-project
 node --disable-warning=ExperimentalWarning tools/check-project-runtime.mjs target/debug/t3-code-ls-project
+cargo build --locked -p t3-code-ls-core --example project_persistence_matrix --bin t3-code-ls-project-store
+node --disable-warning=ExperimentalWarning tools/check-project-persistence.mjs target/debug/examples/project_persistence_matrix target/debug/t3-code-ls-project-store
 cargo build --locked -p t3-code-ls-core --example provider_recovery_matrix
 node --disable-warning=ExperimentalWarning tools/check-provider-recovery.mjs target/debug/examples/provider_recovery_matrix
 cargo build --locked -p t3-code-ls-core --bin t3-code-ls-recovery
@@ -377,10 +533,32 @@ application, provider-session, browser, or mobile qualification.
 
 After a successful run, `target/lust-bin` contains the standalone Linux x86-64
 `t3-code-ls-policy`, `t3-code-ls-provider`, `t3-code-ls-recovery`,
-`t3-code-ls-guest-share`, and `t3-code-ls-project` executables.
+`t3-code-ls-guest-share`, `t3-code-ls-project`, and `t3-code-ls-project-store` executables.
 CI retains these verified components and their proof receipts as an artifact,
 including the dispatch, SQLite recovery, and guest-share integration receipts.
 They are development components, not desktop or mobile installers.
+
+The database gate requires the pinned SurrealDB binary; its integration tests
+fail if the executable is absent rather than silently skipping:
+
+```sh
+export T3_CODE_LS_SURREAL_EXECUTABLE=/absolute/path/to/verified/surreal
+cargo clippy --locked -p t3-code-ls-storage --all-targets -- -D warnings
+cargo test --locked -p t3-code-ls-storage --all-targets -- --test-threads=2
+cargo build --locked -p t3-code-ls-storage --bin t3-code-ls-db
+node --disable-warning=ExperimentalWarning --test tools/export-sqlite-state.test.mjs
+node --disable-warning=ExperimentalWarning tools/check-database.mjs \
+  "$PWD/target/debug/t3-code-ls-db" "$PWD/target/lust-bin/t3-code-ls-project-store" \
+  "$T3_CODE_LS_SURREAL_EXECUTABLE" "$PWD/target/database-proof.json"
+```
+
+The dedicated CI database job consumes the exact Lust artifact from the same
+workflow run and retains the native database client plus its execution receipt.
+It checks independent writer processes, rollback, command replay, ownership
+conflicts, malformed selected planners, process-crash recovery, and verified
+SQLite archive recovery. The projection oracle compares only rows accepted by
+the real upstream persistence schemas and reports planner-only fixtures outside
+those schemas separately; the original complete planner comparison remains.
 
 The provider component accepts Codex app-server JSONL on standard input and
 returns responses, notifications, and approval requests on standard output:

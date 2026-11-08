@@ -10,6 +10,7 @@ pub mod peers;
 pub mod permissions;
 pub mod project_commands;
 pub mod project_commands_wire;
+pub mod project_persistence_wire;
 #[cfg(unix)]
 pub mod provider_process;
 pub mod provider_recovery;
