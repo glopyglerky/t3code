@@ -90,7 +90,10 @@ impl Capabilities {
         if self.has(2) {
             Ok("")
         } else {
-            unsupported("interrupt", "providerInstanceId does not support turn interrupts")
+            unsupported(
+                "interrupt",
+                "providerInstanceId does not support turn interrupts",
+            )
         }
     }
 
@@ -242,21 +245,27 @@ pub fn read_frame<R: BufRead>(reader: &mut R) -> io::Result<Option<String>> {
             return if bytes.is_empty() {
                 Ok(None)
             } else {
-                Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated policy frame"))
+                Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "truncated policy frame",
+                ))
             };
         }
         let newline = available.iter().position(|byte| *byte == b'\n');
         let count = newline.map_or(available.len(), |index| index + 1);
         if bytes.len() + count > MAX_FRAME_BYTES + 1 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "policy frame too large"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "policy frame too large",
+            ));
         }
         bytes.extend_from_slice(&available[..count]);
         reader.consume(count);
         if newline.is_some() {
             bytes.pop();
-            return String::from_utf8(bytes)
-                .map(Some)
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "policy frame is not UTF-8"));
+            return String::from_utf8(bytes).map(Some).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "policy frame is not UTF-8")
+            });
         }
     }
 }
@@ -264,7 +273,7 @@ pub fn read_frame<R: BufRead>(reader: &mut R) -> io::Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{BufReader, Cursor};
+    use std::io::BufReader;
 
     fn caps(bits: u16) -> Capabilities {
         Capabilities::from_bits(bits).unwrap()
@@ -281,11 +290,18 @@ mod tests {
 
     #[test]
     fn native_fork_checks_have_upstream_error_precedence() {
-        assert_eq!(caps(0).ensure_native_fork(true).unwrap_err().detail,
-            "providerInstanceId does not support native thread forks");
-        assert_eq!(caps(16).ensure_native_fork(true).unwrap_err().capability, "fork_from_turn");
-        assert_eq!(caps(48).ensure_native_fork(true).unwrap_err().detail,
-            "providerInstanceId does not expose strong native thread ids");
+        assert_eq!(
+            caps(0).ensure_native_fork(true).unwrap_err().detail,
+            "providerInstanceId does not support native thread forks"
+        );
+        assert_eq!(
+            caps(16).ensure_native_fork(true).unwrap_err().capability,
+            "fork_from_turn"
+        );
+        assert_eq!(
+            caps(48).ensure_native_fork(true).unwrap_err().detail,
+            "providerInstanceId does not expose strong native thread ids"
+        );
         assert_eq!(caps(112).ensure_native_fork(true), Ok(""));
     }
 
@@ -299,30 +315,71 @@ mod tests {
             source_busy: false,
         };
         assert_eq!(caps(112).decide_fork(input), Ok("native_fork"));
-        assert_eq!(caps(112).decide_fork(ForkInput { source_busy: true, ..input })
-            .unwrap_err().capability, "context_handoff");
-        assert_eq!(caps(112 | 1024 | 2048 | 8192).decide_fork(
-            ForkInput { source_completed_or_waiting: false, ..input }), Ok("portable_context"));
+        assert_eq!(
+            caps(112)
+                .decide_fork(ForkInput {
+                    source_busy: true,
+                    ..input
+                })
+                .unwrap_err()
+                .capability,
+            "context_handoff"
+        );
+        assert_eq!(
+            caps(112 | 1024 | 2048 | 8192).decide_fork(ForkInput {
+                source_completed_or_waiting: false,
+                ..input
+            }),
+            Ok("portable_context")
+        );
     }
 
     #[test]
     fn rollback_and_handoff_keep_their_own_capability_boundaries() {
-        assert_eq!(caps(512).ensure_rollback().unwrap_err().capability, "rollback");
-        assert_eq!(caps(128 | 256).ensure_rollback().unwrap_err().capability, "rollback_snapshot");
+        assert_eq!(
+            caps(512).ensure_rollback().unwrap_err().capability,
+            "rollback"
+        );
+        assert_eq!(
+            caps(128 | 256).ensure_rollback().unwrap_err().capability,
+            "rollback_snapshot"
+        );
         assert_eq!(caps(128 | 256 | 512).ensure_rollback(), Ok(""));
-        assert_eq!(caps(1024 | 2048 | 4096).ensure_handoff(Handoff::Delta), Ok(""));
-        assert!(caps(1024 | 2048 | 4096).ensure_handoff(Handoff::FullThread).is_err());
-        assert_eq!(caps(1024 | 2048 | 8192).ensure_handoff(Handoff::FullThread), Ok(""));
-        assert!(caps(1024 | 2048 | 8192).ensure_handoff(Handoff::ForkDelta).is_err());
+        assert_eq!(
+            caps(1024 | 2048 | 4096).ensure_handoff(Handoff::Delta),
+            Ok("")
+        );
+        assert!(
+            caps(1024 | 2048 | 4096)
+                .ensure_handoff(Handoff::FullThread)
+                .is_err()
+        );
+        assert_eq!(
+            caps(1024 | 2048 | 8192).ensure_handoff(Handoff::FullThread),
+            Ok("")
+        );
+        assert!(
+            caps(1024 | 2048 | 8192)
+                .ensure_handoff(Handoff::ForkDelta)
+                .is_err()
+        );
     }
 
     #[test]
     fn malformed_frames_never_become_successful_decisions() {
-        for frame in ["", "t3ls-policy-v2\tqueued\t1", "t3ls-policy-v1\tqueued\t+1",
-            "t3ls-policy-v1\tqueued\t16384", "t3ls-policy-v1\tqueued\t65536",
-            "t3ls-policy-v1\tqueued\t1\textra", "t3ls-policy-v1\tsteering\t14\ttrue",
-            "t3ls-policy-v1\tfork\t112\t1\t1\t1\t0", "t3ls-policy-v1\thandoff\t0\tother",
-            "t3ls-policy-v1\tunknown\t0", "t3ls-policy-v1\tqueued\t１"] {
+        for frame in [
+            "",
+            "t3ls-policy-v2\tqueued\t1",
+            "t3ls-policy-v1\tqueued\t+1",
+            "t3ls-policy-v1\tqueued\t16384",
+            "t3ls-policy-v1\tqueued\t65536",
+            "t3ls-policy-v1\tqueued\t1\textra",
+            "t3ls-policy-v1\tsteering\t14\ttrue",
+            "t3ls-policy-v1\tfork\t112\t1\t1\t1\t0",
+            "t3ls-policy-v1\thandoff\t0\tother",
+            "t3ls-policy-v1\tunknown\t0",
+            "t3ls-policy-v1\tqueued\t１",
+        ] {
             assert!(evaluate(frame).is_err(), "{frame}");
         }
         assert_eq!(response(evaluate("t3ls-policy-v1\tqueued\t1")), "ok\t-\n");
@@ -332,15 +389,32 @@ mod tests {
     #[test]
     fn framing_handles_fragmentation_and_refuses_unbounded_or_truncated_input() {
         let source = b"t3ls-policy-v1\tqueued\t1\nt3ls-policy-v1\tinterrupt\t4\n";
-        let mut reader = BufReader::with_capacity(3, Cursor::new(source));
-        assert_eq!(read_frame(&mut reader).unwrap().unwrap(), "t3ls-policy-v1\tqueued\t1");
-        assert_eq!(read_frame(&mut reader).unwrap().unwrap(), "t3ls-policy-v1\tinterrupt\t4");
+        let mut reader = BufReader::with_capacity(3, &source[..]);
+        assert_eq!(
+            read_frame(&mut reader).unwrap().unwrap(),
+            "t3ls-policy-v1\tqueued\t1"
+        );
+        assert_eq!(
+            read_frame(&mut reader).unwrap().unwrap(),
+            "t3ls-policy-v1\tinterrupt\t4"
+        );
         assert_eq!(read_frame(&mut reader).unwrap(), None);
-        let mut reader = Cursor::new(vec![b'x'; MAX_FRAME_BYTES + 2]);
-        assert_eq!(read_frame(&mut reader).unwrap_err().kind(), io::ErrorKind::InvalidData);
-        let mut reader = Cursor::new(b"t3ls-policy-v1\tqueued\t1");
-        assert_eq!(read_frame(&mut reader).unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
-        let mut reader = Cursor::new(vec![255, b'\n']);
-        assert_eq!(read_frame(&mut reader).unwrap_err().kind(), io::ErrorKind::InvalidData);
+        let oversized = vec![b'x'; MAX_FRAME_BYTES + 2];
+        let mut reader = oversized.as_slice();
+        assert_eq!(
+            read_frame(&mut reader).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        let mut reader = &b"t3ls-policy-v1\tqueued\t1"[..];
+        assert_eq!(
+            read_frame(&mut reader).unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+        let invalid = [255_u8, b'\n'];
+        let mut reader = &invalid[..];
+        assert_eq!(
+            read_frame(&mut reader).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 }
