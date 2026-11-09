@@ -166,6 +166,47 @@ pub struct Claim {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ClaimOnce {
+    pub stream_id: String,
+    pub sequence: u64,
+    pub claim: Claim,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ClaimState {
+    Claimed,
+    Empty,
+    Retired,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClaimOutcome {
+    pub state: ClaimState,
+    pub replayed: bool,
+    pub effect: Option<OutboxEffect>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClaimIdentity {
+    effect_id: String,
+    insertion_ordinal: u64,
+    attempt_count: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClaimCursor {
+    stream_id: String,
+    sequence: u64,
+    claim: Claim,
+    effect: Option<ClaimIdentity>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Settle {
     pub effect_id: String,
     pub worker_id: String,
@@ -589,6 +630,46 @@ fn row_key(id: &str) -> Vec<u8> {
     key(&format!("row/{}", component(id)))
 }
 
+fn claim_stream_key(id: &str) -> Vec<u8> {
+    key(&format!("claim-stream/{}", component(id)))
+}
+
+fn validate_claim(input: &Claim) -> Result<()> {
+    crate::validate_id(&input.worker_id)?;
+    validate_timestamp(&input.now)
+}
+
+fn validate_claim_once(input: &ClaimOnce) -> Result<()> {
+    crate::validate_id(&input.stream_id)?;
+    validate_claim(&input.claim)?;
+    if input.sequence == 0 || input.sequence > MAX_COUNTER {
+        return Err(invalid(
+            "outbox claim sequence exceeds supported counter range",
+        ));
+    }
+    Ok(())
+}
+
+fn decode_claim_cursor(bytes: &[u8], stream_id: &str) -> Result<ClaimCursor> {
+    let cursor: ClaimCursor = crate::decode(bytes)?;
+    if cursor.stream_id != stream_id
+        || crate::validate_id(&cursor.stream_id).is_err()
+        || validate_claim(&cursor.claim).is_err()
+        || cursor.sequence == 0
+        || cursor.sequence > MAX_COUNTER
+        || cursor.effect.as_ref().is_some_and(|identity| {
+            crate::validate_id(&identity.effect_id).is_err()
+                || identity.insertion_ordinal == 0
+                || identity.insertion_ordinal > MAX_COUNTER
+                || identity.attempt_count == 0
+                || identity.attempt_count > MAX_COUNTER
+        })
+    {
+        return Err(Error::IncompatibleStore);
+    }
+    Ok(cursor)
+}
+
 fn lane(effect: &OutboxEffect) -> Result<String> {
     Ok(format!(
         "{}/{}",
@@ -900,6 +981,95 @@ async fn candidate(
     }
 }
 
+async fn stage_claim(tx: &mut Transaction, input: &Claim) -> Result<Option<OutboxEffect>> {
+    match candidate(tx, Some(&input.now), input.exclude_restart_continuations).await? {
+        Some(row) => {
+            transition(
+                tx,
+                &row,
+                policy::Action::Claim {
+                    worker_id: input.worker_id.clone(),
+                },
+                &input.now,
+            )
+            .await
+        }
+        None => Ok(None),
+    }
+}
+
+async fn replay_claim(tx: &mut Transaction, cursor: &ClaimCursor) -> Result<ClaimOutcome> {
+    let Some(identity) = &cursor.effect else {
+        return Ok(ClaimOutcome {
+            state: ClaimState::Empty,
+            replayed: true,
+            effect: None,
+        });
+    };
+    let effect = read_row(tx, &identity.effect_id, &mut ReadBudget::default())
+        .await?
+        .filter(|row| {
+            row.status == EffectStatus::Running
+                && row.lease_owner.as_deref() == Some(cursor.claim.worker_id.as_str())
+                && row.insertion_ordinal == identity.insertion_ordinal
+                && row.attempt_count == identity.attempt_count
+        });
+    Ok(ClaimOutcome {
+        state: if effect.is_some() {
+            ClaimState::Claimed
+        } else {
+            ClaimState::Retired
+        },
+        replayed: true,
+        effect,
+    })
+}
+
+async fn stage_claim_once(tx: &mut Transaction, input: &ClaimOnce) -> Result<ClaimOutcome> {
+    validate_claim_once(input)?;
+    let cursor_key = claim_stream_key(&input.stream_id);
+    if let Some(bytes) = tx.get(&cursor_key).await? {
+        let cursor = decode_claim_cursor(&bytes, &input.stream_id)?;
+        if input.sequence == cursor.sequence {
+            if input.claim != cursor.claim {
+                return Err(invalid("outbox claim sequence belongs to another request"));
+            }
+            return replay_claim(tx, &cursor).await;
+        }
+        if input.sequence != cursor.sequence + 1 {
+            return Err(invalid(
+                "outbox claim sequence must follow the retained cursor",
+            ));
+        }
+        if input.claim.worker_id != cursor.claim.worker_id {
+            return Err(invalid("outbox claim stream belongs to another worker"));
+        }
+    } else if input.sequence != 1 {
+        return Err(invalid("outbox claim stream must start at sequence one"));
+    }
+    let effect = stage_claim(tx, &input.claim).await?;
+    let cursor = ClaimCursor {
+        stream_id: input.stream_id.clone(),
+        sequence: input.sequence,
+        claim: input.claim.clone(),
+        effect: effect.as_ref().map(|row| ClaimIdentity {
+            effect_id: row.id.clone(),
+            insertion_ordinal: row.insertion_ordinal,
+            attempt_count: row.attempt_count,
+        }),
+    };
+    tx.put(cursor_key, crate::encode(&cursor)?).await?;
+    Ok(ClaimOutcome {
+        state: if effect.is_some() {
+            ClaimState::Claimed
+        } else {
+            ClaimState::Empty
+        },
+        replayed: false,
+        effect,
+    })
+}
+
 pub(crate) async fn stage_cancel_unsettled(
     tx: &mut Transaction,
     input: &CancelUnsettled,
@@ -1015,33 +1185,22 @@ impl Store {
     }
 
     pub async fn outbox_claim_next(&self, input: &Claim) -> Result<Option<OutboxEffect>> {
-        crate::validate_id(&input.worker_id)?;
-        validate_timestamp(&input.now)?;
+        validate_claim(input)?;
         let mut tx = self.db.begin().await?;
-        let result = async {
-            match candidate(
-                &mut tx,
-                Some(&input.now),
-                input.exclude_restart_continuations,
-            )
-            .await?
-            {
-                Some(row) => {
-                    transition(
-                        &mut tx,
-                        &row,
-                        policy::Action::Claim {
-                            worker_id: input.worker_id.clone(),
-                        },
-                        &input.now,
-                    )
-                    .await
-                }
-                None => Ok(None),
-            }
-        }
-        .await;
+        let result = stage_claim(&mut tx, input).await;
         let changed = result.as_ref().is_ok_and(Option::is_some);
+        finish(tx, result, changed).await
+    }
+
+    /// Keep the same stream, sequence and input until a claim response is resolved.
+    /// Use a new stream per worker incarnation; database reconnects retain the original stream.
+    pub async fn outbox_claim_once(&self, input: &ClaimOnce) -> Result<ClaimOutcome> {
+        let mut tx = self.db.begin().await?;
+        let result = stage_claim_once(&mut tx, input).await.and_then(|outcome| {
+            crate::validate_response_bytes(&outcome)?;
+            Ok(outcome)
+        });
+        let changed = result.as_ref().is_ok_and(|outcome| !outcome.replayed);
         finish(tx, result, changed).await
     }
 

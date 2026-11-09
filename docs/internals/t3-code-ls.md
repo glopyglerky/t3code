@@ -214,18 +214,33 @@ not spawn it for each claim. Full row comparisons execute the immutable upstream
 gate additionally races independent redb clients and kills every holder before
 reopening and reconciling running work.
 
-These are local worker persistence primitives, not a running provider worker or
-distributed fencing protocol. The host supplies canonical UTC millisecond
+The native outbox adapter can drive the existing server effect worker. Its
+integration gate uses controlled executors; production storage remains SQLite.
+The host supplies canonical UTC millisecond
 timestamps in years 0000–9999, retry deadlines, and retention cutoffs. Mutations
 and scans are bounded to 16 MiB and 65,536 records; larger work fails without a
 partial commit. Reconciliation is a whole-server recovery operation and must
 only run after the previous server's workers are known to have stopped. It does
 not detect a dead peer or provide expiring leases for active-active servers.
-Standalone claims have no operation receipt yet. An uncertain claim requires
-stopping its owning worker runtime and reconciling before dispatch resumes;
-blind claim retries can strand running work. Production integration needs an
-idempotent claim token or equivalent recovery path. `outbox_receipt` resolves
-only combined event commits.
+Recoverable claims retain one compact cursor per worker stream. The cursor and
+claim commit together, including empty results. Exact retries recover the same
+running generation; changed, skipped, and superseded requests fail. Cancellation,
+settlement, a new attempt, or reinsertion after pruning retires the old result.
+Keeping the insertion ordinal prevents an effect ID reused with the same owner
+and attempt count from reviving an old claim. Cursors remain after effect pruning.
+
+`NativeDatabase` keeps one scoped subprocess open so ordinary claims do not
+repeat the integrity scan on every request. It bounds JSONL frames and validates
+responses, isolates the process environment, and distinguishes an explicit
+rejection from an unknown outcome. A failed connection closes before the next
+explicit request reconnects. The outbox adapter retains the exact pending claim
+across that reconnect and blocks filter changes while it is unresolved. It
+serializes claims within the worker while executions can proceed concurrently.
+Other uncertain mutations are not blindly replayed. A settlement reread can
+wake terminal-state waiters without claiming that the original response arrived.
+This protocol resolves database acknowledgement loss, not exactly-once external
+provider execution or distributed fencing. A new worker incarnation still needs
+the existing whole-server recovery after its predecessor has stopped.
 
 The standalone native project service accepts creation and metadata updates.
 It reads projects and workspace ownership from the actual database snapshot,
@@ -280,14 +295,14 @@ sequences, receipts, outbox order/status, and lazy-import metadata together;
 replaying only the remaining events is insufficient. Activation requires an
 offline source fence and a durably published, validated native generation.
 
-| Database surface                                      | Current state                                               | Required work before replacement                                                                                 |
-| ----------------------------------------------------- | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| Native event/projection/receipt/outbox store          | redb with atomic batches and durable local outbox lifecycle | Domain repositories, thread reads, provider-worker execution and application integration                         |
-| Production server `statev2.sqlite`                    | Existing TypeScript/SQLite remains authoritative            | Migrate all transaction participants, typed row transforms, read parity, verified backup/restore and cutover     |
-| Mobile SQLite caches and preferences                  | Existing Expo/platform adapters                             | Cache schema and lifecycle port; local offline storage is a different role from the server's authoritative store |
-| Relay PostgreSQL and Cloudflare Durable Object SQLite | Existing hosted infrastructure                              | Rewrite the relay's account/session/device/delivery repositories and deploy its replacement                      |
-| Browser IndexedDB and nonexportable key storage       | Existing browser adapters                                   | Preserve browser lifecycle and key protection; a server database cannot replace platform key storage             |
-| External SQLite formats read by integrations          | Remain readers of their owners' formats                     | Keep SQLite import/read adapters where interoperability requires them                                            |
+| Database surface                                      | Current state                                                            | Required work before replacement                                                                                 |
+| ----------------------------------------------------- | ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| Native event/projection/receipt/outbox store          | redb with atomic batches, recoverable claims and a tested worker adapter | Domain repositories, thread reads, real provider qualification and production activation                         |
+| Production server `statev2.sqlite`                    | Existing TypeScript/SQLite remains authoritative                         | Migrate all transaction participants, typed row transforms, read parity, verified backup/restore and cutover     |
+| Mobile SQLite caches and preferences                  | Existing Expo/platform adapters                                          | Cache schema and lifecycle port; local offline storage is a different role from the server's authoritative store |
+| Relay PostgreSQL and Cloudflare Durable Object SQLite | Existing hosted infrastructure                                           | Rewrite the relay's account/session/device/delivery repositories and deploy its replacement                      |
+| Browser IndexedDB and nonexportable key storage       | Existing browser adapters                                                | Preserve browser lifecycle and key protection; a server database cannot replace platform key storage             |
+| External SQLite formats read by integrations          | Remain readers of their owners' formats                                  | Keep SQLite import/read adapters where interoperability requires them                                            |
 
 Future active-active application work also includes durable cross-node event
 notification, outbox leases/fencing, provider-session ownership, workspace

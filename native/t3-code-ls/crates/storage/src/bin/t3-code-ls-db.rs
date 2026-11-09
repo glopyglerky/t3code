@@ -42,6 +42,13 @@ enum Request {
         now: String,
         exclude_restart_continuations: bool,
     },
+    OutboxClaimOnce {
+        stream_id: String,
+        sequence: u64,
+        worker_id: String,
+        now: String,
+        exclude_restart_continuations: bool,
+    },
     OutboxNextClaimableAt {},
     OutboxSucceed {
         effect_id: String,
@@ -128,6 +135,25 @@ async fn evaluate(store: &Store, planner: Option<&Path>, request: Request) -> Re
                     worker_id,
                     now,
                     exclude_restart_continuations,
+                })
+                .await?,
+        ),
+        Request::OutboxClaimOnce {
+            stream_id,
+            sequence,
+            worker_id,
+            now,
+            exclude_restart_continuations,
+        } => serde_json::to_value(
+            store
+                .outbox_claim_once(&outbox::ClaimOnce {
+                    stream_id,
+                    sequence,
+                    claim: outbox::Claim {
+                        worker_id,
+                        now,
+                        exclude_restart_continuations,
+                    },
                 })
                 .await?,
         ),

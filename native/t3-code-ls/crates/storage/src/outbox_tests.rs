@@ -56,6 +56,14 @@ fn claim(worker: &str, now: &str) -> Claim {
     }
 }
 
+fn claim_once(stream: &str, sequence: u64, worker: &str, now: &str) -> ClaimOnce {
+    ClaimOnce {
+        stream_id: stream.into(),
+        sequence,
+        claim: claim(worker, now),
+    }
+}
+
 fn settle(id: &str, worker: &str, now: &str) -> Settle {
     Settle {
         effect_id: id.into(),
@@ -101,6 +109,414 @@ async fn enqueue_replays_effect_ids_without_replacing_payload_or_consuming_ordin
         .unwrap();
     assert_eq!(row(&store, "next").await.insertion_ordinal, 2);
     assert_eq!(original.request, first.request);
+    store.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn lost_claim_response_replays_after_reopen_without_claiming_another_effect() {
+    let fixture = TestFixture::start().await;
+    let store = fixture.initialize().await;
+    store
+        .outbox_enqueue(
+            &[
+                effect("first", "first", EffectType::ProviderTurnStart),
+                effect("second", "second", EffectType::TerminalCleanup),
+            ],
+            NOW,
+        )
+        .await
+        .unwrap();
+    let request = claim_once("stream", 1, "owner", NOW);
+    let first = store.outbox_claim_once(&request).await.unwrap();
+    assert_eq!(first.state, ClaimState::Claimed);
+    assert!(!first.replayed);
+    assert_eq!(first.effect.as_ref().unwrap().id, "first");
+    store.shutdown().await.unwrap();
+
+    let reopened = fixture.connect().await;
+    let replay = reopened.outbox_claim_once(&request).await.unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.state, ClaimState::Claimed);
+    assert_eq!(replay.effect, first.effect);
+    assert_eq!(row(&reopened, "first").await.attempt_count, 1);
+    assert_eq!(row(&reopened, "second").await.status, EffectStatus::Pending);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn empty_claims_pin_their_result_and_one_cursor_rejects_reuse_and_sequence_gaps() {
+    let fixture = TestFixture::start().await;
+    let store = fixture.initialize().await;
+    let first = claim_once("stream", 1, "owner", NOW);
+    let empty = store.outbox_claim_once(&first).await.unwrap();
+    assert_eq!(empty.state, ClaimState::Empty);
+    assert!(!empty.replayed);
+    assert!(empty.effect.is_none());
+    store
+        .outbox_enqueue(
+            &[effect("ready", "thread", EffectType::TerminalCleanup)],
+            NOW,
+        )
+        .await
+        .unwrap();
+    let replay = store.outbox_claim_once(&first).await.unwrap();
+    assert_eq!(replay.state, ClaimState::Empty);
+    assert!(replay.replayed);
+    assert!(replay.effect.is_none());
+    for changed in [
+        claim_once("stream", 1, "owner", LATER),
+        claim_once("stream", 1, "other-owner", NOW),
+        claim_once("stream", 2, "other-owner", NOW),
+        claim_once("stream", 3, "owner", NOW),
+        claim_once("new-stream", 2, "owner", NOW),
+        ClaimOnce {
+            claim: Claim {
+                exclude_restart_continuations: true,
+                ..first.claim.clone()
+            },
+            ..first.clone()
+        },
+    ] {
+        assert!(matches!(
+            store.outbox_claim_once(&changed).await,
+            Err(Error::Invalid(_))
+        ));
+    }
+    assert_eq!(row(&store, "ready").await.status, EffectStatus::Pending);
+    let second = claim_once("stream", 2, "owner", NOW);
+    assert_eq!(
+        store
+            .outbox_claim_once(&second)
+            .await
+            .unwrap()
+            .effect
+            .unwrap()
+            .id,
+        "ready"
+    );
+    assert!(matches!(
+        store.outbox_claim_once(&first).await,
+        Err(Error::Invalid(_))
+    ));
+    for sequence in 3..=20 {
+        assert_eq!(
+            store
+                .outbox_claim_once(&claim_once("stream", sequence, "owner", NOW))
+                .await
+                .unwrap()
+                .state,
+            ClaimState::Empty
+        );
+    }
+    let mut tx = store.db.begin().await.unwrap();
+    let entries = page(&mut tx, "claim-stream/", None, 100).await.unwrap();
+    assert_eq!(entries.len(), 1);
+    assert!(entries[0].1.len() < 1024);
+    tx.rollback().await.unwrap();
+    store.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn replay_retires_settled_cancelled_requeued_and_reclaimed_generations() {
+    let fixture = TestFixture::start().await;
+    let store = fixture.initialize().await;
+    for action in [
+        "succeed",
+        "fail",
+        "cancel",
+        "retry",
+        "reclaim",
+        "reconcile-safe",
+        "reconcile-bound",
+    ] {
+        let kind = if action == "reconcile-bound" {
+            EffectType::ProviderTurnStart
+        } else {
+            EffectType::TerminalCleanup
+        };
+        store
+            .outbox_enqueue(&[effect(action, action, kind)], NOW)
+            .await
+            .unwrap();
+        let request = claim_once(action, 1, "owner", NOW);
+        let claimed = store
+            .outbox_claim_once(&request)
+            .await
+            .unwrap()
+            .effect
+            .unwrap();
+        assert_eq!(claimed.id, action);
+        match action {
+            "succeed" => {
+                assert!(
+                    store
+                        .outbox_succeed(&settle(action, "owner", LATER))
+                        .await
+                        .unwrap()
+                );
+            }
+            "fail" => {
+                assert!(
+                    store
+                        .outbox_fail(&Failure {
+                            effect_id: action.into(),
+                            worker_id: "owner".into(),
+                            now: LATER.into(),
+                            error: "failed".into()
+                        })
+                        .await
+                        .unwrap()
+                );
+            }
+            "cancel" => {
+                assert_eq!(
+                    store
+                        .outbox_cancel_unsettled(&CancelUnsettled {
+                            thread_id: action.into(),
+                            effect_types: vec![kind],
+                            reason: "cancelled".into(),
+                            now: LATER.into()
+                        })
+                        .await
+                        .unwrap(),
+                    vec![action]
+                );
+            }
+            "retry" | "reclaim" => {
+                assert!(
+                    store
+                        .outbox_retry(&Retry {
+                            effect_id: action.into(),
+                            worker_id: "owner".into(),
+                            now: LATER.into(),
+                            available_at: FUTURE.into(),
+                            error: "retry".into()
+                        })
+                        .await
+                        .unwrap()
+                );
+                if action == "reclaim" {
+                    let again = store
+                        .outbox_claim_next(&claim("owner", FUTURE))
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(again.id, action);
+                    assert_eq!(again.attempt_count, claimed.attempt_count + 1);
+                }
+            }
+            _ => {
+                store
+                    .outbox_reconcile(&Reconcile { now: LATER.into() })
+                    .await
+                    .unwrap();
+            }
+        }
+        let current = row(&store, action).await;
+        let replay = store.outbox_claim_once(&request).await.unwrap();
+        assert_eq!(replay.state, ClaimState::Retired, "{action}");
+        assert!(replay.replayed);
+        assert!(replay.effect.is_none());
+        assert_eq!(row(&store, action).await, current);
+        store
+            .outbox_cancel_unsettled(&CancelUnsettled {
+                thread_id: action.into(),
+                effect_types: vec![kind],
+                reason: "test cleanup".into(),
+                now: LATER.into(),
+            })
+            .await
+            .unwrap();
+    }
+    store.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn pruning_and_reinserting_an_effect_id_cannot_revive_its_claim_receipt() {
+    let fixture = TestFixture::start().await;
+    let store = fixture.initialize().await;
+    let input = effect("same", "thread", EffectType::TerminalCleanup);
+    store
+        .outbox_enqueue(std::slice::from_ref(&input), NOW)
+        .await
+        .unwrap();
+    let request = claim_once("old-stream", 1, "owner", NOW);
+    let claimed = store
+        .outbox_claim_once(&request)
+        .await
+        .unwrap()
+        .effect
+        .unwrap();
+    assert!(
+        store
+            .outbox_succeed(&settle("same", "owner", LATER))
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        store
+            .outbox_prune(&Prune {
+                before: FUTURE.into(),
+                limit: 500
+            })
+            .await
+            .unwrap(),
+        1
+    );
+    let gone = store.outbox_claim_once(&request).await.unwrap();
+    assert_eq!(gone.state, ClaimState::Retired);
+    assert!(gone.effect.is_none());
+    store.outbox_enqueue(&[input], NOW).await.unwrap();
+    let replacement = store
+        .outbox_claim_next(&claim("owner", NOW))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(replacement.attempt_count, claimed.attempt_count);
+    assert_eq!(replacement.lease_owner, claimed.lease_owner);
+    assert_ne!(replacement.insertion_ordinal, claimed.insertion_ordinal);
+    let replay = store.outbox_claim_once(&request).await.unwrap();
+    assert_eq!(replay.state, ClaimState::Retired);
+    assert!(replay.effect.is_none());
+    assert_eq!(row(&store, "same").await, replacement);
+    store.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn claim_cursor_and_transition_commit_together_under_concurrent_identical_requests() {
+    let fixture = TestFixture::start().await;
+    let store = fixture.initialize().await;
+    store
+        .outbox_enqueue(&[effect("one", "thread", EffectType::TerminalCleanup)], NOW)
+        .await
+        .unwrap();
+    let other = fixture.connect().await;
+    let request = claim_once("stream", 1, "owner", NOW);
+    let mut a = store.db.begin().await.unwrap();
+    let mut b = other.db.begin().await.unwrap();
+    let first = stage_claim_once(&mut a, &request).await.unwrap();
+    assert_eq!(stage_claim_once(&mut b, &request).await.unwrap(), first);
+    a.commit().await.unwrap();
+    assert!(matches!(b.commit().await, Err(Error::TransactionConflict)));
+    let replay = other.outbox_claim_once(&request).await.unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.effect, first.effect);
+    assert_eq!(row(&other, "one").await.attempt_count, 1);
+    let aborted = claim_once("aborted", 1, "owner", NOW);
+    store
+        .outbox_enqueue(
+            &[effect(
+                "aborted-effect",
+                "other-thread",
+                EffectType::TerminalCleanup,
+            )],
+            NOW,
+        )
+        .await
+        .unwrap();
+    let mut tx = store.db.begin().await.unwrap();
+    assert_eq!(
+        stage_claim_once(&mut tx, &aborted).await.unwrap().state,
+        ClaimState::Claimed
+    );
+    tx.rollback().await.unwrap();
+    assert!(
+        store
+            .db
+            .read(&claim_stream_key("aborted"))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        row(&store, "aborted-effect").await.status,
+        EffectStatus::Pending
+    );
+    assert_eq!(row(&store, "aborted-effect").await.attempt_count, 0);
+    other.shutdown().await.unwrap();
+    store.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn claim_cursor_validates_identifiers_counters_and_stored_metadata() {
+    let fixture = TestFixture::start().await;
+    let store = fixture.initialize().await;
+    for invalid in [
+        claim_once("", 1, "owner", NOW),
+        claim_once("stream", 0, "owner", NOW),
+        claim_once("stream", MAX_COUNTER + 1, "owner", NOW),
+        claim_once("stream", 1, "", NOW),
+        claim_once("stream", 1, "owner", "not-a-timestamp"),
+    ] {
+        assert!(matches!(
+            store.outbox_claim_once(&invalid).await,
+            Err(Error::Invalid(_))
+        ));
+    }
+    let request = claim_once("stream", 1, "owner", NOW);
+    store.outbox_claim_once(&request).await.unwrap();
+    let original = store
+        .db
+        .read(&claim_stream_key("stream"))
+        .await
+        .unwrap()
+        .unwrap();
+    let cursor: ClaimCursor = crate::decode(&original).unwrap();
+    for corrupted in [
+        ClaimCursor {
+            stream_id: "other".into(),
+            ..cursor.clone()
+        },
+        ClaimCursor {
+            sequence: 0,
+            ..cursor.clone()
+        },
+        ClaimCursor {
+            sequence: MAX_COUNTER + 1,
+            ..cursor.clone()
+        },
+        ClaimCursor {
+            effect: Some(ClaimIdentity {
+                effect_id: "effect".into(),
+                insertion_ordinal: 1,
+                attempt_count: 0,
+            }),
+            ..cursor.clone()
+        },
+    ] {
+        let mut tx = store.db.begin().await.unwrap();
+        tx.put(
+            claim_stream_key("stream"),
+            crate::encode(&corrupted).unwrap(),
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        assert!(matches!(
+            store.outbox_claim_once(&request).await,
+            Err(Error::IncompatibleStore)
+        ));
+    }
+    let mut tx = store.db.begin().await.unwrap();
+    tx.put(
+        claim_stream_key("stream"),
+        crate::encode(&ClaimCursor {
+            sequence: MAX_COUNTER,
+            ..cursor
+        })
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let last = claim_once("stream", MAX_COUNTER, "owner", NOW);
+    assert!(store.outbox_claim_once(&last).await.unwrap().replayed);
+    assert!(matches!(
+        store
+            .outbox_claim_once(&claim_once("stream", MAX_COUNTER + 1, "owner", NOW))
+            .await,
+        Err(Error::Invalid(_))
+    ));
     store.shutdown().await.unwrap();
 }
 
@@ -1388,6 +1804,32 @@ async fn one_large_valid_effect_can_be_scheduled_and_claimed() {
     assert_eq!(
         row(&store, "large-effect").await.status,
         EffectStatus::Succeeded
+    );
+    let mut next = effect(
+        "large-recoverable",
+        "large-thread",
+        EffectType::ProviderSessionDetach,
+    );
+    next.request = claimed.request;
+    store.outbox_enqueue(&[next], NOW).await.unwrap();
+    let request = claim_once("large-stream", 1, "large-worker", NOW);
+    let first = store.outbox_claim_once(&request).await.unwrap();
+    assert_eq!(first.state, ClaimState::Claimed);
+    let replay = store.outbox_claim_once(&request).await.unwrap();
+    assert!(replay.replayed);
+    assert_eq!(replay.effect, first.effect);
+    let receipt = store
+        .db
+        .read(&claim_stream_key("large-stream"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(receipt.len() < 1024);
+    assert!(
+        store
+            .outbox_succeed(&settle("large-recoverable", "large-worker", LATER))
+            .await
+            .unwrap()
     );
     store.shutdown().await.unwrap();
 }

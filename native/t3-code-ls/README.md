@@ -371,6 +371,7 @@ these are owner checks, not expiring distributed leases.
 | `outbox_enqueue` (`effects`, `now`)                                  | Insert-if-absent count; duplicate IDs retain the existing row            |
 | `outbox_get` (`effect_id`) / `outbox_list` (`command_id`)            | Complete row or command's ordered rows                                   |
 | `outbox_claim` (`worker_id`, `now`, `exclude_restart_continuations`) | Claimed row or null                                                      |
+| `outbox_claim_once` (`stream_id`, `sequence`, plus the claim fields) | Recoverable claimed, empty, or retired result                            |
 | `outbox_next_claimable_at`                                           | Earliest eligible timestamp or null                                      |
 | `outbox_succeed` / `outbox_fail` / `outbox_retry`                    | Boolean indicating an owner-checked transition                           |
 | `outbox_cancel` (`thread_id`, `effect_types`, `reason`, `now`)       | Cancelled pending/running IDs in insertion order                         |
@@ -399,12 +400,29 @@ outbox envelope and retrieve its stored results even after workers have advanced
 those effects. Use `outbox_receipt` to resolve an uncertain combined commit.
 Generic `commit` and `commit_outbox` cannot share a receipt ID.
 
-Standalone claims do not yet have operation receipts. An uncertain claim must
-stop further dispatch until its owning worker runtime has stopped and the
-outbox has been reconciled. Blindly retrying a claim could claim another effect
-while the first remains running. Production integration still needs an
-idempotent claim token or equivalent recovery path; `outbox_receipt` resolves
-only the combined event commit.
+Workers use `outbox_claim_once`. Each worker incarnation creates a unique
+`stream_id` and starts `sequence` at 1. Keep the exact request, including `now`,
+until its outcome is resolved. The same sequence and request recovers the
+original result; only the next sequence can claim new work. Changed inputs,
+skipped sequences, older sequences, and changed worker ownership fail. One
+compact cursor per stream records the outcome without duplicating its payload
+or accumulating receipts on every idle poll. Cursors survive effect pruning.
+
+A recovered `claimed` result is executable only while its insertion ordinal,
+attempt, and owner still match a running effect. Otherwise the response is
+`retired`, with no effect to execute. An empty result stays empty even if work
+arrives later. Keep the same stream when reconnecting the database subprocess;
+use a new stream only for a new worker incarnation. The legacy `outbox_claim`
+operation has no recovery receipt and must not be blindly retried.
+
+The injectable `NativeEffectOutbox` server layer drives the existing effect
+worker through a persistent, bounded `NativeDatabase` subprocess. It retains an
+unresolved request across transport failures and serializes claims while effect
+execution remains concurrent. It refuses claim-mode changes until that worker's
+pending request is resolved. Unknown settlement responses trigger a durable
+state read to wake applicable waiters, without repeating the effect execution.
+The integration gate uses controlled effect executors and isolated redb files.
+There is no production database selector yet; the server still uses SQLite.
 
 Each thread has a title-generation lane and an ordinary-work lane. An earlier
 pending effect blocks later work in its lane even while waiting for retry;
@@ -413,8 +431,8 @@ creation time, and ID. Reconciliation cancels process-bound provider operations
 and requeues running replay-safe work. Run it only after the previous server's
 workers have stopped; calling it while another server is active can duplicate
 side effects. Future active-active integration needs worker fencing and durable
-cross-node notifications. These methods do not execute effects or replace the
-current production worker.
+cross-node notifications. Production activation must move the shared event,
+projection, receipt, outbox, and consistent-read transaction domain together.
 
 ### Preserve existing SQLite data
 

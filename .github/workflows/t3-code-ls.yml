@@ -20,6 +20,9 @@ on:
       - apps/server/src/orchestration-v2/ProjectCommands.ts
       - apps/server/src/orchestration-v2/ProjectStore.ts
       - apps/server/src/orchestration-v2/EffectOutbox.ts
+      - apps/server/src/orchestration-v2/NativeDatabase.ts
+      - apps/server/src/orchestration-v2/NativeEffectOutbox.ts
+      - apps/server/src/orchestration-v2/EffectWorker.ts
       - packages/contracts/src/applicationEvent.ts
       - packages/contracts/src/baseSchemas.ts
       - packages/contracts/src/keybindings.ts
@@ -56,6 +59,9 @@ on:
       - apps/server/src/orchestration-v2/ProjectCommands.ts
       - apps/server/src/orchestration-v2/ProjectStore.ts
       - apps/server/src/orchestration-v2/EffectOutbox.ts
+      - apps/server/src/orchestration-v2/NativeDatabase.ts
+      - apps/server/src/orchestration-v2/NativeEffectOutbox.ts
+      - apps/server/src/orchestration-v2/EffectWorker.ts
       - packages/contracts/src/applicationEvent.ts
       - packages/contracts/src/baseSchemas.ts
       - packages/contracts/src/keybindings.ts
@@ -370,6 +376,10 @@ jobs:
         run: cargo clippy --locked -p t3-code-ls-storage --all-targets -- -D warnings
       - name: Test real database transactions and recovery
         run: cargo test --locked -p t3-code-ls-storage --all-targets -- --test-threads=2
+      - name: Typecheck the native database and actual effect worker
+        run: tools/server-test-runtime/node_modules/.bin/effect-tsgo tsrs --noEmit --project tools/outbox-tsconfig.json
+      - name: Verify the persistent server database client protocol
+        run: node --disable-warning=ExperimentalWarning tools/check-native-database.mjs "$PWD/target/native-database-proof.json"
       - name: Test read-only SQLite export and exact typed values
         run: node --disable-warning=ExperimentalWarning --test tools/export-sqlite-state.test.mjs
       - name: Verify independent clients, Lust persistence, crash and archive recovery
@@ -383,10 +393,20 @@ jobs:
           node --disable-warning=ExperimentalWarning tools/check-outbox.mjs \
             "$PWD/target/debug/t3-code-ls-db" "$PWD/target/lust-bin/t3-code-ls-outbox" \
             "$PWD/target/outbox-proof.json"
+      - name: Recover committed claims after lost responses and process death
+        run: |
+          node --disable-warning=ExperimentalWarning tools/check-outbox-claim-recovery.mjs \
+            "$PWD/target/debug/t3-code-ls-db" "$PWD/target/outbox-claim-recovery-proof.json"
+      - name: Exercise the actual effect worker through the native database adapter
+        run: |
+          node --disable-warning=ExperimentalWarning tools/check-native-outbox-worker.mjs \
+            "$PWD/target/debug/t3-code-ls-db" "$PWD/target/native-outbox-worker-proof.json"
       - name: Package the verified database client and receipt
         run: |
           tar -czf target/t3-code-ls-database-linux-x64.tar.gz \
-            database.lock.json -C target database-proof.json outbox-proof.json lust-proof.json -C debug t3-code-ls-db
+            database.lock.json -C target database-proof.json outbox-proof.json lust-proof.json \
+            native-database-proof.json outbox-claim-recovery-proof.json native-outbox-worker-proof.json \
+            -C debug t3-code-ls-db
           sha256sum target/t3-code-ls-database-linux-x64.tar.gz > target/t3-code-ls-database-linux-x64.tar.gz.sha256
       - name: Retain database verification and Linux client
         if: always()
@@ -396,6 +416,9 @@ jobs:
           path: |
             native/t3-code-ls/target/database-proof.json
             native/t3-code-ls/target/outbox-proof.json
+            native/t3-code-ls/target/native-database-proof.json
+            native/t3-code-ls/target/outbox-claim-recovery-proof.json
+            native/t3-code-ls/target/native-outbox-worker-proof.json
             native/t3-code-ls/target/t3-code-ls-database-linux-x64.tar.gz
             native/t3-code-ls/target/t3-code-ls-database-linux-x64.tar.gz.sha256
           if-no-files-found: ignore
