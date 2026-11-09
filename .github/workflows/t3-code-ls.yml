@@ -42,6 +42,17 @@ on:
       - packages/shared/src/semver.ts
       - apps/server/src/provider/providerMaintenanceRunner.ts
       - apps/server/src/provider/Drivers/CodexDriver.ts
+      - apps/server/src/provider/Drivers/CodexManagedProvider.ts
+      - apps/server/src/provider/CodexManagedRuntime.ts
+      - apps/server/src/provider/codexLaunchArgs.ts
+      - apps/server/src/codexModelOptions.ts
+      - apps/server/src/textGeneration/**
+      - apps/server/src/attachmentStore.ts
+      - packages/provider-core/src/server/textGeneration*.ts
+      - packages/provider-core/src/server/pathExpansion.ts
+      - packages/shared/src/cliArgs.ts
+      - packages/shared/src/model.ts
+      - packages/contracts/src/settings.ts
       - apps/server/src/provider/Drivers/ClaudeMaintenance.ts
       - packages/provider-*/src/server/driver.ts
       - packages/provider-muse/src/server/maintenance.ts
@@ -90,6 +101,17 @@ on:
       - packages/shared/src/semver.ts
       - apps/server/src/provider/providerMaintenanceRunner.ts
       - apps/server/src/provider/Drivers/CodexDriver.ts
+      - apps/server/src/provider/Drivers/CodexManagedProvider.ts
+      - apps/server/src/provider/CodexManagedRuntime.ts
+      - apps/server/src/provider/codexLaunchArgs.ts
+      - apps/server/src/codexModelOptions.ts
+      - apps/server/src/textGeneration/**
+      - apps/server/src/attachmentStore.ts
+      - packages/provider-core/src/server/textGeneration*.ts
+      - packages/provider-core/src/server/pathExpansion.ts
+      - packages/shared/src/cliArgs.ts
+      - packages/shared/src/model.ts
+      - packages/contracts/src/settings.ts
       - apps/server/src/provider/Drivers/ClaudeMaintenance.ts
       - packages/provider-*/src/server/driver.ts
       - packages/provider-muse/src/server/maintenance.ts
@@ -178,6 +200,11 @@ jobs:
           cargo build --locked -p t3-code-ls-core --bin t3-code-ls-maintenance
           node --disable-warning=ExperimentalWarning tools/check-maintenance.mjs "$PWD/target/debug/t3-code-ls-maintenance"
           node --disable-warning=ExperimentalWarning tools/check-maintenance-runtime.mjs "$PWD/target/debug/t3-code-ls-maintenance"
+      - name: Compare and exercise Codex structured generation
+        run: |
+          cargo build --locked -p t3-code-ls-core --bin t3-code-ls-generate
+          node --disable-warning=ExperimentalWarning tools/check-generation.mjs "$PWD/target/debug/t3-code-ls-generate"
+          node --disable-warning=ExperimentalWarning tools/check-generation-runtime.mjs "$PWD/target/debug/t3-code-ls-generate"
       - name: Compare recovery events with the actual upstream functions
         run: |
           cargo build --locked -p t3-code-ls-core --example provider_recovery_matrix
@@ -270,6 +297,8 @@ jobs:
           tools/server-test-runtime/node_modules/.bin/effect-tsgo tsrs --noEmit --project tools/project-tsconfig.json
       - name: Typecheck provider maintenance and its production callers
         run: tools/server-test-runtime/node_modules/.bin/effect-tsgo tsrs --noEmit --project tools/maintenance-tsconfig.json
+      - name: Typecheck structured generation and its production callers
+        run: tools/server-test-runtime/node_modules/.bin/effect-tsgo tsrs --noEmit --project tools/generation-tsconfig.json
       - name: Exercise the actual server-policy service with a Lust-built executable
         run: |
           mkdir -p target/lust
@@ -299,9 +328,13 @@ jobs:
         run: |
           node --disable-warning=ExperimentalWarning tools/check-maintenance-adapter.mjs \
             "$PWD/target/lust-bin/t3-code-ls-maintenance" "$PWD/target/lust/maintenance-adapter-proof.json"
+      - name: Verify Lust generation through the production text-generation service
+        run: |
+          node --disable-warning=ExperimentalWarning tools/check-generation-adapter.mjs \
+            "$PWD/target/lust-bin/t3-code-ls-generate" "$PWD/target/lust/generation-adapter-proof.json"
       - name: Package the verified Linux components with their receipt
         run: |
-          tar -czf target/t3-code-ls-lust-linux-x64.tar.gz -C target lust-bin lust-proof.json lust/policy-adapter-proof.json lust/dispatch-proof.json lust/provider-adapter-proof.json lust/recovery-adapter-proof.json lust/guest-share-adapter-proof.json lust/project-adapter-proof.json lust/maintenance-adapter-proof.json
+          tar -czf target/t3-code-ls-lust-linux-x64.tar.gz -C target lust-bin lust-proof.json lust/policy-adapter-proof.json lust/dispatch-proof.json lust/provider-adapter-proof.json lust/recovery-adapter-proof.json lust/guest-share-adapter-proof.json lust/project-adapter-proof.json lust/maintenance-adapter-proof.json lust/generation-adapter-proof.json
           sha256sum target/t3-code-ls-lust-linux-x64.tar.gz > target/t3-code-ls-lust-linux-x64.tar.gz.sha256
       - name: Retain the verified Linux Lust executables
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -326,6 +359,7 @@ jobs:
             native/t3-code-ls/target/lust/guest-share-adapter-proof.json
             native/t3-code-ls/target/lust/project-adapter-proof.json
             native/t3-code-ls/target/lust/maintenance-adapter-proof.json
+            native/t3-code-ls/target/lust/generation-adapter-proof.json
             native/t3-code-ls/tools/server-test-runtime/package-lock.json
           if-no-files-found: ignore
           retention-days: 14

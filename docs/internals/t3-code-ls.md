@@ -59,7 +59,36 @@ Selection comes from the server environment, before the existing agent process
 scope is applied. Provider-specific environment values cannot replace the
 selected executable. The wrapper inherits the environment already chosen by the
 server, preserving account overlays and an absent `HOME` without exposing values
-in command arguments. The separate `codex exec` text-generation path is unchanged.
+in command arguments.
+
+`T3_CODE_LS_GENERATION_EXECUTABLE` selects the Lust `codex exec` runner used by
+titles, branch names, commit messages, PR content, transcription cleanup, and
+review guides. It owns model fallback, launch-argument parsing, the MCP-list
+probe, trailing plugin/app and named-MCP overrides, private schema/output files,
+and the provider process. The server still resolves managed credentials,
+authorizes image attachments, constructs prompts, expands the configured home,
+and decodes the result with the operation's Effect schema. Selection is captured
+from the server environment before provider overlays, and a configured native
+failure cannot invoke the TypeScript runner as a fallback.
+
+Each generation has a fresh process scope, including calls inherited from a
+closed background scope. The host deadline includes runtime resolution and
+model lookup; the native deadline covers its provider work. Interrupting the
+runner closes its socket pairs, kills and reaps its owned child, and removes its
+private temporary directory. Other processes are not killed by name or group.
+The native host currently runs on Unix; Linux execution is qualified through
+Lustr. Cross-target core compilation does not qualify other native hosts.
+
+Ordinary MCP-list failure preserves upstream's decision to continue generation.
+Resource limits and unsupported Unicode in the native request or MCP JSON fail
+closed so valid MCP configuration cannot disappear into that fallback. Output
+files require valid UTF-8; the host's Effect schema still parses their JSON with
+JavaScript string semantics, including escaped UTF-16 code units. Exit diagnostics
+retain upstream's replacement decoding. Both MCP stdout and
+the output file strip exactly one leading UTF-8 BOM, matching Effect's text
+decoder. The native request, prompt, schema, output, and captured streams have
+explicit limits documented in the build instructions. The production gate uses
+controlled CLI processes, not actual provider generation.
 
 The parent Effect client still owns generated payload schemas, request
 correlation, cancellation, and deadlines. Parent-protocol mode therefore keeps

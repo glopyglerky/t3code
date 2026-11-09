@@ -31,6 +31,7 @@ import {
 } from "@t3tools/shared/model";
 import { getCodexServiceTierOptionValue } from "../codexModelOptions.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as NativeCodexTextGeneration from "./NativeCodexTextGeneration.ts";
 
 const CODEX_TIMEOUT_MS = 180_000;
 const CODEX_MCP_LIST_TIMEOUT_MS = 10_000;
@@ -67,6 +68,15 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
   const commandSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const serverConfig = yield* Effect.service(ServerConfig.ServerConfig);
   const resolvedEnvironment = environment ?? process.env;
+  const nativeExecutable = (yield* HostProcess.Environment).T3_CODE_LS_GENERATION_EXECUTABLE;
+  if (nativeExecutable !== undefined)
+    return yield* NativeCodexTextGeneration.make({
+      executable: nativeExecutable,
+      config: codexConfig,
+      environment: resolvedEnvironment,
+      getModels,
+      resolveRuntime,
+    });
 
   const readStreamAsString = <E>(
     operation: string,

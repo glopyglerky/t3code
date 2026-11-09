@@ -58,6 +58,7 @@
         "../../native/t3-code-ls/tools/check-native-database.mjs",
         "../../native/t3-code-ls/tools/check-native-outbox-worker.mjs",
         "../../native/t3-code-ls/tools/check-maintenance-adapter.mjs",
+        "../../native/t3-code-ls/tools/check-generation-adapter.mjs",
         // graphqlgen reads its config.
         "graphql.config.ts",
       ],

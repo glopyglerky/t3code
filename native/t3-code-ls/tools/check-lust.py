@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build pinned Lust and verify application decisions, maintenance, outbox, and provider processes.
+"""Build pinned Lust and verify application decisions, generation, outbox, and provider processes.
 
 Usage: python3 tools/check-lust.py --source /absolute/path/to/lust-lang
 
@@ -85,6 +85,14 @@ def source_hashes() -> dict[str, str]:
               REPO / "packages/provider-core/src/server/NativeMaintenancePolicy.ts",
               REPO / "packages/provider-core/src/server/maintenanceResolver.ts",
               REPO / "packages/provider-core/src/server/collectStreamText.ts",
+              REPO / "apps/server/src/textGeneration/CodexTextGeneration.ts",
+              REPO / "apps/server/src/textGeneration/NativeCodexTextGeneration.ts",
+              REPO / "apps/server/src/provider/codexLaunchArgs.ts",
+              REPO / "apps/server/src/codexModelOptions.ts",
+              REPO / "packages/provider-core/src/server/textGenerationOperations.ts",
+              REPO / "packages/provider-core/src/server/textGenerationUtils.ts",
+              REPO / "packages/shared/src/model.ts",
+              REPO / "packages/shared/src/cliArgs.ts",
               REPO / "packages/shared/src/semver.ts",
               REPO / "apps/server/src/project/ProjectService.ts",
               REPO / "packages/contracts/src/applicationEvent.ts",
@@ -117,6 +125,13 @@ def source_hashes() -> dict[str, str]:
                  "packages/provider-core/src/server/subagentProjection.ts",
                  "packages/provider-core/src/server/maintenanceResolver.ts",
                  "packages/provider-core/src/server/collectStreamText.ts",
+                 "apps/server/src/textGeneration/CodexTextGeneration.ts",
+                 "apps/server/src/provider/codexLaunchArgs.ts",
+                 "apps/server/src/codexModelOptions.ts",
+                 "packages/provider-core/src/server/textGenerationOperations.ts",
+                 "packages/provider-core/src/server/textGenerationUtils.ts",
+                 "packages/shared/src/model.ts",
+                 "packages/shared/src/cliArgs.ts",
                  "packages/shared/src/semver.ts",
                  "packages/contracts/src/orchestrationV2.ts",
                  "packages/effect-codex-app-server/src/protocol.ts",
@@ -162,7 +177,7 @@ def main() -> int:
     source = args.source.resolve()
     receipt = {"schema": 1, "status": "failed", "steps": [],
                "generated_at": datetime.now(timezone.utc).isoformat(),
-               "scope": "Lust application decisions, provider maintenance policy, durable outbox policy, recovery wire, JSON codec, and Unix provider process runtime; "
+               "scope": "Lust application decisions, provider maintenance policy, Codex structured-generation runner, durable outbox policy, recovery wire, JSON codec, and Unix provider process runtime; "
                         "full application, UI, mobile, and Iroh qualification excluded"}
     try:
         pin = json.loads(PIN_FILE.read_text())
@@ -218,6 +233,25 @@ def main() -> int:
                 result = run([str(lust), "test", str(path), "--json"], cwd=ROOT, env=env,
                              receipt=receipt, name=f"test {path.name} with Lust")
                 receipt["unit_tests"].append(test_summary(result.stdout))
+            generation_checks = work / "generation-checks-lust"
+            run([str(lust), "build", "crates/core/examples/generation_checks.rs",
+                 "--manifest-path", "crates/core/Cargo.toml", "--bin", "generation_checks",
+                 "-o", str(generation_checks), "--json"], cwd=ROOT, env=env,
+                receipt=receipt, name="build unchanged generation assertions with Lust")
+            generation_result = run([str(generation_checks)], cwd=ROOT, env=env,
+                                    receipt=receipt, name="execute every Lust generation assertion")
+            generation_summary = test_summary(generation_result.stdout)
+            if generation_summary["total"] != 5:
+                raise RuntimeError("Lust did not execute all five generation assertion cases")
+            receipt["generation_assertions"] = generation_summary
+            receipt["generation_assertions_binary_sha256"] = sha256(generation_checks)
+            receipt["compiler_test_harness_boundary"] = (
+                "The pinned single-file test harness cannot import sibling crate modules. "
+                "Five generation cases retain Cargo test coverage and run through an unchanged "
+                "Lustr-built example importing the real core; they are counted separately from "
+                "the test-harness unit cases."
+            )
+            print(generation_result.stdout, end="")
             # --bin selects each example by its Cargo target name in this
             # revision (select_unit's name fallback).
             for surface, example, oracle in (
@@ -247,6 +281,7 @@ def main() -> int:
                                         ("project", "check-project-runtime.mjs"),
                                         ("project-store", "check-project-persistence.mjs"),
                                         ("maintenance", "check-maintenance.mjs"),
+                                        ("generate", "check-generation.mjs"),
                                         ("outbox", "check-outbox.mjs")):
                 name = f"t3-code-ls-{component}"
                 executable = work / name
@@ -273,6 +308,12 @@ def main() -> int:
                                    cwd=ROOT, env=env, receipt=receipt,
                                    name="verify Lust maintenance protocol and resource bounds")
                     receipt["maintenance_protocol"] = protocol.stdout.strip()
+                    print(protocol.stdout, end="")
+                if component == "generate":
+                    protocol = run(["node", "tools/check-generation-runtime.mjs", str(executable)],
+                                   cwd=ROOT, env=env, receipt=receipt,
+                                   name="verify Lust generation protocol, resource bounds, and cleanup")
+                    receipt["generation_protocol"] = protocol.stdout.strip()
                     print(protocol.stdout, end="")
                 if component == "policy":
                     dispatch = run(["node", "tools/check-dispatch.mjs", str(executable)],
@@ -305,7 +346,8 @@ def main() -> int:
                     receipt["artifacts"].append({"file": executable.name, "sha256": sha256(target)})
         receipt["status"] = "passed"
         total = sum(item["passed"] for item in receipt["unit_tests"])
-        print(f"Lust check passed; {total} unit tests passed; all application oracles and runtime checks passed.")
+        generation_total = receipt["generation_assertions"]["passed"]
+        print(f"Lust check passed; {total} unit tests and {generation_total} generation assertion cases passed; all application oracles and runtime checks passed.")
         return 0
     except (RuntimeError, subprocess.SubprocessError, OSError, ValueError, KeyError) as error:
         receipt["error"] = str(error)

@@ -59,8 +59,16 @@ or personal credentials. `T3_CODE_LS_PROVIDER_EXECUTABLE` selects it for the act
 Codex session factory and the provider, account, and skills probes. Generated
 Codex payload schemas, provider-to-event translation, orchestration persistence,
 and application UI retain their upstream implementations. Codex's separate
-`exec` text-generation path and the other provider adapters are not ported by
-this selection.
+`exec` text-generation path has its own selection described below. Other
+provider adapters are not ported by this process-runtime selection.
+
+Codex structured generation runs through `t3-code-ls-generate` when
+`T3_CODE_LS_GENERATION_EXECUTABLE` is set. This covers the actual title, branch,
+commit, PR, transcription-cleanup, and review-guide operations. Lust owns model
+fallback, launch arguments, MCP discovery and disabling, provider execution,
+private schema/output files, and cleanup. The host retains runtime and credential
+selection, attachment authorization, prompt construction, home-path expansion,
+and final contract decoding.
 
 Provider installation ownership and update-command construction run through
 `t3-code-ls-maintenance` when `T3_CODE_LS_MAINTENANCE_EXECUTABLE` is set. The
@@ -193,6 +201,45 @@ and Node process service with controlled provider peers. They cover request and
 approval exchanges, notifications, cancelled requests on a continuing session,
 terminal errors, and scope cleanup. They do not establish a complete server,
 provider conversation, or client application port.
+
+## Use the Lust Codex generation runner
+
+Build the verified Linux components and set the server's selector:
+
+```sh
+T3CODE_DEV_SEED=0 \
+T3_CODE_LS_GENERATION_EXECUTABLE="$PWD/native/t3-code-ls/target/lust-bin/t3-code-ls-generate" \
+vp run dev
+```
+
+The selector comes from the server environment before provider-specific or
+managed-account overlays. The selected process receives those effective provider
+credentials through its environment, while the bounded request travels over
+standard input. Invalid selection or native failure fails the operation. Only
+an unset selector uses the original TypeScript runner.
+
+The native runner uses a private directory with mode `0700` and schema/output
+files with mode `0600`. It removes them after success, error, timeout, or handled
+interruption. The output must be a regular file; symbolic links and FIFOs are
+rejected. The runner closes its owned socket endpoints and kills and reaps its
+child on interruption, including when a descendant holds a descriptor open.
+
+Limits are 8 MiB for the complete JSONL request, 4 MiB for the prompt and output
+file, 1 MiB for the schema and MCP listing, 4 MiB of execution stdout, and 1 MiB
+of stderr. JSON has a maximum depth of 64 and 262,144 values in the request;
+model-catalog, selected-option, and image arrays contain at most 4,096 entries each. The default
+operation deadline is 180 seconds, or 15 minutes for a review guide. An MCP probe
+gets at most 10 seconds within that deadline. The native request and MCP JSON
+require Unicode scalar strings. Invalid UTF-8 in those inputs or the output file,
+and resource-limit violations, fail closed. The host decodes generated JSON with
+the existing Effect schema and JavaScript string semantics; exit diagnostics use
+upstream's replacement decoding. Ordinary MCP probe failure retains upstream's
+behavior of proceeding without named-MCP overrides.
+
+This path requires Unix process support. Linux x86-64 is executed through the
+pinned Lustr compiler; Windows and mobile native generation are not qualified.
+The integration checks use controlled CLI processes and do not spend provider
+credits or perform a real generation.
 
 ## Use the Lust provider-maintenance resolver
 
@@ -608,6 +655,8 @@ tools/server-test-runtime/node_modules/.bin/effect-tsgo tsrs --noEmit --project 
 node tools/check-project-adapter.mjs "$PWD/target/lust-bin/t3-code-ls-project"
 tools/server-test-runtime/node_modules/.bin/effect-tsgo tsrs --noEmit --project tools/maintenance-tsconfig.json
 node tools/check-maintenance-adapter.mjs "$PWD/target/lust-bin/t3-code-ls-maintenance"
+tools/server-test-runtime/node_modules/.bin/effect-tsgo tsrs --noEmit --project tools/generation-tsconfig.json
+node tools/check-generation-adapter.mjs "$PWD/target/lust-bin/t3-code-ls-generate"
 ```
 
 The gate builds the pinned compiler and TinyCC, checks the unchanged core, runs
@@ -637,9 +686,9 @@ application, provider-session, browser, or mobile qualification.
 After a successful run, `target/lust-bin` contains the standalone Linux x86-64
 `t3-code-ls-policy`, `t3-code-ls-provider`, `t3-code-ls-recovery`,
 `t3-code-ls-guest-share`, `t3-code-ls-project`, `t3-code-ls-project-store`,
-`t3-code-ls-outbox`, and `t3-code-ls-maintenance` executables.
+`t3-code-ls-outbox`, `t3-code-ls-maintenance`, and `t3-code-ls-generate` executables.
 CI retains these verified components and their proof receipts as an artifact,
-including dispatch, SQLite recovery, guest-share, and maintenance integration receipts.
+including dispatch, SQLite recovery, guest-share, maintenance, and generation integration receipts.
 They are development components, not desktop or mobile installers.
 
 The database gate uses real redb files and independent host processes:

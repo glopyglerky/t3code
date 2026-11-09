@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod codex_generation;
+pub mod codex_generation_wire;
 pub mod command_policy;
 pub mod connection;
 pub mod dispatch;
