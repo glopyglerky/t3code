@@ -60,13 +60,14 @@ or add speculative attribution comments. Carry this rule into worker handoffs.
 
 ## Runtime and storage safety
 
-- Do not use goals, Marvin, real provider turns or unrelated held work for qualification.
+- Use GitHub repositories and the hosted workspace for implementation and qualification. Do not discover, connect to, or depend on the maintainer's personal infrastructure.
+- Use controlled provider fixtures for qualification, without real provider turns or personal credentials.
 - Use the session's verified model/settings; reasoning above xhigh and non-Standard speed are prohibited.
 - Run authorized workers through T3's supported lifecycle APIs. Do not spawn workers for a bounded task assigned to work alone.
 - Never kill processes by name/path pattern. Stop only owned processes identified when spawned.
-- Never open installed `~/.t3/userdata` read-write, run a test server against it or remove user data.
-- Build Rust on the NAS with one bounded resource lease; coordinate with disjoint owners and do not touch their source/builds. Start with at most two jobs.
-- Keep canonical source under `~/repo` and generated output on the existing build filesystem. Never allocate reserved HDDs or use NAS media storage for builds.
+- Never run tests against an installed application's state or remove user data.
+- Build the pinned Lustr and BlueFe sources in isolated hosted directories. Bootstrap compilers may build the toolchain; application qualification must use the produced drivers and matching sysroot.
+- Keep generated output outside the source checkout and bound build concurrency to the hosted runner's capacity. Do not touch another owner's source or builds.
 - Own generated output through completion/failure/cancellation. Retain source/history, a current deliverable, one useful rollback and concise hashes/logs. Remove disposable targets, dependencies and staging after checking actual processes, descriptors, mounts and Cargo locks; record available-space change. Do not clean another owner's scope.
-- Do not resume held Omnidia work, schedules or unrelated agents to perform housekeeping. Preserve source revisions, first failures, receipts and rollback boundaries.
+- Do not resume unrelated work, schedules or agents to perform housekeeping. Preserve source revisions, first failures, receipts and rollback boundaries.
 - Do not publish, deploy, rename repositories, rewrite history or change visibility/license unless the user has authorized that exact scope. Do not send messages to others without authorization.
