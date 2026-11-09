@@ -648,3 +648,192 @@ async fn restart_fences_unknown_processes_and_pending_intents_without_starting_a
     );
     application.shutdown().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unexpected_exit_during_a_responded_turn_keeps_its_outcome_uncertain() {
+    let server = Server::start("exit-during-turn").await;
+    server
+        .call("session.open", json!({"threadId":"thread-1"}))
+        .await;
+    server.start_native_thread("start-native").await;
+    server
+        .call(
+            "session.request",
+            request(
+                "thread-1",
+                "started-turn",
+                "turn/start",
+                json!({"input":[{"type":"text","text":"controlled interrupted turn"}]}),
+            ),
+        )
+        .await;
+    let response = server
+        .call("session.request.wait", json!({"commandId":"started-turn"}))
+        .await;
+    assert_eq!(response["completion"]["result"]["state"], "responded");
+    assert!(response["unresolved"].is_null());
+    // This wait is released by durable closure, without timing a process exit or polling.
+    let stopped = server
+        .raw("session.idle.wait", json!({"threadId":"thread-1"}))
+        .await;
+    assert!(stopped.get("error").is_some(), "{stopped}");
+    let closed = server
+        .call("session.close", json!({"threadId":"thread-1"}))
+        .await;
+    assert_eq!(closed["status"], "closed");
+    assert_eq!(closed["processState"], "stopped");
+    assert_eq!(closed["uncertain"], true);
+    assert!(closed["activeTurnId"].is_null());
+    let snapshot = server.snapshot().await;
+    assert!(
+        !snapshot
+            .projections
+            .iter()
+            .any(|row| row.key.starts_with("native/request/"))
+    );
+    assert!(
+        server
+            .raw("session.open", json!({"threadId":"thread-1"}))
+            .await
+            .get("error")
+            .is_some()
+    );
+    assert!(server.raw("command.execute", json!({"command":{"type":"thread.archive","commandId":"archive-uncertain-turn","threadId":"thread-1"}})).await.get("error").is_some());
+    assert!(
+        server
+            .store
+            .read_receipt("archive-uncertain-turn")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        server
+            .store
+            .outbox_list_by_command("archive-uncertain-turn")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    server.shutdown().await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restart_preserves_uncertain_active_turns_even_after_the_owned_process_has_exited() {
+    let server = Server::start("happy").await;
+    server
+        .call("session.open", json!({"threadId":"thread-1"}))
+        .await;
+    server.start_native_thread("start-native").await;
+    server
+        .call(
+            "session.request",
+            request(
+                "thread-1",
+                "started-turn",
+                "turn/start",
+                json!({"input":[{"type":"text","text":"controlled interrupted turn"}]}),
+            ),
+        )
+        .await;
+    let responded = server
+        .call("session.request.wait", json!({"commandId":"started-turn"}))
+        .await;
+    assert_eq!(responded["completion"]["result"]["state"], "responded");
+    server
+        .call("session.approval.wait", json!({"threadId":"thread-1"}))
+        .await;
+    let active = projection(&server.snapshot().await, "native/session/thread-1").clone();
+    assert_eq!(active["activeTurnId"], "native-turn");
+    assert_eq!(active["processIdentity"]["platform"], "linux");
+    let closed = server
+        .call("session.close", json!({"threadId":"thread-1"}))
+        .await;
+    assert_eq!(closed["processState"], "stopped");
+    assert_eq!(
+        closed["uncertain"], false,
+        "an explicit client stop is intentional"
+    );
+    server.application.shutdown().await.unwrap();
+    let before = server.snapshot().await;
+    assert!(!before.projections.iter().any(
+        |row| row.key.starts_with("native/request/") || row.key.starts_with("native/approval/")
+    ));
+    // Restore the record that a crash between the start response and turn completion
+    // would leave. Its PID/start-time identity belongs to the fixture we just reaped.
+    server
+        .store
+        .commit(&CommitBatch {
+            command_id: "seed-interrupted-active-turn".into(),
+            request_digest: request_digest(&json!({"operation":"seed-interrupted-active-turn"})),
+            expected_revision: before.revision,
+            events: Vec::new(),
+            projections: vec![ProjectionMutation::Put {
+                key: "native/session/thread-1".into(),
+                payload: active,
+            }],
+            effects: Vec::new(),
+            result: Value::Null,
+        })
+        .await
+        .unwrap();
+    let hub = ProviderHub::new(server.store.clone(), provider("happy"));
+    let recovered = hub.recover().await.unwrap();
+    assert_eq!(recovered["closedSessions"], 1);
+    assert_eq!(recovered["uncertainRequests"], 0);
+    assert_eq!(recovered["uncertainTurns"], 1);
+    let after = server.snapshot().await;
+    let recovered_session = projection(&after, "native/session/thread-1");
+    assert_eq!(recovered_session["processState"], "stopped");
+    assert_eq!(recovered_session["uncertain"], true);
+    assert!(recovered_session["activeTurnId"].is_null());
+    assert!(
+        !after
+            .projections
+            .iter()
+            .any(|row| row.key.starts_with("native/request/"))
+    );
+    assert!(hub.open("thread-1").await.is_err());
+    let moved = server.directory.path().join("moved-after-interruption");
+    std::fs::create_dir(&moved).unwrap();
+    for command in [
+        json!({"type":"thread.archive","commandId":"archive-interrupted-turn","threadId":"thread-1"}),
+        json!({"type":"thread.metadata.update","commandId":"move-interrupted-turn","threadId":"thread-1","worktreePath":moved,"expectedWorktreePath":null}),
+    ] {
+        let command_id = command["commandId"].as_str().unwrap().to_owned();
+        assert!(
+            server
+                .raw("command.execute", json!({"command":command}))
+                .await
+                .get("error")
+                .is_some()
+        );
+        assert!(
+            server
+                .store
+                .read_receipt(&command_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            server
+                .store
+                .outbox_list_by_command(&command_id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+    assert_eq!(server.snapshot().await, after);
+    assert_eq!(
+        fixture_messages(&server.workspace)
+            .iter()
+            .filter(|message| message["method"] == "initialize")
+            .count(),
+        1
+    );
+    hub.shutdown().await.unwrap();
+    server.shutdown().await;
+}

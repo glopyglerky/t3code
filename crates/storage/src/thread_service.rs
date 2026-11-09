@@ -712,7 +712,7 @@ fn related_record(row: &Projection, id: &str, own_key: &str) -> bool {
 }
 
 fn stopped_native_session(row: &Projection, id: &str) -> bool {
-    // The native runtime writes this state only after its owned provider process is reaped.
+    // Confirmed process exit does not resolve an interrupted turn's external outcome.
     row.key == format!("native/session/{id}")
         && row.payload.get("threadId").and_then(Value::as_str) == Some(id)
         && row
@@ -724,6 +724,7 @@ fn stopped_native_session(row: &Projection, id: &str) -> bool {
         && row.payload.get("loaded") == Some(&Value::Bool(false))
         && row.payload.get("activeTurnId") == Some(&Value::Null)
         && row.payload.get("processState").and_then(Value::as_str) == Some("stopped")
+        && row.payload.get("uncertain").and_then(Value::as_bool) == Some(false)
 }
 
 fn ensure_no_runtime(

@@ -494,7 +494,8 @@ async fn native_provider_sessions_and_requests_fence_archive_workspace_and_empty
 fn stopped_session() -> Value {
     json!({
         "threadId":"thread-1", "sessionId":"session-1", "status":"closed", "loaded":false,
-        "activeTurnId":null, "processState":"stopped", "nativeThreadId":"native-thread-1",
+        "activeTurnId":null, "processState":"stopped", "uncertain":false,
+        "nativeThreadId":"native-thread-1",
         "contextFingerprint":"original-workspace-fingerprint", "updatedAt":CREATED,
     })
 }
@@ -600,6 +601,59 @@ async fn unknown_or_incompletely_closed_native_process_never_authorizes_cleanup(
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn stopped_native_process_with_unresolved_outcome_cannot_authorize_cleanup_without_requests() {
+    for uncertainty in [
+        Some(json!(true)),
+        None,
+        Some(Value::Null),
+        Some(json!("false")),
+        Some(json!(0)),
+    ] {
+        let (_fixture, store) = initialized().await;
+        apply(&store, create("create"), CREATED).await;
+        let mut session = stopped_session();
+        match uncertainty {
+            Some(value) => session["uncertain"] = value,
+            None => {
+                session.as_object_mut().unwrap().remove("uncertain");
+            }
+        }
+        put(
+            &store,
+            "uncertain-closed-session",
+            "native/session/thread-1",
+            session,
+        )
+        .await;
+        let before = store.snapshot().await.unwrap();
+        assert!(
+            !before
+                .projections
+                .iter()
+                .any(|row| row.key.starts_with("native/request/"))
+        );
+        let mut workspace = command("thread.metadata.update", "uncertain-worktree");
+        workspace["worktreePath"] = json!("/workspace/new");
+        for mutation in [command("thread.archive", "uncertain-archive"), workspace] {
+            let id = mutation["commandId"].as_str().unwrap().to_owned();
+            assert!(matches!(
+                execute_thread(&store, request(mutation, LATER)).await,
+                Err(Error::Invalid(_))
+            ));
+            assert_eq!(store.snapshot().await.unwrap(), before);
+            assert!(store.read_receipt(&id).await.unwrap().is_none());
+        }
+        assert!(
+            store
+                .outbox_get("effect:uncertain-archive:terminal.cleanup")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
 }
 
 #[tokio::test]

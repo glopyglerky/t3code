@@ -494,16 +494,19 @@ impl ProviderHub {
             let mut changes = Vec::new();
             let mut sessions = 0;
             let mut uncertain = 0;
+            let mut uncertain_turns = 0;
             for projection in &snapshot.projections {
                 let mut value = projection.payload.clone();
                 if projection.key.starts_with("native/session/") && value["status"] != "closed" {
+                    let was_active = !value["activeTurnId"].is_null();
+                    if was_active { uncertain_turns += 1; }
                     value["status"] = json!("closed");
                     value["reason"] = json!("server_restart");
                     value["activeTurnId"] = Value::Null;
                     value["loaded"] = json!(false);
                     value["processState"] = json!(if process_has_exited(&value["processIdentity"]) {"stopped"} else {"unknown"});
                     value["updatedAt"] = json!(occurred_at);
-                    value["uncertain"] = json!(value["uncertain"] == true || snapshot.projections.iter().any(|request| request.key.starts_with("native/request/") && request.payload["sessionId"] == value["sessionId"] && matches!(request.payload["state"].as_str(), Some("accepted" | "sent" | "uncertain"))));
+                    value["uncertain"] = json!(was_active || value["uncertain"] == true || snapshot.projections.iter().any(|request| request.key.starts_with("native/request/") && request.payload["sessionId"] == value["sessionId"] && matches!(request.payload["state"].as_str(), Some("accepted" | "sent" | "uncertain"))));
                     sessions += 1;
                 } else if projection.key.starts_with("native/request/") && matches!(value["state"].as_str(), Some("accepted" | "sent")) {
                     value["state"] = json!("uncertain");
@@ -517,9 +520,9 @@ impl ProviderHub {
                 changes.push(ProjectionMutation::Put { key: projection.key.clone(), payload: value });
             }
             Ok(Change {
-                events: if changes.is_empty() {Vec::new()} else {vec![Record {id:operation.clone(), payload:json!({"type":"native.provider.recovered","occurredAt":occurred_at,"sessions":sessions,"uncertainRequests":uncertain})}]},
+                events: if changes.is_empty() {Vec::new()} else {vec![Record {id:operation.clone(), payload:json!({"type":"native.provider.recovered","occurredAt":occurred_at,"sessions":sessions,"uncertainRequests":uncertain,"uncertainTurns":uncertain_turns})}]},
                 projections:changes,
-                result:json!({"closedSessions":sessions,"uncertainRequests":uncertain}),
+                result:json!({"closedSessions":sessions,"uncertainRequests":uncertain,"uncertainTurns":uncertain_turns}),
             })
         }).await?;
         drop(actors);
@@ -874,6 +877,7 @@ async fn close_owned(
         let mut current = row(snapshot, &session_key(thread)).cloned().ok_or(RuntimeError::Closed)?;
         if current["sessionId"] != session {return Err(RuntimeError::Conflict("session ownership was lost"));}
         let confirmed = stopped || current["processState"] == "stopped" || process_has_exited(&current["processIdentity"]);
+        let uncertain_turn = !current["activeTurnId"].is_null() && !matches!(reason,"closed_by_client" | "stopped_before_spawn");
         current["status"] = json!("closed"); current["loaded"] = json!(false); current["activeTurnId"] = Value::Null;
         current["processState"] = json!(if confirmed {"stopped"} else {"unknown"});
         current["updatedAt"] = json!(occurred_at); current["reason"] = json!(reason);
@@ -888,11 +892,11 @@ async fn close_owned(
                 projections.push(ProjectionMutation::Delete {key:projection.key.clone()});
             }
         }
-        if uncertain > 0 {
+        if uncertain > 0 || uncertain_turn {
             current["uncertain"] = json!(true);
             projections[0] = ProjectionMutation::Put {key:session_key(thread),payload:current.clone()};
         }
-        Ok(Change {events:vec![Record {id:operation.clone(),payload:json!({"type":"native.provider.closed","threadId":thread,"sessionId":session,"occurredAt":occurred_at,"reason":reason,"uncertainRequests":uncertain})}],projections,result:current})
+        Ok(Change {events:vec![Record {id:operation.clone(),payload:json!({"type":"native.provider.closed","threadId":thread,"sessionId":session,"occurredAt":occurred_at,"reason":reason,"uncertainRequests":uncertain,"uncertainTurn":uncertain_turn})}],projections,result:current})
     }).await?;
     Ok(result.receipt.result)
 }
@@ -1510,6 +1514,91 @@ fn actor_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_close_keeps_the_owned_task_and_stops_a_full_command_queue() {
+        use std::future::{Future, poll_fn};
+        use std::task::Poll;
+
+        let directory = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            Store::initialize_local(directory.path().join("state.redb"))
+                .await
+                .unwrap(),
+        );
+        store.commit(&CommitBatch {
+            command_id:"seed-owned-actor".into(), request_digest:request_digest(&json!("seed-owned-actor")), expected_revision:0,
+            events:Vec::new(), projections:vec![ProjectionMutation::Put {
+                key:session_key("thread"), payload:json!({"threadId":"thread","sessionId":"owned-session","status":"open","processState":"unknown","processIdentity":null}),
+            }], effects:Vec::new(), result:Value::Null,
+        }).await.unwrap();
+        let hub = ProviderHub::new(
+            store.clone(),
+            ProviderConfig {
+                program: PathBuf::from("/unused"),
+                args: Vec::new(),
+            },
+        );
+        let stop = Arc::new(AtomicBool::new(false));
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let (reply, response) = oneshot::channel();
+        sender
+            .try_send(Command::Request {
+                command_id: "queued-but-unaccepted".into(),
+                method: "thread/start".into(),
+                params: json!({}),
+                digest: String::new(),
+                reply,
+            })
+            .unwrap_or_else(|_| panic!("the controlled command queue should be empty"));
+        let (release, held) = mpsc::channel();
+        let worker_stop = stop.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            held.recv().unwrap();
+            assert!(worker_stop.load(Ordering::Acquire));
+            // The queued command remains unaccepted when the owner stops this task.
+            drop(receiver);
+        });
+        hub.actors.lock().await.insert(
+            "thread".into(),
+            Actor {
+                session_id: "owned-session".into(),
+                sender,
+                task,
+                stop: stop.clone(),
+            },
+        );
+        let mut closing = Box::pin(hub.close("thread"));
+        poll_fn(|context| {
+            assert!(matches!(closing.as_mut().poll(context), Poll::Pending));
+            Poll::Ready(())
+        })
+        .await;
+        assert!(stop.load(Ordering::Acquire));
+        drop(closing);
+        assert!(
+            hub.actors.lock().await.contains_key("thread"),
+            "cancelling close must not detach its owned task"
+        );
+        release.send(()).unwrap();
+        // This synthetic task has no child exit evidence, so closure must stay fenced.
+        assert!(hub.close("thread").await.is_err());
+        assert!(hub.actors.lock().await.is_empty());
+        assert!(response.await.is_err());
+        assert!(
+            store
+                .read_receipt("queued-but-unaccepted")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let snapshot = store.snapshot().await.unwrap();
+        assert_eq!(
+            row(&snapshot, &session_key("thread")).unwrap()["processState"],
+            "unknown"
+        );
+        hub.shutdown().await.unwrap();
+    }
 
     fn working_view() -> View {
         View {

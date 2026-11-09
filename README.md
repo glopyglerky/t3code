@@ -15,6 +15,8 @@ The React web app, Node/Effect server and adapters, Electron/SEA/npm distributio
 
 ## Run the native application
 
+The [native API walkthrough](docs/native-api.md) shows a complete project, thread, provider turn, approval, close and archive sequence, including receipt recovery after a lost reply.
+
 Use the `t3-code-ls-app` executable from the verified build. Create a new, isolated state directory and start its server:
 
 ```sh

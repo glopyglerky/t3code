@@ -135,6 +135,9 @@ impl Peer {
                 self.turn = Some((thread.clone(), turn.clone()));
                 self.result(&id, json!({ "turn": { "id": turn, "status": "inProgress", "items": [], "error": null } }))?;
                 self.notify("turn/started", json!({ "threadId": thread, "turn": { "id": turn, "status": "inProgress", "items": [], "error": null } }))?;
+                if scenario == "exit-during-turn" {
+                    std::process::exit(18);
+                }
                 self.notify("item/agentMessage/delta", json!({
                     "threadId":thread,"turnId":turn,"itemId":"assistant-1","delta":"Before approval. "
                 }))?;
