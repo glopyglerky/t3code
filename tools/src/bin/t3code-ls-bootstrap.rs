@@ -24,6 +24,7 @@ const STAGE0_COMMIT: &str = "1c3a6506966e21845b31de0b075d2527660db132";
 const TINYCC: &str = "43c7708b85681a2fd4451c8a541af4494a8919b2";
 const HOST: &str = "x86_64-unknown-linux-gnu";
 const WASM: &str = "wasm32-unknown-unknown";
+const SOURCE_COMPONENTS: [&str; 2] = ["lib/rustlib/src", "lib/rustlib/rustc-src"];
 const LLVM_INPUTS: &[&str] = &[
     "src/llvm-project",
     "src/bootstrap/download-ci-llvm-stamp",
@@ -445,6 +446,27 @@ fn build_native_compiler(lustr: &Path, sysroot: &Path, work: &Path) -> Result<()
 }
 
 fn copy_tree(source: &Path, destination: &Path, parents: &mut Vec<PathBuf>) -> Result<()> {
+    copy_tree_excluding(source, destination, parents, &[])
+}
+
+fn copy_sysroot(source: &Path, destination: &Path) -> Result<()> {
+    // Bootstrap links its entire compiler checkout into both development-source
+    // components. Runtime compilation uses the built target libraries instead.
+    // Exclude only these paths rooted at this sysroot, preserving library/src
+    // directories elsewhere, including the native Lust support files.
+    let excluded = SOURCE_COMPONENTS.map(|component| source.join(component));
+    copy_tree_excluding(source, destination, &mut Vec::new(), &excluded)
+}
+
+fn copy_tree_excluding(
+    source: &Path,
+    destination: &Path,
+    parents: &mut Vec<PathBuf>,
+    excluded: &[PathBuf],
+) -> Result<()> {
+    if excluded.iter().any(|path| path == source) {
+        return Ok(());
+    }
     let resolved = source.canonicalize()?;
     if parents.contains(&resolved) {
         return Err(format!(
@@ -459,7 +481,12 @@ fn copy_tree(source: &Path, destination: &Path, parents: &mut Vec<PathBuf>) -> R
         parents.push(resolved);
         for entry in fs::read_dir(source)? {
             let entry = entry?;
-            copy_tree(&entry.path(), &destination.join(entry.file_name()), parents)?;
+            copy_tree_excluding(
+                &entry.path(),
+                &destination.join(entry.file_name()),
+                parents,
+                excluded,
+            )?;
         }
         parents.pop();
     } else if metadata.is_file() {
@@ -513,12 +540,92 @@ fn manifest(root: &Path) -> Result<String> {
     Ok(text)
 }
 
-fn verify_payload(root: &Path, work: &Path) -> Result<()> {
+fn verify_source_identity(root: &Path) -> Result<()> {
+    if !fs::symlink_metadata(root.join("source-identity.txt"))?.is_file() {
+        return Err("payload source identity must be a regular file".into());
+    }
     require_equal(
         "payload source identity",
         &fs::read_to_string(root.join("source-identity.txt"))?,
         &payload_identity(),
-    )?;
+    )
+}
+
+fn retained_manifest(original: &str) -> Result<String> {
+    if original.is_empty() || !original.ends_with('\n') || original.contains('\r') {
+        return Err("invalid cached payload manifest".into());
+    }
+    let mut retained = String::new();
+    let mut previous: Option<&Path> = None;
+    for line in original.lines() {
+        let (hash, name) = line
+            .split_once("  ")
+            .ok_or("invalid cached payload record")?;
+        let path = Path::new(name);
+        if hash.len() != 64
+            || !hash
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            || name.is_empty()
+            || name.contains(['\\', '\0'])
+            || path.is_absolute()
+            || name.split('/').any(|part| matches!(part, "" | "." | ".."))
+            || previous.is_some_and(|previous| previous >= path)
+        {
+            return Err("invalid, duplicate or unordered cached payload record".into());
+        }
+        previous = Some(path);
+        if !SOURCE_COMPONENTS
+            .iter()
+            .any(|component| path.starts_with(component))
+        {
+            retained.push_str(line);
+            retained.push('\n');
+        }
+    }
+    Ok(retained)
+}
+
+/// Remove development-source components from a known cached payload without
+/// accepting any new runtime hashes. The original manifest remains authoritative.
+fn trim_cached_sources(root: &Path) -> Result<()> {
+    verify_source_identity(root)?;
+    if !fs::symlink_metadata(root.join("payload.sha256"))?.is_file() {
+        return Err("cached payload manifest must be a regular file".into());
+    }
+    let original = fs::read_to_string(root.join("payload.sha256"))?;
+    let expected = retained_manifest(&original)?;
+    for parent in [root.to_owned(), root.join("lib"), root.join("lib/rustlib")] {
+        if !fs::symlink_metadata(parent)?.is_dir() {
+            return Err("cached source component parents must be real directories".into());
+        }
+    }
+    for component in SOURCE_COMPONENTS {
+        let path = root.join(component);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => fs::remove_file(path)?,
+            Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(path)?,
+            Ok(_) => return Err("cached source component is not a directory or symlink".into()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    if manifest(root)? != expected {
+        return Err("remaining payload files do not match their original recorded hashes".into());
+    }
+    fs::write(root.join("payload.sha256"), expected)?;
+    Ok(())
+}
+
+fn verify_payload(root: &Path, work: &Path) -> Result<()> {
+    verify_source_identity(root)?;
+    for component in SOURCE_COMPONENTS {
+        match fs::symlink_metadata(root.join(component)) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+            Ok(_) => return Err("runtime payload contains a bootstrap source component".into()),
+        }
+    }
     require_equal(
         "payload file hashes",
         &manifest(root)?,
@@ -614,7 +721,7 @@ fn assemble_payload(sysroot: &Path, source: &Path, work: &Path) -> Result<PathBu
     if root.starts_with(env::current_dir()?.canonicalize()?) || root.starts_with(source) {
         return Err("compiler payload must stay outside source checkouts".into());
     }
-    copy_tree(sysroot, &root, &mut Vec::new())?;
+    copy_sysroot(sysroot, &root)?;
     let licenses = root.join("share/licenses/bluefe");
     fs::create_dir_all(&licenses)?;
     for name in ["LICENSE-APACHE", "LICENSE-MIT", "COPYRIGHT"] {
@@ -862,6 +969,7 @@ fn main() {
         (|| {
             let root = PathBuf::from(&args[1]).canonicalize()?;
             let work = work_directory()?;
+            trim_cached_sources(&root)?;
             verify_payload(&root, &work)?;
             publish_environment(&root, &work)
         })()
@@ -895,6 +1003,142 @@ mod tests {
     impl Drop for Temporary {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    fn legacy_cache() -> Temporary {
+        let directory = Temporary::new();
+        fs::write(directory.0.join("source-identity.txt"), payload_identity()).unwrap();
+        for relative in [
+            "bin/rustc",
+            "lib/rustlib/x86_64-unknown-linux-gnu/lib/libstd.rlib",
+            "lib/rustlib/src/rust/compiler-input",
+            "lib/rustlib/rustc-src/rust/compiler-input",
+            "lib/rustlib/src-extra/runtime-data",
+            "lib/lust/library/src/lib.rs",
+        ] {
+            let path = directory.0.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, relative).unwrap();
+        }
+        fs::write(
+            directory.0.join("payload.sha256"),
+            manifest(&directory.0).unwrap(),
+        )
+        .unwrap();
+        directory
+    }
+
+    #[test]
+    fn cached_source_trim_retains_the_original_runtime_hashes() {
+        let directory = legacy_cache();
+        let original = fs::read_to_string(directory.0.join("payload.sha256")).unwrap();
+        let expected = retained_manifest(&original).unwrap();
+        fs::write(
+            directory.0.join("lib/rustlib/src/rust/compiler-input"),
+            "unused source",
+        )
+        .unwrap();
+        trim_cached_sources(&directory.0).unwrap();
+        assert_eq!(manifest(&directory.0).unwrap(), expected);
+        assert_eq!(
+            fs::read_to_string(directory.0.join("payload.sha256")).unwrap(),
+            expected
+        );
+        for component in SOURCE_COMPONENTS {
+            assert!(!directory.0.join(component).exists());
+        }
+        assert!(
+            directory
+                .0
+                .join("lib/rustlib/src-extra/runtime-data")
+                .is_file()
+        );
+        assert!(directory.0.join("lib/lust/library/src/lib.rs").is_file());
+        trim_cached_sources(&directory.0).unwrap();
+        assert_eq!(manifest(&directory.0).unwrap(), expected);
+    }
+
+    #[test]
+    fn cached_source_trim_cannot_accept_changed_or_unrecorded_runtime_files() {
+        for changed in ["bin/rustc", "bin/unrecorded"] {
+            let directory = legacy_cache();
+            let original = fs::read_to_string(directory.0.join("payload.sha256")).unwrap();
+            fs::write(directory.0.join(changed), "untrusted bytes").unwrap();
+            assert!(trim_cached_sources(&directory.0).is_err());
+            assert_eq!(
+                fs::read_to_string(directory.0.join("payload.sha256")).unwrap(),
+                original
+            );
+        }
+    }
+
+    #[test]
+    fn cached_source_trim_rejects_other_source_pins_before_removing_anything() {
+        let directory = legacy_cache();
+        fs::write(
+            directory.0.join("source-identity.txt"),
+            "different compiler",
+        )
+        .unwrap();
+        assert!(
+            trim_cached_sources(&directory.0)
+                .unwrap_err()
+                .to_string()
+                .contains("payload source identity")
+        );
+        assert!(
+            directory
+                .0
+                .join("lib/rustlib/src/rust/compiler-input")
+                .is_file()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cached_source_trim_unlinks_source_roots_and_rejects_symlink_parents() {
+        let outside = Temporary::new();
+        fs::create_dir_all(outside.0.join("rustlib/src")).unwrap();
+        let protected = outside.0.join("rustlib/src/keep");
+        fs::write(&protected, "outside cache").unwrap();
+        let directory = legacy_cache();
+        for component in SOURCE_COMPONENTS {
+            let path = directory.0.join(component);
+            fs::remove_dir_all(&path).unwrap();
+            std::os::unix::fs::symlink(&outside.0, path).unwrap();
+        }
+        trim_cached_sources(&directory.0).unwrap();
+        assert_eq!(fs::read_to_string(&protected).unwrap(), "outside cache");
+        for component in SOURCE_COMPONENTS {
+            assert!(fs::symlink_metadata(directory.0.join(component)).is_err());
+        }
+        for parent in ["lib", "lib/rustlib"] {
+            let directory = legacy_cache();
+            let path = directory.0.join(parent);
+            fs::remove_dir_all(&path).unwrap();
+            std::os::unix::fs::symlink(&outside.0, path).unwrap();
+            assert!(trim_cached_sources(&directory.0).is_err());
+            assert_eq!(fs::read_to_string(&protected).unwrap(), "outside cache");
+        }
+    }
+
+    #[test]
+    fn cached_manifest_rejects_malformed_and_ambiguous_records() {
+        let hash = "a".repeat(64);
+        for value in [
+            String::new(),
+            format!("{hash}  bin/rustc"),
+            format!("{hash}  bin/rustc\r\n"),
+            "invalid-hash  bin/rustc\n".into(),
+            format!("{hash}  /absolute\n"),
+            format!("{hash}  lib/../outside\n"),
+            format!("{hash}  lib//rustc\n"),
+            format!("{hash}  lib/rustlib/src/invalid\0path\n"),
+            format!("{hash}  bin/rustc\n{hash}  bin/rustc\n"),
+            format!("{hash}  bin/z\n{hash}  bin/a\n"),
+        ] {
+            assert!(retained_manifest(&value).is_err());
         }
     }
 
@@ -934,6 +1178,47 @@ mod tests {
         );
         std::os::unix::fs::symlink(".", source.join("cycle")).unwrap();
         assert!(copy_tree(&source, &directory.0.join("cycle-copy"), &mut Vec::new()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn payload_excludes_bootstrap_source_links_but_keeps_runtime_source_directories() {
+        let directory = Temporary::new();
+        let source = directory.0.join("stage1");
+        let checkout = directory.0.join("compiler-checkout");
+        fs::create_dir(&checkout).unwrap();
+        fs::write(checkout.join("compiler-source"), "not a runtime component").unwrap();
+        std::os::unix::fs::symlink(&source, checkout.join("back-to-sysroot")).unwrap();
+        for component in ["src", "rustc-src"] {
+            let path = source.join("lib/rustlib").join(component);
+            fs::create_dir_all(&path).unwrap();
+            std::os::unix::fs::symlink(&checkout, path.join("rust")).unwrap();
+        }
+        let retained = [
+            "bin/rustc",
+            "lib/rustlib/x86_64-unknown-linux-gnu/lib/libstd.rlib",
+            "lib/rustlib/x86_64-unknown-linux-gnu/lib/src/runtime-data",
+            "lib/lust/library/src/lib.rs",
+            "share/src/runtime-data",
+        ];
+        for relative in retained {
+            let file = source.join(relative);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, relative).unwrap();
+        }
+        let payload = directory.0.join("payload");
+        copy_sysroot(&source, &payload).unwrap();
+        assert!(!payload.join("lib/rustlib/src").exists());
+        assert!(!payload.join("lib/rustlib/rustc-src").exists());
+        for relative in retained {
+            assert_eq!(
+                fs::read_to_string(payload.join(relative)).unwrap(),
+                relative
+            );
+        }
+        let mut files = Vec::new();
+        payload_files(&payload, &payload, &mut files).unwrap();
+        assert_eq!(files.len(), retained.len());
     }
 
     #[test]

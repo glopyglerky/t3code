@@ -10,7 +10,7 @@ permissions:
 
 concurrency:
   group: native-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   qualify:
@@ -47,13 +47,15 @@ jobs:
         with:
           path: ${{ env.T3_CODE_LS_TOOLCHAIN }}
           key: bluefe-ubuntu24-x64-${{ hashFiles('tools/src/bin/t3code-ls-bootstrap.rs') }}
+          # Migrate the first source-built payload without changing its runtime hashes.
+          restore-keys: bluefe-ubuntu24-x64-a5e6c6e44ce94dbe65b79381195c5c9666956323c06763d1361fed2075f80138
 
       - name: Validate a restored compiler before using it
-        if: steps.compiler-cache.outputs.cache-hit == 'true'
+        if: steps.compiler-cache.outputs.cache-matched-key != ''
         run: '"$RUNNER_TEMP/t3-bootstrap" --restore "$T3_CODE_LS_TOOLCHAIN"'
 
       - name: Build pinned BlueFe and Lustr sources
-        if: steps.compiler-cache.outputs.cache-hit != 'true'
+        if: steps.compiler-cache.outputs.cache-matched-key == ''
         run: '"$RUNNER_TEMP/t3-bootstrap"'
 
       - name: Save the verified compiler payload
