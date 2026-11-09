@@ -60,7 +60,7 @@ or add speculative attribution comments. Carry this rule into worker handoffs.
 
 ## Runtime and storage safety
 
-- Use GitHub repositories and the hosted workspace for implementation and qualification. Do not discover, connect to, or depend on the maintainer's personal infrastructure.
+- Use GitHub repositories and the hosted workspace for implementation and qualification.
 - Use controlled provider fixtures for qualification, without real provider turns or personal credentials.
 - Use the session's verified model/settings; reasoning above xhigh and non-Standard speed are prohibited.
 - Run authorized workers through T3's supported lifecycle APIs. Do not spawn workers for a bounded task assigned to work alone.
