@@ -69,10 +69,10 @@ def split_readme(document: bytes) -> tuple[bytes, bytes, bytes]:
 
 def sync_readme(repo: Path, write: bool = False) -> dict:
     commit, source = source_readme(repo)
-    path = repo / "README.md"
+    path = repo / "native/t3-code-ls/upstream-README.md"
     mode = path.lstat().st_mode
     if not stat.S_ISREG(mode):
-        raise ReadmeError("README.md must be a regular file.")
+        raise ReadmeError("upstream-README.md must be a regular file.")
     original = path.read_bytes()
     prefix, current, suffix = split_readme(original)
     changed = current != source
@@ -91,7 +91,7 @@ def sync_readme(repo: Path, write: bool = False) -> dict:
                 os.fsync(stream.fileno())
             temporary.chmod(stat.S_IMODE(mode))
             if path.is_symlink() or path.read_bytes() != original:
-                raise ReadmeError("README.md changed during synchronization; no edits were saved.")
+                raise ReadmeError("upstream-README.md changed during synchronization; no edits were saved.")
             os.replace(temporary, path)
         finally:
             if temporary is not None:

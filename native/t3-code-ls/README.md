@@ -1,6 +1,10 @@
 # t3 code ls
 
-An unofficial T3 Code port with Lust-built application components and a native Iroh transport.
+glopyglerky's T3 Code fork with native Rust components, selected Lust-built
+application components, and a Cargo-built Iroh transport. Start with the
+[fork README](../../README.md) for application entry points and the source map.
+Full conversion and 100% memory-safe Rust using Lustr/BlueFe are future goals;
+working application builds take priority.
 This is an implementation in progress. It is not a complete replacement for the T3
 desktop, web, iOS, or Android applications.
 

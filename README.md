@@ -1,163 +1,52 @@
-# Lust Port Info
+# t3 code ls
 
-This is a port of [t3-code](https://github.com/pingdotgg/t3code) in their [lust-lang](https://github.com/t3dotgg/lust-lang). [Theo](https://github.com/t3dotgg) recently mentioned in a video that ChatGPT Chat wasn’t useful for serious coding work, so I made this fork using only [ChatGPT.com](https://chatgpt.com/) hosted chat and the [github connection](https://help.openai.com/en/articles/11145903-connecting-github-to-chatgpt) for fun.
+t3 code ls is glopyglerky's independently maintained fork of [T3 Code](https://github.com/pingdotgg/t3code), with a Rust port in progress. It keeps the existing application usable while native components replace specific responsibilities. Working builds come first.
 
-*Port in progress — [status, build instructions, and methods](./native/t3-code-ls/README.md) · [customizations and divergence decisions](./docs/internals/t3-code-ls.md).*
+The full application still uses the TypeScript server, React web UI, Electron desktop shell, and React Native mobile clients. Native Rust code exists for policy and recovery decisions, provider process handling, project planning, redb storage, and an Iroh transport bridge. These components do not yet replace the complete application.
 
-<!-- t3-code-ls:upstream-readme:start -->
+## Start here
 
-# T3 Code
+- [Native component guide](native/t3-code-ls/README.md) explains builds, executable selectors, comparison tools, and limits.
+- [Design and divergence record](docs/internals/t3-code-ls.md) explains what this fork owns, why inherited paths remain, and what must pass before replacement.
+- [Application development](docs/operations/development.md) covers the existing server and clients.
+- [User documentation](docs/README.md) describes the inherited application's behavior. Upstream download links and package names refer to upstream releases.
 
-T3 Code is an "agent harness control surface". It enables control of the agents on your machine with a best-in-class mobile app ([iOS](https://apps.apple.com/us/app/t3-code-remote-claude-more/id6787819824), [Android](https://play.google.com/store/apps/details?id=com.t3tools.t3code)), [web app](https://app.t3.codes) and [Electron-based desktop app](https://t3.codes).
+For application development, use the Node and package-manager versions in [package.json](package.json), install Vite+ as described in [CONTRIBUTING.md](CONTRIBUTING.md), then run from the repository root:
 
-Works with your subscriptions on Claude Code, Codex, Cursor, Grok Build, OpenCode, Google Antigravity, and fx. If they're set up on your computer, T3 Code can control them.
-
-## "Wait, what are you selling me?"
-
-Nothing. We built T3 Code because we wanted the best possible development experience with agents. We were inspired by existing solutions like the Codex desktop app, Conductor, Claude Desktop and Cursor Glass, but none met our bar.
-
-We wanted something performant, remote-ready, and truly open. If we ever go the wrong direction, we want you to have everything you need to fork and build the editor that you want.
-
-## Installation
-
-> [!WARNING]
-> T3 Code currently supports Codex, Claude, Cursor, Grok Build, OpenCode, Antigravity, and fx. Install and authenticate at least one provider before use:
->
-> - Codex: install [Codex CLI](https://developers.openai.com/codex/cli) and run `codex login`
-> - Claude: install [Claude Code](https://claude.com/product/claude-code) and run `claude auth login`
-> - Cursor: install [Cursor CLI](https://cursor.com/cli) and run `agent login`
-> - Grok Build: install [Grok Build CLI](https://x.ai/cli) and run `grok login`
-> - OpenCode: install [OpenCode](https://opencode.ai) and run `opencode auth login`
-> - Antigravity: enable it in Settings, then use **Install Antigravity** and **Sign in with Google**. No CLI is required.
-> - fx: install [fx](https://fx.sh) and run `fx login` on the machine running the T3 Code server ([setup guide](./docs/user/providers-fx.md))
-
-### Command line
-
-```bash
-curl -fsSL https://t3.codes/install.sh | sh
-```
-
-On Windows, in PowerShell:
-
-```powershell
-irm https://t3.codes/install.ps1 | iex
-```
-
-Then run `t3` to start the server and open the local web app. `t3 service install` keeps it running in the background, `t3 update` moves to a newer release, and `t3 --help` has the full reference.
-
-To try it once without installing, run `npx t3@latest` instead.
-
-### Desktop app
-
-Install the latest version of the desktop app from [GitHub Releases](https://github.com/pingdotgg/t3code/releases), or from your favorite package registry:
-
-#### Windows (`winget`)
-
-```bash
-winget install T3Tools.T3Code
-```
-
-#### Windows (`scoop`)
-
-```bash
-scoop install extras/t3code
-```
-
-#### macOS (Homebrew)
-
-```bash
-brew install --cask t3-code
-```
-
-#### Debian, Ubuntu (`.deb`)
-
-Download the `.deb` from [GitHub Releases](https://github.com/pingdotgg/t3code/releases), then:
-
-```bash
-sudo apt install ./T3-Code-*.deb
-```
-
-#### Arch Linux (AUR)
-
-Stable:
-
-```bash
-yay -S t3code-bin
-```
-
-Nightly:
-
-```bash
-yay -S t3code-nightly-bin
-```
-
-The AUR packaging is maintained in this repository under [`packaging/aur`](./packaging/aur).
-
-#### Nix (nixpkgs)
-
-```bash
-nix profile add github:NixOS/nixpkgs/nixos-unstable#t3code
-```
-
-The package is maintained in [nixpkgs](https://github.com/NixOS/nixpkgs/tree/nixos-unstable/pkgs/by-name/t3/t3code)
-and includes the desktop app (`t3code-desktop`) and the `t3` command.
-See [Nix installation](./docs/user/install.md#nix-nixpkgs) for NixOS configuration and updates.
-
-## Some notes
-
-We are very very early in this project. Expect bugs.
-
-We are (mostly) not accepting contributions yet. Small fixes may be considered. Big features will not be.
-
-## Documentation
-
-Full docs live in [docs/](./docs). There's no docs site yet.
-
-- [FAQ](./docs/user/faq.md)
-- [Install and first run](./docs/user/install.md)
-- [Permission modes](./docs/user/permission-modes.md)
-- [Keyboard shortcuts](./docs/user/keybindings.md)
-- [Project settings](./docs/user/project-settings.md)
-- [Appearance preferences](./docs/user/appearance.md)
-- [Remote access from a phone or another machine](./docs/user/remote-access.md)
-- [Connect Claude Code, Codex, ChatGPT and other agents over MCP](./docs/user/outside-agents.md)
-- [Keeping app and server in sync](./docs/user/updating.md)
-- [Source control integrations](./docs/user/source-control.md)
-- Multiple accounts: [Codex](./docs/user/providers-codex.md) · [Claude](./docs/user/providers-claude.md)
-- [Run T3 Code as a background service](./docs/user/background-service.md)
-
-Building from source? Start at [docs/internals/overview.md](./docs/internals/overview.md).
-
-## If you REALLY want to contribute still.... read this first
-
-### Install `vp`
-
-T3 Code uses Vite+ so you'll need to install the global `vp` command-line tool.
-
-#### macOS / Linux
-
-```bash
-curl -fsSL https://vite.plus | bash
-```
-
-#### Windows
-
-```bash
-irm https://vite.plus/ps1 | iex
-```
-
-Checkout their getting started guide for more information: https://viteplus.dev/guide/
-
-### Install dependencies
-
-```bash
+```sh
 vp i
+T3CODE_DEV_SEED=0 vp run dev
 ```
 
-Read [CONTRIBUTING.md](./CONTRIBUTING.md) before reporting a bug or opening a PR.
+This starts the existing server and web development path with automatic state seeding disabled. Authenticate a supported provider separately when needed. It does not select the native components or install this fork over an existing T3 installation. Read [AGENTS.md](AGENTS.md) before changing code.
 
-Have a feature request? Start an [Ideas discussion](https://github.com/pingdotgg/t3code/discussions/categories/ideas).
+## Native entry points and source map
 
-Need support? Join the [Discord](https://discord.gg/jn4EGJjrvv).
+| Path | Responsibility today |
+| --- | --- |
+| [native/t3-code-ls/crates/core](native/t3-code-ls/crates/core) | Portable decisions, JSON protocols, Unix provider process runtime, and component executables |
+| [native/t3-code-ls/crates/storage](native/t3-code-ls/crates/storage) | Standalone redb event, projection, receipt, outbox, and import work; production storage cutover remains incomplete |
+| [native/t3-code-ls/crates/transport](native/t3-code-ls/crates/transport) | Cargo-built Iroh HTTP/WebSocket bridge, exposed as `t3-code-ls` |
+| [native/t3-code-ls/tools](native/t3-code-ls/tools) | Pinned-source comparisons, compiler gates, adapter checks, and upstream tracking |
+| [apps/server](apps/server) | Existing application server and adapters that select native executables |
+| [apps/web](apps/web), [apps/desktop](apps/desktop), [apps/mobile](apps/mobile) | Existing web, desktop, iOS, and Android clients |
+| [packages](packages) | Shared contracts, client runtime, provider and source-control integrations |
+| [infra/relay](infra/relay) | Inherited Connect control plane, still required independently of the Iroh bridge |
+| [scripts](scripts), [patches](patches), [pnpm-workspace.yaml](pnpm-workspace.yaml) | Existing application build and dependency contracts |
+| [.repos](.repos) | Read-only dependency references, not fork runtime entry points |
 
-<!-- t3-code-ls:upstream-readme:end -->
+The native Cargo workspace is [native/t3-code-ls/Cargo.toml](native/t3-code-ls/Cargo.toml). Its default members are core and transport; storage is a separate workspace member. The [native guide](native/t3-code-ls/README.md) contains the component build commands and selectors such as `T3_CODE_LS_POLICY_EXECUTABLE`. An unset selector retains the existing implementation; selected native failures must not silently fall back.
+
+## Port status and direction
+
+[upstream.lock.json](native/t3-code-ls/upstream.lock.json) records the immutable nightly source baseline. Its qualification status is currently `unqualified`, with no last qualified application commit. Source tracking, component tests, and a working upstream application do not establish full fork parity.
+
+The native core and workspace forbid unsafe code in their own crates. That lint does not establish memory safety across dependencies, compiler output, foreign libraries, providers, or the remaining application. Full native Rust conversion and 100% memory-safe Rust using Lustr/BlueFe are future goals. BlueFe application/toolchain qualification and complete native web, desktop, iOS, and Android replacements are not verified support today. Existing TypeScript, UI, build code, and interfaces remain until replacements pass meaningful checks.
+
+The production application still uses SQLite. The native redb store is a separate implementation, and Iroh transport does not replace Connect accounts, permissions, mobile lifecycle, or notifications. See the [design record](docs/internals/t3-code-ls.md) for the cutover and authorization boundaries.
+
+## Upstream and licensing
+
+GitHub identifies [pingdotgg/t3code](https://github.com/pingdotgg/t3code) as this fork's direct parent and source repository. The [preserved upstream README](native/t3-code-ls/upstream-README.md) retains the pinned upstream text for reference; its installation commands distribute upstream T3 Code.
+
+The [MIT license](LICENSE), upstream copyright notices, and dependency license material remain intact. Existing `t3`, `@t3tools/*`, package identifiers, and source paths remain compatibility contracts while the port progresses. They do not imply that upstream publishes or supports this fork.

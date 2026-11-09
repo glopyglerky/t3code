@@ -1,15 +1,18 @@
 # t3 code ls fork
 
-This fork is t3 code ls, "t3 code luxury sport addition". The requested destination
-is the complete T3 Code nightly application in Lust, including matching behavior
-and UI on web, desktop, iOS and Android, with Iroh carrying Connect traffic.
+This fork is t3 code ls, "t3 code luxury sport addition". The direction is a native Rust application with matching behavior and UI on web,
+desktop, iOS and Android, with Iroh carrying Connect traffic. Working builds come
+first. Full conversion and 100% memory-safe Rust using Lustr/BlueFe remain future
+goals, not verified support. Preserve needed TypeScript, UI and build code until
+qualified replacements exist.
 The repository ID is `1352693431`; resolve that identity when the repository is
 renamed instead of assuming its old URL still names the intended repository.
 
-Keep the upstream README body byte-for-byte at the immutable source revision in
-`native/t3-code-ls/upstream.lock.json`. Put the truthful port status above it and
-fork customizations, divergence decisions, and port methods below it. Use the
-README synchronization tool when updating the nightly baseline.
+The root README describes this fork. Keep the upstream README body byte-for-byte
+in `native/t3-code-ls/upstream-README.md` at the immutable source revision in
+`native/t3-code-ls/upstream.lock.json`. Use the README synchronization tool when
+updating the nightly baseline. Maintain decisions and layout exceptions in
+`docs/internals/t3-code-ls.md`.
 
 Lust compatibility requires the pinned Lust compiler to build and execute the
 unchanged source. Cargo compilation alone is not evidence of Lust compatibility.

@@ -1,17 +1,49 @@
-# t3 code ls boundaries
+# t3 code ls design and divergence
 
-The requested end state is T3 Code's current nightly and its mobile applications
-entirely in Theo Browne's Lust language, named t3 code ls, with Iroh carrying
-Connect traffic and the useful Iroh suite fully integrated. This includes server,
-web, desktop, iOS, and Android. Source currency,
-language compatibility, application parity, and platform qualification are
-separate claims. None follows automatically from another.
+## Ownership and direction
 
-The current code preserves the complete upstream nightly as the reference and
-adds a native workspace under `native/t3-code-ls`. The source pin identifies a
-published nightly, not whatever happens to be on `main`. The fork's older fix
-branches remain independent; their existence is not evidence that those fixes
-have been incorporated into the native port.
+This is glopyglerky's fork. GitHub repository metadata identifies
+`pingdotgg/t3code` as both its direct parent and source repository. The immutable
+nightly baseline is recorded in [upstream.lock.json](../../native/t3-code-ls/upstream.lock.json);
+it is distinct from the fork's default branch and from full application qualification.
+
+Working builds come first. The direction is a native Rust application with
+matching server, web, desktop, iOS, and Android behavior, using Iroh for Connect
+traffic. Full conversion and 100% memory-safe Rust using Lustr/BlueFe are future
+goals. The existing component comparisons described below do not qualify a
+complete application or a BlueFe toolchain.
+
+## Required layout and naming exceptions
+
+| Retained implementation or path | Why it remains | Replacement gate |
+| --- | --- | --- |
+| `apps/server`, `apps/web`, `apps/desktop`, `apps/mobile` | These contain the current application entry points and UI. Native component binaries cannot replace the application lifecycle. | Equivalent application behavior, platform builds, recovery, and client flows |
+| `packages/*`, `@t3tools/*`, `t3` CLI | Workspace dependency names, imports, wire contracts, launcher and packaging references depend on them. | Audit every consumer and qualify renamed packages and launchers before changing identifiers |
+| `scripts`, `patches`, root pnpm/Vite manifests | Existing application builds and patched dependencies use these exact paths. | Meaningful build and packaging qualification after an exact reference audit |
+| `native/t3-code-ls` | Cargo relative crate dependencies, server executable selectors, Python/Node comparison tools, and CI sparse-checkout paths use this location. | Joint reference migration and component/adapter CI qualification |
+| TypeScript adapters and production SQLite | Events, projections, receipts, outbox and provider lifecycle still share the existing transaction boundary. | Migrate all participants together with parity, backup/restore and cutover evidence |
+| Cargo-built Iroh and redb hosts | Their dependencies exceed the currently documented Lust compiler support. | Actual compiler execution and application tests with the replacement toolchain |
+| `infra/relay` and platform storage/bindings | Iroh byte forwarding does not implement account/session flows, push delivery, browser key storage or mobile lifecycle. | Authorization and lifecycle tests in each real client |
+| `.repos`, licenses and upstream notices | Read-only reference material and attribution retain their original identity. | Keep provenance and license obligations intact; never treat references as owned runtime code |
+
+No physical source moves accompany this documentation adjustment. Existing
+paths remain for the concrete consumers above, rather than presenting a new
+directory name as a port. The inherited upstream package repository metadata is
+also retained until a fork distribution is qualified; the root README establishes
+the fork identity now.
+
+The root README replaces the duplicated upstream product presentation.
+The unchanged upstream body lives in
+[upstream-README.md](../../native/t3-code-ls/upstream-README.md), where
+`tools/sync-readme.py` verifies it against the source pin. Keeping that reference
+under `native/t3-code-ls` also preserves the existing CI sparse-checkout contract.
+The reference's links retain upstream spelling for byte preservation; use the
+fork README and current documentation for navigation.
+
+Maintain this record when an implementation or consumer changes. Remove an
+exception only with the corresponding reference audit and qualification.
+Older fix branches remain independent; their existence does not establish
+inclusion in the native port.
 
 ## Compiler boundary
 

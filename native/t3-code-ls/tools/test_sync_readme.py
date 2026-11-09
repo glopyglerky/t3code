@@ -25,12 +25,13 @@ class ReadmeSynchronization(unittest.TestCase):
         git(self.repo, "init", "--quiet")
         git(self.repo, "config", "user.name", "README test")
         git(self.repo, "config", "user.email", "readme-test@example.invalid")
-        self.readme = self.repo / "README.md"
+        self.upstream_readme = self.repo / "README.md"
+        self.readme = self.repo / "native/t3-code-ls/upstream-README.md"
         self.lock_path = self.repo / "native/t3-code-ls/upstream.lock.json"
         self.lock_path.parent.mkdir(parents=True)
 
     def pin(self, source):
-        self.readme.write_bytes(source)
+        self.upstream_readme.write_bytes(source)
         git(self.repo, "add", "README.md")
         git(self.repo, "commit", "--quiet", "-m", "upstream fixture")
         self.commit = git(self.repo, "rev-parse", "HEAD").decode()
@@ -57,6 +58,7 @@ class ReadmeSynchronization(unittest.TestCase):
                 self.assertEqual(self.readme.read_bytes(), edited)
                 result = MODULE.sync_readme(self.repo, write=True)
                 self.assertEqual(result["status"], "updated")
+                self.assertEqual(self.upstream_readme.read_bytes(), source)
                 self.assertEqual(self.readme.read_bytes(), self.prefix + source + self.suffix)
                 self.assertEqual(self.readme.stat().st_mode & 0o777, 0o640)
                 before = self.readme.stat().st_mtime_ns
@@ -79,7 +81,7 @@ class ReadmeSynchronization(unittest.TestCase):
         source = b"original pinned source\n"
         self.pin(source)
         pinned_document = self.readme.read_bytes()
-        self.readme.write_bytes(b"new upstream source\n")
+        self.upstream_readme.write_bytes(b"new upstream source\n")
         git(self.repo, "add", "README.md")
         git(self.repo, "commit", "--quiet", "-m", "different source")
         new_commit = git(self.repo, "rev-parse", "HEAD").decode()
