@@ -20,7 +20,10 @@ const MAX_JSON_DEPTH = 128;
 
 export class NativeDatabaseInputError extends Schema.TaggedError<NativeDatabaseInputError>()(
   "NativeDatabaseInputError",
-  { stage: Schema.Literals(["configuration", "request"]) },
+  {
+    stage: Schema.Literals(["configuration", "request"]),
+    cause: Schema.optional(Schema.Defect()),
+  },
 ) {
   override get message(): string {
     return `Native database ${this.stage} is invalid; no request was sent.`;
@@ -29,7 +32,10 @@ export class NativeDatabaseInputError extends Schema.TaggedError<NativeDatabaseI
 
 export class NativeDatabaseUnavailable extends Schema.TaggedError<NativeDatabaseUnavailable>()(
   "NativeDatabaseUnavailable",
-  { stage: Schema.Literals(["spawn", "closed"]) },
+  {
+    stage: Schema.Literals(["spawn", "closed"]),
+    cause: Schema.optional(Schema.Defect()),
+  },
 ) {
   override get message(): string {
     return "Native database is unavailable; no request was sent.";
@@ -59,6 +65,7 @@ export class NativeDatabaseOutcomeUnknown extends Schema.TaggedError<NativeDatab
   "NativeDatabaseOutcomeUnknown",
   {
     stage: Schema.Literals(["write", "response", "timeout", "exit", "cancelled", "database"]),
+    cause: Schema.optional(Schema.Defect()),
   },
 ) {
   override get message(): string {
@@ -151,7 +158,7 @@ export const make = Effect.fn("NativeDatabase.make")(function* (config: {
     return yield* new NativeDatabaseInputError({ stage: "configuration" });
   const timeout = yield* Effect.try({
     try: () => Duration.fromInputUnsafe(config.requestTimeout ?? "30 seconds"),
-    catch: () => new NativeDatabaseInputError({ stage: "configuration" }),
+    catch: (cause) => new NativeDatabaseInputError({ stage: "configuration", cause }),
   });
   if (!Number.isFinite(Duration.toMillis(timeout)) || Duration.toMillis(timeout) <= 0)
     return yield* new NativeDatabaseInputError({ stage: "configuration" });
@@ -162,7 +169,7 @@ export const make = Effect.fn("NativeDatabase.make")(function* (config: {
   let current: Session | undefined;
   let closed = false;
 
-  // Stream callbacks share the enclosing request span; they never record payloads or host paths.
+  // Stream callbacks share the enclosing request span; diagnostic fields use normalized stages.
   const poison = Effect.fnUntraced(function* (
     session: Session,
     error: NativeDatabaseOutcomeUnknown,
@@ -197,8 +204,10 @@ export const make = Effect.fn("NativeDatabase.make")(function* (config: {
       )
       .pipe(
         Scope.provide(scope),
-        Effect.mapError(() => new NativeDatabaseUnavailable({ stage: "spawn" })),
-        Effect.catchDefect(() => Effect.fail(new NativeDatabaseUnavailable({ stage: "spawn" }))),
+        Effect.mapError((cause) => new NativeDatabaseUnavailable({ stage: "spawn", cause })),
+        Effect.catchDefect((cause) =>
+          Effect.fail(new NativeDatabaseUnavailable({ stage: "spawn", cause })),
+        ),
         Effect.timeoutOption(timeout),
         Effect.flatMap((result) =>
           Effect.fromOption(result, () => new NativeDatabaseUnavailable({ stage: "spawn" })),
@@ -239,7 +248,7 @@ export const make = Effect.fn("NativeDatabase.make")(function* (config: {
               new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
                 Buffer.concat(parts, bytes).subarray(0, bytes - 1),
               ),
-            catch: () => new NativeDatabaseOutcomeUnknown({ stage: "response" }),
+            catch: (cause) => new NativeDatabaseOutcomeUnknown({ stage: "response", cause }),
           });
           parts = [];
           bytes = 0;
@@ -247,7 +256,11 @@ export const make = Effect.fn("NativeDatabase.make")(function* (config: {
           yield* Deferred.succeed(session.pending, body);
         }),
       ),
-      Effect.mapError(() => new NativeDatabaseOutcomeUnknown({ stage: "response" })),
+      Effect.mapError((cause) =>
+        cause._tag === "NativeDatabaseOutcomeUnknown"
+          ? cause
+          : new NativeDatabaseOutcomeUnknown({ stage: "response", cause }),
+      ),
       Effect.andThen(Effect.fail(new NativeDatabaseOutcomeUnknown({ stage: "exit" }))),
       Effect.catch((error) => poison(session, error)),
     );
@@ -258,13 +271,19 @@ export const make = Effect.fn("NativeDatabase.make")(function* (config: {
           ? Effect.void
           : Effect.fail(new NativeDatabaseOutcomeUnknown({ stage: "response" })),
       ),
-      Effect.mapError(() => new NativeDatabaseOutcomeUnknown({ stage: "response" })),
+      Effect.mapError((cause) =>
+        cause._tag === "NativeDatabaseOutcomeUnknown"
+          ? cause
+          : new NativeDatabaseOutcomeUnknown({ stage: "response", cause }),
+      ),
       Effect.catch((error) => poison(session, error)),
       Effect.forkIn(scope),
     );
     yield* child.exitCode.pipe(
-      Effect.ignore,
       Effect.andThen(poison(session, new NativeDatabaseOutcomeUnknown({ stage: "exit" }))),
+      Effect.catch((cause) =>
+        poison(session, new NativeDatabaseOutcomeUnknown({ stage: "exit", cause })),
+      ),
       Effect.forkIn(scope),
     );
     return session;
@@ -275,7 +294,7 @@ export const make = Effect.fn("NativeDatabase.make")(function* (config: {
     response: Schema.Decoder<A>,
   ) {
     const encoded = `${yield* encodeRequest(input).pipe(
-      Effect.mapError(() => new NativeDatabaseInputError({ stage: "request" })),
+      Effect.mapError((cause) => new NativeDatabaseInputError({ stage: "request", cause })),
     )}\n`;
     if (Buffer.byteLength(encoded, "utf8") > MAX_REQUEST_BYTES)
       return yield* new NativeDatabaseInputError({ stage: "request" });
@@ -286,11 +305,13 @@ export const make = Effect.fn("NativeDatabase.make")(function* (config: {
         session.pending = pending;
         session.received = false;
         return yield* Stream.run(Stream.encodeText(Stream.make(encoded)), session.child.stdin).pipe(
-          Effect.mapError(() => new NativeDatabaseOutcomeUnknown({ stage: "write" })),
+          Effect.mapError((cause) => new NativeDatabaseOutcomeUnknown({ stage: "write", cause })),
           Effect.andThen(Deferred.await(pending)),
           Effect.flatMap((body) =>
             decodeEnvelope(body).pipe(
-              Effect.mapError(() => new NativeDatabaseOutcomeUnknown({ stage: "response" })),
+              Effect.mapError(
+                (cause) => new NativeDatabaseOutcomeUnknown({ stage: "response", cause }),
+              ),
             ),
           ),
           Effect.flatMap(
@@ -305,7 +326,9 @@ export const make = Effect.fn("NativeDatabase.make")(function* (config: {
               return Schema.decodeUnknownEffect(response, { onExcessProperty: "error" })(
                 envelope.result,
               ).pipe(
-                Effect.mapError(() => new NativeDatabaseOutcomeUnknown({ stage: "response" })),
+                Effect.mapError(
+                  (cause) => new NativeDatabaseOutcomeUnknown({ stage: "response", cause }),
+                ),
               );
             },
           ),
@@ -323,7 +346,10 @@ export const make = Effect.fn("NativeDatabase.make")(function* (config: {
               )
             )
               return Effect.void;
-            session.failure ??= new NativeDatabaseOutcomeUnknown({ stage: "cancelled" });
+            session.failure ??= new NativeDatabaseOutcomeUnknown({
+              stage: "cancelled",
+              cause: exit.cause,
+            });
             return Scope.close(session.scope, Exit.void);
           }),
         );

@@ -13,6 +13,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import * as NativeDatabase from "./NativeDatabase.ts";
 
+const isEffectOutboxError = Schema.is(EffectOutbox.EffectOutboxError);
 const Counter = Schema.Number.check(
   Schema.isInt(),
   Schema.isBetween({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
@@ -132,13 +133,14 @@ export const layer = Layer.effect(
       return yield* database.request(input, schema);
     });
     const mapError = (operation: string, effectId?: string) =>
-      Effect.mapError(
-        (cause: unknown) =>
-          new EffectOutbox.EffectOutboxError({
-            operation,
-            ...(effectId === undefined ? {} : { effectId }),
-            cause,
-          }),
+      Effect.mapError((cause: unknown) =>
+        isEffectOutboxError(cause)
+          ? cause
+          : new EffectOutbox.EffectOutboxError({
+              operation,
+              ...(effectId === undefined ? {} : { effectId }),
+              cause,
+            }),
       );
     const notifyAvailable = (count = 1) =>
       Queue.offerAll(
