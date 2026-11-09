@@ -90,6 +90,10 @@ response and persists native project creation and metadata updates. This is a
 standalone native storage path; the existing production server still uses SQLite.
 Its thread lifecycle and transaction participants must migrate together before
 cutover. Native project deletion is explicitly unavailable until that work lands.
+The native outbox now has indexed claims, owner-checked completion/retry,
+cancellation, process-loss reconciliation, and retention. Its portable policy
+is qualified through Lustr and called by the Cargo database host. The production
+TypeScript effect worker remains connected to SQLite.
 
 The native transport carries a fixed loopback service's HTTP, WebSocket, and
 binary traffic over authenticated Iroh connections. Each host explicitly admits
@@ -352,8 +356,65 @@ existing rows. Snapshot size is limited to 16 MiB and 65,536 projections, batch
 size to 16 MiB, and event/effect pages to 4,096 records and 16 MiB. Project planning
 reads only the indexed project key range, so unrelated projections do not consume
 its snapshot allowance. The project
-planner has a 30-second deadline. This is a correctness foundation, not a
-measured throughput improvement or a completed outbox worker.
+planner has a 30-second deadline. Performance improvements require equivalent
+workload measurements; this component does not yet execute provider effects.
+
+### Durable orchestration outbox
+
+Typed worker effects are separate from generic immutable `Record` effects.
+They preserve all five statuses, attempt counts, timestamps, error details, and
+worker ownership. The obsolete SQLite `lease_expires_at` field remains null;
+these are owner checks, not expiring distributed leases.
+
+| JSONL operation                                                      | Result                                                                   |
+| -------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `outbox_enqueue` (`effects`, `now`)                                  | Insert-if-absent count; duplicate IDs retain the existing row            |
+| `outbox_get` (`effect_id`) / `outbox_list` (`command_id`)            | Complete row or command's ordered rows                                   |
+| `outbox_claim` (`worker_id`, `now`, `exclude_restart_continuations`) | Claimed row or null                                                      |
+| `outbox_next_claimable_at`                                           | Earliest eligible timestamp or null                                      |
+| `outbox_succeed` / `outbox_fail` / `outbox_retry`                    | Boolean indicating an owner-checked transition                           |
+| `outbox_cancel` (`thread_id`, `effect_types`, `reason`, `now`)       | Cancelled pending/running IDs in insertion order                         |
+| `outbox_reconcile` (`now`)                                           | Requeued/cancelled counts after process loss                             |
+| `outbox_prune` (`before`, `limit`)                                   | Number of succeeded/cancelled rows removed                               |
+| `commit_outbox` (`batch`, `outbox`)                                  | Atomic event/projection/receipt commit plus enqueue/cancellation results |
+| `outbox_receipt` (`command_id`)                                      | Original commit and worker-mutation results, or null                     |
+
+`outbox_succeed` takes `effect_id`, `worker_id`, and `now`; failure also takes
+`error`, and retry takes `error` and `available_at`. The host supplies canonical
+UTC strings with milliseconds (years 0000–9999), including a retry deadline at
+or after `now` and the seven-day retention cutoff used by production. Reads and
+mutations reject work exceeding 16 MiB or 65,536 records without partial writes.
+The transaction budget includes index keys and accumulated observations across
+all stages, and bounds expanded stored values as well as the input request.
+The 65,536 observation limit counts internal index reads too, so an operation
+may reach it with fewer logical effects.
+Pruning accepts a limit from 1 to 500; repeat batches to drain eligible rows.
+
+`commit_outbox` accepts the existing `CommitBatch` as `batch`, and
+`{ "enqueue": [], "enqueue_at": "2026-11-08T12:00:00.000Z", "cancel": [] }`
+as `outbox`. Each enqueue supplies `id`, `command_id`, `thread_id`, `request`,
+and optional `available_at`; cancellations use the `outbox_cancel` fields.
+It enqueues before cancelling, matching EventSink. Retries reuse the original
+outbox envelope and retrieve its stored results even after workers have advanced
+those effects. Use `outbox_receipt` to resolve an uncertain combined commit.
+Generic `commit` and `commit_outbox` cannot share a receipt ID.
+
+Standalone claims do not yet have operation receipts. An uncertain claim must
+stop further dispatch until its owning worker runtime has stopped and the
+outbox has been reconciled. Blindly retrying a claim could claim another effect
+while the first remains running. Production integration still needs an
+idempotent claim token or equivalent recovery path; `outbox_receipt` resolves
+only the combined event commit.
+
+Each thread has a title-generation lane and an ordinary-work lane. An earlier
+pending effect blocks later work in its lane even while waiting for retry;
+running work also blocks that lane. Claims order eligible rows by availability,
+creation time, and ID. Reconciliation cancels process-bound provider operations
+and requeues running replay-safe work. Run it only after the previous server's
+workers have stopped; calling it while another server is active can duplicate
+side effects. Future active-active integration needs worker fencing and durable
+cross-node notifications. These methods do not execute effects or replace the
+current production worker.
 
 ### Preserve existing SQLite data
 
@@ -530,6 +591,9 @@ node --disable-warning=ExperimentalWarning --test tools/export-sqlite-state.test
 node --disable-warning=ExperimentalWarning tools/check-database.mjs \
   "$PWD/target/debug/t3-code-ls-db" "$PWD/target/lust-bin/t3-code-ls-project-store" \
   "$PWD/target/database-proof.json"
+node --disable-warning=ExperimentalWarning tools/check-outbox.mjs \
+  "$PWD/target/debug/t3-code-ls-db" "$PWD/target/lust-bin/t3-code-ls-outbox" \
+  "$PWD/target/outbox-proof.json"
 ```
 
 The dedicated CI database job consumes the exact Lust artifact from the same
@@ -539,6 +603,12 @@ conflicts, malformed selected planners, process-crash recovery, and verified
 SQLite archive recovery. The projection oracle compares only rows accepted by
 the real upstream persistence schemas and reports planner-only fixtures outside
 those schemas separately; the original complete planner comparison remains.
+The outbox oracle executes immutable upstream `EffectOutbox.ts` with actual
+SQLite migrations and a controlled Effect clock, then compares full rows and
+operation results with redb and the Lust-built lifecycle policy. It covers all
+effect types and statuses, FIFO/backoff, separate title work, ownership,
+cancellation, recovery, and retention. Independent-process checks cover claim
+contention and restart after acknowledged work survives `SIGKILL`.
 
 The provider component accepts Codex app-server JSONL on standard input and
 returns responses, notifications, and approval requests on standard output:

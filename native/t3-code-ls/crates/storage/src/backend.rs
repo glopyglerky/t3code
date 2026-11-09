@@ -12,7 +12,7 @@ use redb::{
 };
 use sha2::{Digest, Sha256};
 
-use crate::{Error, MAX_BATCH_BYTES, Result};
+use crate::{Error, MAX_BATCH_BYTES, MAX_BATCH_RECORDS, Result};
 
 const TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("t3_code_ls_v2");
 type Pair = (Vec<u8>, Vec<u8>);
@@ -142,6 +142,9 @@ impl Backend {
             reads: BTreeMap::new(),
             mutation_reads: BTreeMap::new(),
             writes: BTreeMap::new(),
+            staged_bytes: 0,
+            observed_bytes: 0,
+            observed_records: 0,
             ranges: Vec::new(),
         })
     }
@@ -179,6 +182,9 @@ pub(crate) struct Transaction {
     reads: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
     mutation_reads: BTreeMap<Vec<u8>, Option<(usize, [u8; 32])>>,
     writes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    staged_bytes: usize,
+    observed_bytes: usize,
+    observed_records: usize,
     ranges: Vec<ObservedRange>,
 }
 
@@ -196,6 +202,10 @@ impl Transaction {
         })
         .await
         .map_err(worker_error)??;
+        self.observe_size(
+            key.len().saturating_add(value.as_ref().map_or(0, Vec::len)),
+            1,
+        )?;
         self.reads.insert(key.to_vec(), value.clone());
         Ok(value)
     }
@@ -204,8 +214,10 @@ impl Transaction {
         if value.len() > MAX_BATCH_BYTES {
             return Err(Error::Invalid("stored value exceeds 16 MiB".into()));
         }
+        let staged_bytes = self.staged_size(&key, value.len())?;
         self.observe_mutation(&key).await?;
         self.writes.insert(key, Some(value));
+        self.staged_bytes = staged_bytes;
         Ok(())
     }
 
@@ -217,8 +229,39 @@ impl Transaction {
     }
 
     pub(crate) async fn delete(&mut self, key: Vec<u8>) -> Result<()> {
+        let staged_bytes = self.staged_size(&key, 0)?;
         self.observe_mutation(&key).await?;
         self.writes.insert(key, None);
+        self.staged_bytes = staged_bytes;
+        Ok(())
+    }
+
+    fn staged_size(&self, key: &[u8], value_bytes: usize) -> Result<usize> {
+        let previous = self
+            .writes
+            .get(key)
+            .map_or(0, |value| key.len() + value.as_ref().map_or(0, Vec::len));
+        let total = self
+            .staged_bytes
+            .saturating_sub(previous)
+            .saturating_add(key.len())
+            .saturating_add(value_bytes);
+        if total > MAX_BATCH_BYTES {
+            return Err(Error::Invalid("transaction mutations exceed 16 MiB".into()));
+        }
+        Ok(total)
+    }
+
+    fn observe_size(&mut self, bytes: usize, records: usize) -> Result<()> {
+        let total_bytes = self.observed_bytes.saturating_add(bytes);
+        let total_records = self.observed_records.saturating_add(records);
+        if total_bytes > MAX_BATCH_BYTES || total_records > MAX_BATCH_RECORDS {
+            return Err(Error::Invalid(
+                "transaction observations exceed read limits".into(),
+            ));
+        }
+        self.observed_bytes = total_bytes;
+        self.observed_records = total_records;
         Ok(())
     }
 
@@ -235,6 +278,11 @@ impl Transaction {
         })
         .await
         .map_err(worker_error)??;
+        self.observe_size(
+            key.len()
+                .saturating_add(observed.as_ref().map_or(0, |_| 40)),
+            1,
+        )?;
         self.mutation_reads.insert(key.to_vec(), observed);
         Ok(())
     }
@@ -266,6 +314,12 @@ impl Transaction {
             })
             .await
             .map_err(worker_error)??;
+            let bytes = loaded.iter().fold(0usize, |total, (key, value)| {
+                total
+                    .saturating_add(key.len())
+                    .saturating_add(value.as_ref().map_or(0, Vec::len))
+            });
+            self.observe_size(bytes, loaded.len())?;
             self.reads.extend(loaded);
         }
         let mut total = 0usize;
@@ -307,6 +361,11 @@ impl Transaction {
         })
         .await
         .map_err(worker_error)??;
+        let observed_bytes = rows.iter().fold(
+            start.len().saturating_add(end.len()),
+            |total, (key, value)| total.saturating_add(key.len()).saturating_add(value.len()),
+        );
+        self.observe_size(observed_bytes, rows.len().saturating_add(1))?;
         self.ranges.push(ObservedRange {
             start: start.to_vec(),
             end: end.to_vec(),
@@ -340,6 +399,9 @@ impl Transaction {
                 reads,
                 mutation_reads,
                 writes,
+                staged_bytes: _,
+                observed_bytes: _,
+                observed_records: _,
                 ranges,
             } = self;
             drop(snapshot);

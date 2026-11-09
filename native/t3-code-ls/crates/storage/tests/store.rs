@@ -5,6 +5,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 
 use serde_json::{Value, json};
+use t3_code_ls_storage::OutboxBatch;
+use t3_code_ls_storage::outbox::{CancelUnsettled, Claim, EffectType, EnqueueEffect, Settle};
 use t3_code_ls_storage::{CommitBatch, Error, ProjectionMutation, Record, Store, request_digest};
 
 fn batch(command: &str, revision: u64) -> CommitBatch {
@@ -92,6 +94,153 @@ async fn late_duplicate_rolls_back_every_part_of_batch() {
     assert!(store.read_receipt("collision").await.unwrap().is_none());
     let committed = store.commit(&batch("next", 1)).await.unwrap();
     assert_eq!(committed.receipt.first_sequence, Some(2));
+}
+
+fn worker_effect(id: &str, command: &str) -> EnqueueEffect {
+    EnqueueEffect {
+        id: id.into(),
+        command_id: command.into(),
+        thread_id: "thread-one".into(),
+        request: json!({"type": "terminal.cleanup"}),
+        available_at: None,
+    }
+}
+
+#[tokio::test]
+async fn outbox_commit_replays_enqueues_and_cancellations_without_reapplying_them() {
+    let fixture = test_support::TestFixture::start().await;
+    let store = fixture.initialize().await;
+    let now = "2026-11-08T12:00:00.000Z";
+    store
+        .outbox_enqueue(&[worker_effect("old", "before")], now)
+        .await
+        .unwrap();
+    let old = store
+        .outbox_claim_next(&Claim {
+            worker_id: "worker-old".into(),
+            now: now.into(),
+            exclude_restart_continuations: false,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(old.id, "old");
+    let command = batch("atomic-worker", 0);
+    let envelope = OutboxBatch {
+        enqueue: vec![EnqueueEffect {
+            request: json!({"type": "preview.cleanup"}),
+            ..worker_effect("new", "atomic-worker")
+        }],
+        enqueue_at: now.into(),
+        cancel: vec![CancelUnsettled {
+            thread_id: "thread-one".into(),
+            effect_types: vec![EffectType::TerminalCleanup],
+            reason: "Thread stopped".into(),
+            now: now.into(),
+        }],
+    };
+    let committed = store.commit_outbox(&command, &envelope).await.unwrap();
+    assert!(!committed.commit.replayed);
+    assert_eq!(committed.enqueued, 1);
+    assert_eq!(committed.cancelled, ["old"]);
+    assert_eq!(store.snapshot().await.unwrap().last_sequence, 1);
+    assert!(
+        !store
+            .outbox_succeed(&Settle {
+                effect_id: "old".into(),
+                worker_id: "worker-old".into(),
+                now: now.into(),
+            })
+            .await
+            .unwrap()
+    );
+    let claimed = store
+        .outbox_claim_next(&Claim {
+            worker_id: "worker-new".into(),
+            now: now.into(),
+            exclude_restart_continuations: false,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.id, "new");
+    assert!(
+        store
+            .outbox_succeed(&Settle {
+                effect_id: "new".into(),
+                worker_id: "worker-new".into(),
+                now: now.into(),
+            })
+            .await
+            .unwrap()
+    );
+    let finished = store.outbox_get("new").await.unwrap().unwrap();
+    store.shutdown().await.unwrap();
+    let reopened = fixture.connect().await;
+    let replay = reopened.commit_outbox(&command, &envelope).await.unwrap();
+    assert!(replay.commit.replayed);
+    assert_eq!(replay.commit.receipt, committed.commit.receipt);
+    assert_eq!(replay.enqueued, 1);
+    assert_eq!(replay.cancelled, ["old"]);
+    assert_eq!(reopened.outbox_get("new").await.unwrap(), Some(finished));
+    assert_eq!(reopened.events(0, 10).await.unwrap().len(), 1);
+    assert_eq!(
+        reopened.read_outbox_receipt("atomic-worker").await.unwrap(),
+        Some(replay)
+    );
+}
+
+#[tokio::test]
+async fn outbox_envelope_identity_and_failures_leave_all_state_unchanged() {
+    let fixture = test_support::TestFixture::start().await;
+    let store = fixture.initialize().await;
+    let envelope = OutboxBatch {
+        enqueue: vec![worker_effect("new", "atomic-worker")],
+        enqueue_at: "2026-11-08T12:00:00.000Z".into(),
+        cancel: vec![],
+    };
+    let command = batch("atomic-worker", 0);
+    store.commit_outbox(&command, &envelope).await.unwrap();
+    let before = store.snapshot().await.unwrap();
+    let mut changed = envelope.clone();
+    changed.enqueue[0].thread_id = "different-thread".into();
+    assert!(matches!(
+        store.commit_outbox(&command, &changed).await,
+        Err(Error::CommandConflict)
+    ));
+    assert!(matches!(
+        store.commit(&command).await,
+        Err(Error::CommandConflict)
+    ));
+    assert!(matches!(
+        store.commit_outbox(&batch("stale", 0), &envelope).await,
+        Err(Error::StaleRevision { .. })
+    ));
+    let mut duplicate_event = batch("collision", 1);
+    duplicate_event.events[0].id = "event:atomic-worker".into();
+    let mut distinct = envelope.clone();
+    distinct.enqueue[0].id = "must-not-exist".into();
+    assert!(matches!(
+        store.commit_outbox(&duplicate_event, &distinct).await,
+        Err(Error::DuplicateRecord)
+    ));
+    assert!(store.outbox_get("must-not-exist").await.unwrap().is_none());
+    assert!(
+        store
+            .read_outbox_receipt("collision")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(store.read_receipt("collision").await.unwrap().is_none());
+    assert_eq!(store.snapshot().await.unwrap(), before);
+    let plain = batch("plain", 1);
+    store.commit(&plain).await.unwrap();
+    assert!(matches!(
+        store.commit_outbox(&plain, &envelope).await,
+        Err(Error::CommandConflict)
+    ));
+    assert!(store.read_outbox_receipt("plain").await.unwrap().is_none());
 }
 
 #[tokio::test]

@@ -2,6 +2,7 @@
 
 mod backend;
 
+pub mod outbox;
 pub mod project_service;
 pub mod project_validation;
 pub mod sqlite_import;
@@ -70,6 +71,22 @@ pub struct CommitOutcome {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct OutboxBatch {
+    pub enqueue: Vec<outbox::EnqueueEffect>,
+    pub enqueue_at: String,
+    pub cancel: Vec<outbox::CancelUnsettled>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutboxCommitOutcome {
+    pub commit: CommitOutcome,
+    pub enqueued: usize,
+    pub cancelled: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Projection {
     pub key: String,
     pub payload: Value,
@@ -128,7 +145,7 @@ impl fmt::Display for Error {
             Self::TransactionConflict => write!(f, "The transaction conflicted and did not commit"),
             Self::UnknownCommit => write!(
                 f,
-                "Commit outcome is unknown; read the original command receipt before retrying"
+                "Commit outcome is unknown; resolve the original operation before retrying"
             ),
             Self::Database(message) => write!(f, "Database operation failed: {message}"),
         }
@@ -301,6 +318,39 @@ struct EffectMetadata {
     id: String,
     command_id: String,
     payload_bytes: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OutboxReceipt {
+    command_id: String,
+    request_digest: String,
+    outbox_digest: String,
+    enqueued: usize,
+    cancelled: Vec<String>,
+}
+
+fn outbox_receipt_key(command_id: &str) -> Vec<u8> {
+    store_key(&format!("outbox/commit/{command_id}"))
+}
+
+fn decode_outbox_receipt(bytes: &[u8], receipt: &Receipt) -> Result<OutboxReceipt> {
+    let extra: OutboxReceipt = decode(bytes)?;
+    if extra.command_id != receipt.command_id
+        || extra.request_digest != receipt.request_digest
+        || extra.outbox_digest.len() != 64
+        || !extra
+            .outbox_digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || extra.enqueued > MAX_BATCH_RECORDS
+        || extra.cancelled.len() > MAX_BATCH_RECORDS
+        || extra.cancelled.iter().any(|id| !id_is_valid(id))
+        || extra.cancelled.iter().collect::<HashSet<_>>().len() != extra.cancelled.len()
+    {
+        return Err(Error::IncompatibleStore);
+    }
+    Ok(extra)
 }
 
 impl Store {
@@ -562,6 +612,14 @@ impl Store {
     pub async fn commit(&self, batch: &CommitBatch) -> Result<CommitOutcome> {
         validate_batch(batch)?;
         let mut tx = self.db.begin().await?;
+        if tx
+            .get(&outbox_receipt_key(&batch.command_id))
+            .await?
+            .is_some()
+        {
+            tx.rollback().await?;
+            return Err(Error::CommandConflict);
+        }
         let staged = self.stage(&mut tx, batch).await;
         match staged {
             Ok(outcome) if outcome.replayed => {
@@ -577,6 +635,116 @@ impl Store {
                 Err(error)
             }
         }
+    }
+
+    /// Enqueue and cancel worker effects in the event/projection/receipt transaction.
+    /// Retries reuse the original outbox envelope, including its host-supplied timestamps.
+    pub async fn commit_outbox(
+        &self,
+        batch: &CommitBatch,
+        outbox: &OutboxBatch,
+    ) -> Result<OutboxCommitOutcome> {
+        validate_batch(batch)?;
+        if outbox.cancel.len() > MAX_BATCH_RECORDS
+            || encode(batch)?.len().saturating_add(encode(outbox)?.len()) > MAX_BATCH_BYTES
+        {
+            return Err(Error::Invalid("outbox commit exceeds batch limits".into()));
+        }
+        outbox::validate_enqueue(&outbox.enqueue, &outbox.enqueue_at)?;
+        for cancel in &outbox.cancel {
+            outbox::validate_cancel(cancel)?;
+        }
+        let digest = request_digest(&serde_json::to_value(outbox).map_err(json_error)?);
+        let mut tx = self.db.begin().await?;
+        let staged = async {
+            let commit = self.stage(&mut tx, batch).await?;
+            let key = outbox_receipt_key(&batch.command_id);
+            if commit.replayed {
+                let bytes = tx.get(&key).await?.ok_or(Error::CommandConflict)?;
+                let extra = decode_outbox_receipt(&bytes, &commit.receipt)?;
+                if extra.outbox_digest != digest {
+                    return Err(Error::CommandConflict);
+                }
+                return Ok(OutboxCommitOutcome {
+                    commit,
+                    enqueued: extra.enqueued,
+                    cancelled: extra.cancelled,
+                });
+            }
+            let enqueued =
+                outbox::stage_enqueue(&mut tx, &outbox.enqueue, &outbox.enqueue_at).await?;
+            let mut cancelled = Vec::new();
+            for cancel in &outbox.cancel {
+                cancelled.extend(outbox::stage_cancel_unsettled(&mut tx, cancel).await?);
+                if cancelled.len() > MAX_BATCH_RECORDS {
+                    return Err(Error::Invalid(
+                        "too many cancelled effects in one commit".into(),
+                    ));
+                }
+            }
+            let extra = OutboxReceipt {
+                command_id: batch.command_id.clone(),
+                request_digest: batch.request_digest.clone(),
+                outbox_digest: digest,
+                enqueued,
+                cancelled: cancelled.clone(),
+            };
+            tx.insert(key, encode(&extra)?).await?;
+            let outcome = OutboxCommitOutcome {
+                commit,
+                enqueued,
+                cancelled,
+            };
+            validate_response_bytes(&outcome)?;
+            Ok(outcome)
+        }
+        .await;
+        match staged {
+            Ok(outcome) if outcome.commit.replayed => {
+                tx.rollback().await?;
+                Ok(outcome)
+            }
+            Ok(outcome) => {
+                tx.commit().await?;
+                Ok(outcome)
+            }
+            Err(error) => {
+                let _ = tx.rollback().await;
+                Err(error)
+            }
+        }
+    }
+
+    pub async fn read_outbox_receipt(
+        &self,
+        command_id: &str,
+    ) -> Result<Option<OutboxCommitOutcome>> {
+        validate_id(command_id)?;
+        let mut tx = self.db.begin().await?;
+        let result = async {
+            let Some(extra) = tx.get(&outbox_receipt_key(command_id)).await? else {
+                return Ok(None);
+            };
+            let bytes = tx
+                .get(&store_key(&format!("receipt/{command_id}")))
+                .await?
+                .ok_or(Error::IncompatibleStore)?;
+            let receipt = decode_receipt(&bytes, command_id)?;
+            let extra = decode_outbox_receipt(&extra, &receipt)?;
+            let outcome = OutboxCommitOutcome {
+                commit: CommitOutcome {
+                    receipt,
+                    replayed: true,
+                },
+                enqueued: extra.enqueued,
+                cancelled: extra.cancelled,
+            };
+            validate_response_bytes(&outcome)?;
+            Ok(Some(outcome))
+        }
+        .await;
+        tx.rollback().await?;
+        result
     }
 
     async fn stage(&self, tx: &mut Transaction, batch: &CommitBatch) -> Result<CommitOutcome> {

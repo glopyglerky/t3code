@@ -457,6 +457,82 @@ try {
   NodeAssert.deepEqual(await snapshot(left), beforeRollback);
   checked("checksum failure prevents publishing a complete archive");
 
+  const outboxNow = "2026-11-08T12:00:00.000Z";
+  const workerCommit = {
+    operation: "commit_outbox",
+    batch: {
+      command_id: "worker-fixture",
+      request_digest: hash("worker-fixture"),
+      expected_revision: (await snapshot(left)).revision,
+      events: [{ id: "worker-event", payload: { type: "worker-fixture" } }],
+      projections: [{ operation: "put", key: "worker/fixture", payload: { durable: true } }],
+      effects: [],
+      result: { accepted: true },
+    },
+    outbox: {
+      enqueue_at: outboxNow,
+      enqueue: [
+        {
+          id: "worker-cleanup",
+          command_id: "worker-fixture",
+          thread_id: "worker-thread",
+          request: { type: "terminal.cleanup" },
+        },
+      ],
+      cancel: [],
+    },
+  };
+  const workerCommitted = successful(await left.send(workerCommit));
+  NodeAssert.equal(workerCommitted.enqueued, 1);
+  const claims = await Promise.all(
+    [left, right].map((connection, index) =>
+      connection.send({
+        operation: "outbox_claim",
+        worker_id: `worker-${index}`,
+        now: outboxNow,
+        exclude_restart_continuations: false,
+      }),
+    ),
+  );
+  const wonClaims = claims.filter((response) => response.ok && response.result !== null);
+  NodeAssert.equal(wonClaims.length, 1);
+  for (const response of claims) {
+    if (!response.ok) NodeAssert.equal(response.error.kind, "transaction_conflict");
+  }
+  const claimedCleanup = wonClaims[0].result;
+  NodeAssert.equal(claimedCleanup.id, "worker-cleanup");
+  NodeAssert.equal(claimedCleanup.attempt_count, 1);
+  checked(
+    "event, projection, receipt and worker enqueue commit together; independent processes cannot both claim an effect",
+  );
+  successful(
+    await right.send({
+      operation: "outbox_enqueue",
+      now: outboxNow,
+      effects: [
+        {
+          id: "process-bound",
+          command_id: "worker-process",
+          thread_id: "other-worker-thread",
+          request: { type: "provider-turn.start", runId: "fixture-run" },
+        },
+      ],
+    }),
+  );
+  const claimedProvider = successful(
+    await right.send({
+      operation: "outbox_claim",
+      worker_id: "provider-worker",
+      now: outboxNow,
+      exclude_restart_continuations: false,
+    }),
+  );
+  NodeAssert.equal(claimedProvider.id, "process-bound");
+  const workerReceipt = successful(
+    await right.send({ operation: "outbox_receipt", command_id: "worker-fixture" }),
+  );
+  NodeAssert.deepEqual(workerReceipt.commit.receipt, workerCommitted.commit.receipt);
+
   const durableState = await snapshot(left);
   const durableEvents = await events(left);
   const durableEffects = successful(await left.send({ operation: "pending_effects", limit: 100 }));
@@ -468,6 +544,60 @@ try {
   NodeAssert.deepEqual(
     successful(await right.send({ operation: "pending_effects", limit: 100 })),
     durableEffects,
+  );
+  NodeAssert.deepEqual(
+    successful(await left.send({ operation: "outbox_get", effect_id: "worker-cleanup" })),
+    claimedCleanup,
+  );
+  NodeAssert.deepEqual(
+    successful(await right.send({ operation: "outbox_get", effect_id: "process-bound" })),
+    claimedProvider,
+  );
+  NodeAssert.deepEqual(
+    successful(await left.send({ operation: "outbox_receipt", command_id: "worker-fixture" })),
+    workerReceipt,
+  );
+  NodeAssert.deepEqual(
+    successful(
+      await right.send({ operation: "outbox_reconcile", now: "2026-11-08T12:00:01.000Z" }),
+    ),
+    { requeued: 1, cancelled: 1 },
+  );
+  NodeAssert.equal(
+    successful(
+      await left.send({
+        operation: "outbox_succeed",
+        effect_id: "worker-cleanup",
+        worker_id: claimedCleanup.lease_owner,
+        now: "2026-11-08T12:00:01.000Z",
+      }),
+    ),
+    false,
+  );
+  const recoveredCleanup = successful(
+    await left.send({
+      operation: "outbox_claim",
+      worker_id: "recovery-worker",
+      now: "2026-11-08T12:00:01.000Z",
+      exclude_restart_continuations: false,
+    }),
+  );
+  NodeAssert.equal(recoveredCleanup.id, "worker-cleanup");
+  NodeAssert.equal(recoveredCleanup.attempt_count, 2);
+  const recoveredProvider = successful(
+    await right.send({ operation: "outbox_get", effect_id: "process-bound" }),
+  );
+  NodeAssert.equal(recoveredProvider.status, "cancelled");
+  NodeAssert.equal(recoveredProvider.lease_owner, null);
+  const workerReplay = successful(await right.send(workerCommit));
+  NodeAssert.equal(workerReplay.commit.replayed, true);
+  NodeAssert.equal(workerReplay.enqueued, 1);
+  NodeAssert.deepEqual(
+    successful(await left.send({ operation: "outbox_get", effect_id: "worker-cleanup" })),
+    recoveredCleanup,
+  );
+  checked(
+    "SIGKILL recovery requeues cleanup, cancels process-bound work, rejects the old lease and preserves the original commit receipt",
   );
   NodeAssert.deepEqual(
     successful(await left.send(project(createCommand, "never-recommitted"))).receipt,

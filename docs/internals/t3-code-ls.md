@@ -186,8 +186,46 @@ Project planning reads a revision-consistent snapshot of the indexed
 `project/` key range, so unrelated domains do not consume its allowance. This
 initial project snapshot is bounded to 16 MiB and 65,536 rows; it needs direct
 project/workspace queries before it can replace larger production stores.
-The outbox has durable pending records and read operations, but no distributed
-claim/lease/ack worker yet.
+
+The typed orchestration outbox also persists its complete local lifecycle:
+pending, running, succeeded, failed, and cancelled. Claim selection uses indexed
+availability order and insertion ordinals. Earlier pending work blocks later
+work in the same thread during retry backoff; title generation has a separate
+lane. Success, retry, and failure require the current worker owner. Cancellation
+clears that owner, so a late completion cannot revive cancelled work.
+Process-loss reconciliation cancels process-bound provider actions and requeues
+running replay-safe work. Retention deletes only succeeded/cancelled rows before
+the cutoff; failed work remains available to cleanup decisions.
+
+`commit_outbox` adds typed enqueues and cancellations to the same transaction as
+events, projections, counters, and the command receipt. It stores the original
+enqueue count and cancellation IDs for `outbox_receipt` and command replay.
+The original outbox envelope, including timestamps, must be reused on a retry.
+The older generic immutable effect records retain their separate namespace and
+are not silently converted to worker requests. Standalone outbox mutations do
+not advance the event/projection revision; their observed rows and index ranges
+are revalidated atomically at commit.
+
+The portable lifecycle policy compiles and runs unchanged through the pinned
+Lustr compiler. The Cargo-built database host calls that same policy source.
+The separate `t3-code-ls-outbox` executable qualifies the policy; the host does
+not spawn it for each claim. Full row comparisons execute the immutable upstream
+`EffectOutbox.ts` with its real SQLite layer and controlled clock. The process
+gate additionally races independent redb clients and kills every holder before
+reopening and reconciling running work.
+
+These are local worker persistence primitives, not a running provider worker or
+distributed fencing protocol. The host supplies canonical UTC millisecond
+timestamps in years 0000–9999, retry deadlines, and retention cutoffs. Mutations
+and scans are bounded to 16 MiB and 65,536 records; larger work fails without a
+partial commit. Reconciliation is a whole-server recovery operation and must
+only run after the previous server's workers are known to have stopped. It does
+not detect a dead peer or provide expiring leases for active-active servers.
+Standalone claims have no operation receipt yet. An uncertain claim requires
+stopping its owning worker runtime and reconciling before dispatch resumes;
+blind claim retries can strand running work. Production integration needs an
+idempotent claim token or equivalent recovery path. `outbox_receipt` resolves
+only combined event commits.
 
 The standalone native project service accepts creation and metadata updates.
 It reads projects and workspace ownership from the actual database snapshot,
@@ -232,14 +270,24 @@ committing stores. In particular, `EventSink.ts` atomically combines events,
 project/thread projections, command receipts, and outbox work; those participants
 must migrate together.
 
-| Database surface                                      | Current state                                    | Required work before replacement                                                                                 |
-| ----------------------------------------------------- | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
-| Native event/projection/receipt/outbox store          | redb with atomic revision-guarded writes         | Domain repositories, indexed reads, outbox execution and application integration                                 |
-| Production server `statev2.sqlite`                    | Existing TypeScript/SQLite remains authoritative | Migrate all transaction participants, typed row transforms, read parity, verified backup/restore and cutover     |
-| Mobile SQLite caches and preferences                  | Existing Expo/platform adapters                  | Cache schema and lifecycle port; local offline storage is a different role from the server's authoritative store |
-| Relay PostgreSQL and Cloudflare Durable Object SQLite | Existing hosted infrastructure                   | Rewrite the relay's account/session/device/delivery repositories and deploy its replacement                      |
-| Browser IndexedDB and nonexportable key storage       | Existing browser adapters                        | Preserve browser lifecycle and key protection; a server database cannot replace platform key storage             |
-| External SQLite formats read by integrations          | Remain readers of their owners' formats          | Keep SQLite import/read adapters where interoperability requires them                                            |
+That shared boundary includes turn-item positions, conditional run/provider
+ownership reads, projection high-water metadata, and provider-batch savepoints.
+Production receipts use application command IDs; native digest-based transport
+receipts cannot replace their replay semantics unchanged. Shell snapshots and
+their event cursors must read the selected store consistently. Existing event
+pruning also means activation must import current projections, retained event
+sequences, receipts, outbox order/status, and lazy-import metadata together;
+replaying only the remaining events is insufficient. Activation requires an
+offline source fence and a durably published, validated native generation.
+
+| Database surface                                      | Current state                                               | Required work before replacement                                                                                 |
+| ----------------------------------------------------- | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Native event/projection/receipt/outbox store          | redb with atomic batches and durable local outbox lifecycle | Domain repositories, thread reads, provider-worker execution and application integration                         |
+| Production server `statev2.sqlite`                    | Existing TypeScript/SQLite remains authoritative            | Migrate all transaction participants, typed row transforms, read parity, verified backup/restore and cutover     |
+| Mobile SQLite caches and preferences                  | Existing Expo/platform adapters                             | Cache schema and lifecycle port; local offline storage is a different role from the server's authoritative store |
+| Relay PostgreSQL and Cloudflare Durable Object SQLite | Existing hosted infrastructure                              | Rewrite the relay's account/session/device/delivery repositories and deploy its replacement                      |
+| Browser IndexedDB and nonexportable key storage       | Existing browser adapters                                   | Preserve browser lifecycle and key protection; a server database cannot replace platform key storage             |
+| External SQLite formats read by integrations          | Remain readers of their owners' formats                     | Keep SQLite import/read adapters where interoperability requires them                                            |
 
 Future active-active application work also includes durable cross-node event
 notification, outbox leases/fencing, provider-session ownership, workspace

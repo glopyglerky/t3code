@@ -5,9 +5,10 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use t3_code_ls_core::json as core_json;
+use t3_code_ls_storage::outbox::{self, EnqueueEffect};
 use t3_code_ls_storage::project_service::{ProjectRequest, execute_project};
 use t3_code_ls_storage::sqlite_import::ImportLimits;
-use t3_code_ls_storage::{CommitBatch, Error, MAX_BATCH_BYTES, Store};
+use t3_code_ls_storage::{CommitBatch, Error, MAX_BATCH_BYTES, OutboxBatch, Store};
 
 #[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
@@ -18,6 +19,60 @@ enum Request {
     },
     Commit {
         batch: CommitBatch,
+    },
+    CommitOutbox {
+        batch: CommitBatch,
+        outbox: OutboxBatch,
+    },
+    OutboxReceipt {
+        command_id: String,
+    },
+    OutboxGet {
+        effect_id: String,
+    },
+    OutboxList {
+        command_id: String,
+    },
+    OutboxEnqueue {
+        effects: Vec<EnqueueEffect>,
+        now: String,
+    },
+    OutboxClaim {
+        worker_id: String,
+        now: String,
+        exclude_restart_continuations: bool,
+    },
+    OutboxNextClaimableAt {},
+    OutboxSucceed {
+        effect_id: String,
+        worker_id: String,
+        now: String,
+    },
+    OutboxRetry {
+        effect_id: String,
+        worker_id: String,
+        now: String,
+        available_at: String,
+        error: String,
+    },
+    OutboxFail {
+        effect_id: String,
+        worker_id: String,
+        now: String,
+        error: String,
+    },
+    OutboxCancel {
+        thread_id: String,
+        effect_types: Vec<outbox::EffectType>,
+        reason: String,
+        now: String,
+    },
+    OutboxReconcile {
+        now: String,
+    },
+    OutboxPrune {
+        before: String,
+        limit: u32,
     },
     Events {
         after_sequence: u64,
@@ -48,6 +103,103 @@ async fn evaluate(store: &Store, planner: Option<&Path>, request: Request) -> Re
             serde_json::to_value(store.read_receipt(&command_id).await?)
         }
         Request::Commit { batch } => serde_json::to_value(store.commit(&batch).await?),
+        Request::CommitOutbox { batch, outbox } => {
+            serde_json::to_value(store.commit_outbox(&batch, &outbox).await?)
+        }
+        Request::OutboxReceipt { command_id } => {
+            serde_json::to_value(store.read_outbox_receipt(&command_id).await?)
+        }
+        Request::OutboxGet { effect_id } => {
+            serde_json::to_value(store.outbox_get(&effect_id).await?)
+        }
+        Request::OutboxList { command_id } => {
+            serde_json::to_value(store.outbox_list_by_command(&command_id).await?)
+        }
+        Request::OutboxEnqueue { effects, now } => {
+            serde_json::to_value(store.outbox_enqueue(&effects, &now).await?)
+        }
+        Request::OutboxClaim {
+            worker_id,
+            now,
+            exclude_restart_continuations,
+        } => serde_json::to_value(
+            store
+                .outbox_claim_next(&outbox::Claim {
+                    worker_id,
+                    now,
+                    exclude_restart_continuations,
+                })
+                .await?,
+        ),
+        Request::OutboxNextClaimableAt {} => {
+            serde_json::to_value(store.outbox_next_claimable_at().await?)
+        }
+        Request::OutboxSucceed {
+            effect_id,
+            worker_id,
+            now,
+        } => serde_json::to_value(
+            store
+                .outbox_succeed(&outbox::Settle {
+                    effect_id,
+                    worker_id,
+                    now,
+                })
+                .await?,
+        ),
+        Request::OutboxRetry {
+            effect_id,
+            worker_id,
+            now,
+            available_at,
+            error,
+        } => serde_json::to_value(
+            store
+                .outbox_retry(&outbox::Retry {
+                    effect_id,
+                    worker_id,
+                    now,
+                    available_at,
+                    error,
+                })
+                .await?,
+        ),
+        Request::OutboxFail {
+            effect_id,
+            worker_id,
+            now,
+            error,
+        } => serde_json::to_value(
+            store
+                .outbox_fail(&outbox::Failure {
+                    effect_id,
+                    worker_id,
+                    now,
+                    error,
+                })
+                .await?,
+        ),
+        Request::OutboxCancel {
+            thread_id,
+            effect_types,
+            reason,
+            now,
+        } => serde_json::to_value(
+            store
+                .outbox_cancel_unsettled(&outbox::CancelUnsettled {
+                    thread_id,
+                    effect_types,
+                    reason,
+                    now,
+                })
+                .await?,
+        ),
+        Request::OutboxReconcile { now } => {
+            serde_json::to_value(store.outbox_reconcile(&outbox::Reconcile { now }).await?)
+        }
+        Request::OutboxPrune { before, limit } => {
+            serde_json::to_value(store.outbox_prune(&outbox::Prune { before, limit }).await?)
+        }
         Request::Events {
             after_sequence,
             limit,
