@@ -21,8 +21,6 @@ jobs:
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_PROFILE_TEST_DEBUG: '0'
-      T3_CODE_LS_BOOTSTRAP_DIR: ${{ runner.temp }}/t3-bluefe
-      T3_CODE_LS_TOOLCHAIN: ${{ runner.temp }}/t3-toolchain
       GIT_TERMINAL_PROMPT: '0'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -31,6 +29,8 @@ jobs:
 
       - name: Reserve space on the disposable hosted runner
         run: |
+          echo "T3_CODE_LS_BOOTSTRAP_DIR=$RUNNER_TEMP/t3-bluefe" >> "$GITHUB_ENV"
+          echo "T3_CODE_LS_TOOLCHAIN=$RUNNER_TEMP/t3-toolchain" >> "$GITHUB_ENV"
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h "$RUNNER_TEMP"
 
