@@ -1,6 +1,6 @@
 # Upstream T3 Code README reference
 
-This preserves the README at the immutable source commit in [upstream.lock.json](upstream.lock.json). Installation links below distribute upstream software. Start with the [fork README](../../README.md) for t3 code ls.
+This preserves the README at the immutable source commit in [upstream.lock.json](upstream.lock.json). Installation links below distribute upstream software. Start with the [fork README](README.md) for t3code-ls.
 
 <!-- t3-code-ls:upstream-readme:start -->
 

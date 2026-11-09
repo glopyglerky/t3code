@@ -11,7 +11,6 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { Command, Flag } from "effect/cli";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
-import { fromYaml } from "@t3tools/shared/schemaYaml";
 
 import { referenceRepos, type ReferenceRepo } from "./lib/reference-repos.ts";
 
@@ -38,33 +37,6 @@ export class ReferenceRepoSelectionError extends Schema.TaggedError<ReferenceRep
 ) {
   override get message(): string {
     return `Unknown reference repo "${this.repoId}". Expected one of: ${this.expectedRepoIds.join(", ")}.`;
-  }
-}
-
-export class ReferenceRepoVersionSourceError extends Schema.TaggedError<ReferenceRepoVersionSourceError>()(
-  "ReferenceRepoVersionSourceError",
-  {
-    operation: Schema.Literals(["read", "parse"]),
-    repoId: Schema.String,
-    sourcePath: Schema.String,
-    cause: Schema.Defect(),
-  },
-) {
-  override get message(): string {
-    return `Reference repo "${this.repoId}" version source operation "${this.operation}" failed for ${this.sourcePath}.`;
-  }
-}
-
-export class ReferenceRepoVersionResolutionError extends Schema.TaggedError<ReferenceRepoVersionResolutionError>()(
-  "ReferenceRepoVersionResolutionError",
-  {
-    repoId: Schema.String,
-    sourcePath: Schema.String,
-    packageVersionPath: Schema.Array(Schema.String),
-  },
-) {
-  override get message(): string {
-    return `No version was found for reference repo "${this.repoId}" at ${this.sourcePath}:${this.packageVersionPath.join(".")}.`;
   }
 }
 
@@ -102,13 +74,8 @@ export class ReferenceRepoFileSystemError extends Schema.TaggedError<ReferenceRe
 
 export type ReferenceRepoSyncError =
   | ReferenceRepoSelectionError
-  | ReferenceRepoVersionSourceError
-  | ReferenceRepoVersionResolutionError
   | ReferenceRepoGitError
   | ReferenceRepoFileSystemError;
-
-const decodeJsonSource = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
-const decodeYamlSource = Schema.decodeEffect(fromYaml(Schema.Unknown));
 
 const collectStreamAsString = <E>(stream: Stream.Stream<Uint8Array, E>): Effect.Effect<string, E> =>
   stream.pipe(
@@ -118,39 +85,6 @@ const collectStreamAsString = <E>(stream: Stream.Stream<Uint8Array, E>): Effect.
       (acc, chunk) => acc + chunk,
     ),
   );
-
-function readNestedString(input: unknown, keys: ReadonlyArray<string>): string | undefined {
-  let value = input;
-  for (const key of keys) {
-    if (typeof value !== "object" || value === null || !(key in value)) {
-      return undefined;
-    }
-    value = (value as Record<string, unknown>)[key];
-  }
-  return typeof value === "string" && value.length > 0 ? value : undefined;
-}
-
-function decodeVersionSource(
-  repo: ReferenceRepo,
-  sourcePath: string,
-  content: string,
-): Effect.Effect<unknown, ReferenceRepoSyncError> {
-  const decode =
-    repo.versionSourcePath.endsWith(".yaml") || repo.versionSourcePath.endsWith(".yml")
-      ? decodeYamlSource
-      : decodeJsonSource;
-  return decode(content).pipe(
-    Effect.mapError(
-      (cause) =>
-        new ReferenceRepoVersionSourceError({
-          operation: "parse",
-          repoId: repo.id,
-          sourcePath,
-          cause,
-        }),
-    ),
-  );
-}
 
 function getSelectedRepos(
   repoId: string | undefined,
@@ -170,53 +104,13 @@ function getSelectedRepos(
       );
 }
 
-export const resolveReferenceRepoRef = Effect.fn("resolveReferenceRepoRef")(function* (
-  repo: ReferenceRepo,
-  rootDir: string,
-  latest: boolean,
-) {
-  if (latest) {
-    return repo.latestRef;
-  }
-
-  const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  const versionSourcePath = path.join(rootDir, repo.versionSourcePath);
-  const versionSourceContent = yield* fs.readFileString(versionSourcePath).pipe(
-    Effect.mapError(
-      (cause) =>
-        new ReferenceRepoVersionSourceError({
-          operation: "read",
-          repoId: repo.id,
-          sourcePath: versionSourcePath,
-          cause,
-        }),
-    ),
-  );
-  const versionSource = yield* decodeVersionSource(repo, versionSourcePath, versionSourceContent);
-  const version = readNestedString(versionSource, repo.packageVersionPath);
-
-  if (!version) {
-    return yield* new ReferenceRepoVersionResolutionError({
-      repoId: repo.id,
-      sourcePath: versionSourcePath,
-      packageVersionPath: repo.packageVersionPath,
-    });
-  }
-
-  return `${repo.versionTagPrefix}${version}`;
-});
-
-/**
- * Shallow-clone the upstream ref into a temp dir and copy its files into `.repos/<id>`.
- * Never fetch upstream into this repo: its tags and shallow boundaries break `git fetch`.
- */
 export const planReferenceRepoSync = Effect.fn("planReferenceRepoSync")(function* (
   repo: ReferenceRepo,
-  rootDir: string,
+  _rootDir: string,
   latest: boolean,
 ) {
-  const ref = yield* resolveReferenceRepoRef(repo, rootDir, latest);
+  const ref = latest ? repo.latestRef : repo.commit;
+  yield* Effect.void;
 
   return {
     repo,
@@ -227,7 +121,7 @@ export const planReferenceRepoSync = Effect.fn("planReferenceRepoSync")(function
       "--depth=1",
       "--no-tags",
       "--single-branch",
-      `--branch=${ref}`,
+      "--no-checkout",
       repo.repository,
     ],
   } satisfies ReferenceRepoSyncPlan;
@@ -277,7 +171,7 @@ const runGit = Effect.fn("runGit")(function* (
   return stdout;
 });
 
-const applyReferenceRepoSync = Effect.fn("applyReferenceRepoSync")(function* (
+export const applyReferenceRepoSync = Effect.fn("applyReferenceRepoSync")(function* (
   rootDir: string,
   plan: ReferenceRepoSyncPlan,
 ) {
@@ -298,29 +192,33 @@ const applyReferenceRepoSync = Effect.fn("applyReferenceRepoSync")(function* (
     .pipe(mapFsError);
   const checkout = path.join(tempDir, "checkout");
   yield* runGit(plan, rootDir, [...plan.cloneArgs, checkout]);
+  yield* runGit(plan, checkout, ["fetch", "--quiet", "--depth=1", "origin", plan.ref]);
+  yield* runGit(plan, checkout, ["checkout", "--quiet", "--detach", "FETCH_HEAD"]);
   const commit = (yield* runGit(plan, checkout, ["rev-parse", "HEAD"])).trim();
+  const tree = (yield* runGit(plan, checkout, ["rev-parse", "HEAD^{tree}"])).trim();
+  if (plan.ref === repo.commit && (commit !== repo.commit || tree !== repo.tree)) {
+    return yield* new ReferenceRepoFileSystemError({
+      repoId: repo.id,
+      prefix: repo.prefix,
+      cause: "Pinned commit/tree mismatch",
+    });
+  }
+  if (yield* fs.exists(target)) {
+    return yield* new ReferenceRepoFileSystemError({
+      repoId: repo.id,
+      prefix: repo.prefix,
+      cause:
+        "Reference cache already exists; preserve local edits and remove it explicitly before restoring",
+    });
+  }
 
   yield* Effect.gen(function* () {
-    yield* fs.remove(path.join(checkout, ".git"), { recursive: true });
-    yield* fs.remove(target, { recursive: true, force: true });
     yield* fs.rename(checkout, target);
   }).pipe(mapFsError);
 
-  yield* runGit(plan, rootDir, ["add", "--all", "--", repo.prefix]);
-  const status = yield* runGit(plan, rootDir, ["status", "--porcelain", "--", repo.prefix]);
-  if (status.trim().length === 0) {
-    yield* Console.log(`${repo.id} is already at ${plan.ref}.`);
-    return;
-  }
-  yield* runGit(plan, rootDir, [
-    "commit",
-    "--quiet",
-    "--message",
-    `chore(repos): sync ${repo.id} to ${plan.ref}\n\nUpstream: ${repo.repository} ${commit}`,
-    "--",
-    repo.prefix,
-  ]);
-  yield* Console.log(`Committed ${repo.prefix} at ${plan.ref} (${commit.slice(0, 12)}).`);
+  yield* Console.log(
+    `Restored optional cache ${repo.prefix}: ${commit} tree ${tree}. No source files staged or committed.`,
+  );
 });
 
 export const syncReferenceRepos = Effect.fn("syncReferenceRepos")(function* (
@@ -352,7 +250,7 @@ export const syncReferenceReposCommand = Command.make(
     ),
     latest: Flag.Boolean("latest").pipe(
       Flag.withDescription(
-        "Sync each repo from its latest branch instead of the installed version.",
+        "Restore latest upstream into the cache; prints commit/tree for an explicit manifest update.",
       ),
       Flag.withDefault(false),
     ),
@@ -361,7 +259,7 @@ export const syncReferenceReposCommand = Command.make(
       Flag.optional,
     ),
     dryRun: Flag.Boolean("dry-run").pipe(
-      Flag.withDescription("Print the planned syncs without cloning or committing."),
+      Flag.withDescription("Print the planned cache restores without cloning."),
       Flag.withDefault(false),
     ),
   },
@@ -372,7 +270,11 @@ export const syncReferenceReposCommand = Command.make(
       latest,
       dryRun,
     }),
-).pipe(Command.withDescription("Sync vendored reference repositories under .repos/."));
+).pipe(
+  Command.withDescription(
+    "Restore ignored optional reference caches under .repos/ from verified pins.",
+  ),
+);
 
 if (import.meta.main) {
   Command.run(syncReferenceReposCommand, { version: "0.0.0" }).pipe(

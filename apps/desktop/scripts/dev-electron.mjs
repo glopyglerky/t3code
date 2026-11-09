@@ -1,3 +1,4 @@
+/* oxlint-disable t3code/no-global-process-runtime -- Synchronous executable paths and standalone build scripts have no Effect runtime. */
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
@@ -8,6 +9,7 @@ import {
   resolveDevProtocolClient,
   resolveElectronLaunchCommand,
 } from "./electron-launcher.mjs";
+import { nativeComponents, nativeFile } from "../../../tools/native-artifacts.mjs";
 import { waitForResources } from "./wait-for-resources.mjs";
 
 const devServerUrl = process.env.VITE_DEV_SERVER_URL?.trim();
@@ -29,6 +31,10 @@ const requiredFiles = [
   "dist-electron/snapShot/RegionSnapShotWorker.cjs",
   "dist-electron/snapShot/SnapShotAccessibilityWorker.cjs",
   "../server/dist/bin.mjs",
+  ...nativeComponents.map(
+    (component) =>
+      `../server/dist/native-bin/${nativeFile(component, `${NodeOS.platform()}-${NodeOS.arch()}`)}`,
+  ),
 ];
 const watchedDirectories = [
   { directory: "dist-electron", files: new Set(["main.cjs", "preload.cjs"]) },
@@ -45,6 +51,14 @@ const watchedDirectories = [
     ]),
   },
   { directory: "../server/dist", files: new Set(["bin.mjs"]) },
+  {
+    directory: "../server/dist/native-bin",
+    files: new Set(
+      nativeComponents.map((component) =>
+        nativeFile(component, `${NodeOS.platform()}-${NodeOS.arch()}`),
+      ),
+    ),
+  },
 ];
 const forcedShutdownTimeoutMs = 1_500;
 const restartDebounceMs = 120;

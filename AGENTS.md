@@ -1,6 +1,6 @@
-# t3 code ls fork
+# t3code-ls fork
 
-This fork is t3 code ls, "t3 code luxury sport addition". The direction is a native Rust application with matching behavior and UI on web,
+This fork is t3code-ls, "t3 code luxury sport addition". The direction is a native Rust application with matching behavior and UI on web,
 desktop, iOS and Android, with Iroh carrying Connect traffic. Working builds come
 first. Full conversion and 100% memory-safe Rust using Lustr/BlueFe remain future
 goals, not verified support. Preserve needed TypeScript, UI and build code until
@@ -220,12 +220,12 @@ Architecture and its constraints: `docs/internals/overview.md`. Glossary: `docs/
 
 ## Where code lives
 
-- `apps/server` - WebSocket, orchestration, providers, checkpointing. Effect-heavy: read [Effect services](docs/internals/effect-services.md) before adding server code, and `.repos/effect/LLMS.md` for the Effect library itself.
+- `apps/server` - WebSocket, orchestration, providers, checkpointing. Effect-heavy: read [Effect services](docs/internals/effect-services.md) before adding server code, and the pinned Effect `LLMS.md` for the library itself (restore the optional cache below before reading).
 - `apps/web` - React/Vite UI. `apps/desktop` wraps it, `apps/mobile` is React Native, `apps/marketing` is the site.
 - `packages/contracts` - Effect/Schema contracts plus small derived helpers. No heavy runtime logic.
 - `packages/shared` - shared runtime utils, subpath exports, no barrel.
 - `packages/client-runtime` - client code shared by web and mobile.
-- `.repos/` - vendored read-only references. Prefer their patterns over invented ones. Never edit or import from them. Sync with `vpr sync:repos` when bumping the matching dependency. If it is missing (sparse checkout), read a file with `git show origin/main:.repos/<path>`.
+- `.repos/` - ignored optional read-only reference caches. Never import from or commit them. Run `vp run sync:repos --repo effect` (or `alchemy-effect`) before reading cached source; pins and historical snapshot trees live in `scripts/lib/reference-repos.ts`. Read an upstream file with `git -C .repos/effect show HEAD:LLMS.md`. For the exact retired snapshot, use `git show <snapshotCommit>:.repos/<id>/<path>` with its manifest pin. Update pins explicitly when dependencies change; `--latest` only restores an optional cache and prints the candidate commit/tree. Preserve local cache edits before explicitly removing a cache to restore another revision.
 
 ## Taste
 

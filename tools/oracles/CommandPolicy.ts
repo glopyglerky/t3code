@@ -1,5 +1,11 @@
-export { CommandPolicyV2, CommandPolicyCapabilityUnsupportedError } from "../../apps/server/src/orchestration-v2/CommandPolicy.ts";
-import { CommandPolicyV2, CommandPolicyCapabilityUnsupportedError } from "../../apps/server/src/orchestration-v2/CommandPolicy.ts";
+export {
+  CommandPolicyV2,
+  CommandPolicyCapabilityUnsupportedError,
+} from "../../apps/server/src/orchestration-v2/CommandPolicy.ts";
+import {
+  CommandPolicyV2,
+  CommandPolicyCapabilityUnsupportedError,
+} from "../../apps/server/src/orchestration-v2/CommandPolicy.ts";
 // Test-only pre-cutover oracle; production must not import this module.
 import {
   type ChatAttachment,
@@ -12,7 +18,7 @@ import {
   OrchestrationV2ThreadProjection,
   ProviderInstanceId,
   ThreadId,
-} from "@t3tools/contracts";
+} from "../../packages/contracts/src/index.ts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";

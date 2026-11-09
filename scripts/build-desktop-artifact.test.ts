@@ -726,6 +726,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         });
         const sourceDir = path.join(tempDir, "server");
         const nativeFiles = [
+          "apps/server/dist/native-bin/t3-code-ls-policy.exe",
+          "apps/server/dist/native-bin/t3-code-ls-policy",
           "node_modules/node-pty/prebuilds/win32-x64/conpty/OpenConsole.exe",
           "node_modules/node-pty/prebuilds/win32-arm64/conpty/OpenConsole.exe",
           "node_modules/node-pty/third_party/conpty/1.0.0/win10-x64/OpenConsole.exe",
@@ -743,6 +745,11 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         const asarPath = path.join(tempDir, "server.asar");
         yield* packWindowsServerAsar({ sourceDir, asarPath, arch: "x64" });
         const unpackedRoot = `${asarPath}.unpacked`;
+        for (const component of ["t3-code-ls-policy.exe", "t3-code-ls-policy"]) {
+          assert.isTrue(
+            yield* fs.exists(path.join(unpackedRoot, "apps/server/dist/native-bin", component)),
+          );
+        }
 
         assert.isTrue(
           yield* fs.exists(

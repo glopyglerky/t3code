@@ -129,6 +129,7 @@ const buildExeCmd = Command.make(
         (yield* HostProcess.Architecture) === "arm64";
       const spawnCommand = yield* resolveSpawnCommand("vp", ["pack"]);
       const cliAssetDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-cli-asset-" });
+      const nativeAssetDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-native-asset-" });
       const pack = (packMode: "bundle" | "bootstrap" | "1") =>
         runCommand(
           ChildProcess.make(spawnCommand.command, spawnCommand.args, {
@@ -145,6 +146,24 @@ const buildExeCmd = Command.make(
           }),
         );
 
+      yield* runCommand(
+        ChildProcess.make(
+          process.execPath,
+          [path.join(repoRoot, "tools/build-native.mjs"), nativeAssetDir],
+          {
+            cwd: repoRoot,
+            env: {
+              ...process.env,
+              T3_CODE_LS_NATIVE_TARGET:
+                target?.replace(/^win-/, "win32-") ??
+                `${yield* HostProcess.Platform}-${yield* HostProcess.Architecture}`,
+            },
+            stdout: config.verbose ? "inherit" : "ignore",
+            stderr: "inherit",
+            shell: false,
+          },
+        ),
+      );
       yield* pack("bundle");
       const cliMainPath = path.join(cliAssetDir, "binMain.mjs");
       yield* pack(linuxArm64 ? "bootstrap" : "1");
@@ -175,8 +194,9 @@ const buildExeCmd = Command.make(
           verbose: config.verbose,
         });
       }
+      yield* fs.copy(nativeAssetDir, path.join(serverDir, "dist-exe/native-bin"));
       yield* Effect.log(
-        "[cli] Built dist-exe/t3 (expects client/, resource-monitor/, and the runtime-external node_modules beside it; scripts/build-cli-archive.ts assembles that tree)",
+        "[cli] Built dist-exe/t3 (expects native-bin/, client/, resource-monitor/, and the runtime-external node_modules beside it; scripts/build-cli-archive.ts assembles that tree)",
       );
     }),
 ).pipe(

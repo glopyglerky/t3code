@@ -56,3 +56,6 @@ __pycache__/
 *.pyc
 
 /bin/
+
+# Optional pinned development references; never runtime or vendored source.
+/.repos/

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { stageNativeArtifacts } from "../tools/native-artifacts.mjs";
 // @effect-diagnostics nodeBuiltinImport:off - Node's typed junction API avoids Windows symlink privileges while keeping the probe isolated.
 
 import * as NodeFSP from "node:fs/promises";
@@ -106,6 +107,11 @@ const STAGE_PACKAGE_EXTENSIONS = {
   "electron-webauthn": { peerDependenciesMeta: { typescript: { optional: true } } },
   "@electron-webauthn/macos": { peerDependenciesMeta: { typescript: { optional: true } } },
 } as const;
+
+class NativeComponentPackagingError extends Schema.TaggedError<NativeComponentPackagingError>()(
+  "NativeComponentPackagingError",
+  { cause: Schema.Defect() },
+) {}
 
 const RepoRoot = Effect.service(Path.Path).pipe(
   Effect.flatMap((path) => path.fromFileUrl(new URL("..", import.meta.url))),
@@ -1030,6 +1036,7 @@ export const WINDOWS_SERVER_ASAR_RESOURCE = "server.asar";
 export const WINDOWS_NATIVE_ASAR_UNPACK_GLOB =
   "{**/*.node,**/*.dll,**/*.exe,**/*.so,**/*.so.*,**/*.dylib}";
 export const WINDOWS_SERVER_ASAR_UNPACK_GLOBS = [
+  "**/native-bin/**",
   "**/*.dll",
   "**/*.exe",
   "**/*.so",
@@ -2798,8 +2805,13 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     },
     // Disable smart unpack so native packages' JS/metadata stay archived and avoid slowing NSIS with loose files.
     ...(platform === "win"
-      ? { asar: { smartUnpack: false }, asarUnpack: [WINDOWS_NATIVE_ASAR_UNPACK_GLOB] }
-      : { asarUnpack: ["**/node_modules/@transcribe-cpp/**/*.{dylib,so,so.*}"] }),
+      ? {
+          asar: { smartUnpack: false },
+          asarUnpack: [WINDOWS_NATIVE_ASAR_UNPACK_GLOB, "**/native-bin/**"],
+        }
+      : {
+          asarUnpack: ["**/native-bin/**", "**/node_modules/@transcribe-cpp/**/*.{dylib,so,so.*}"],
+        }),
     extraResources: [
       ...DESKTOP_EXTRA_RESOURCES,
       ...(platform === "linux" ? LINUX_CAPTURE_EXTRA_RESOURCES : []),
@@ -3738,6 +3750,15 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
     });
   }
 
+  yield* Effect.try({
+    try: () =>
+      stageNativeArtifacts(
+        path.join(distDirs.serverDist, "native-bin"),
+        path.join(distDirs.serverDist, "native-bin"),
+        `${options.platform === "mac" ? "darwin" : options.platform === "win" ? "win32" : options.platform}-${options.arch}`,
+      ),
+    catch: (cause) => new NativeComponentPackagingError({ cause }),
+  });
   const webAssetBrand = resolveDesktopWebAssetBrand(appVersion);
   yield* applyWebBrandAssets(webAssetBrand, "apps/server/dist/client");
   yield* Effect.log(`[desktop-artifact] Applied ${webAssetBrand} web client branding.`);

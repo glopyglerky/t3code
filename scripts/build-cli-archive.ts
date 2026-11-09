@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { stageNativeArtifacts } from "../tools/native-artifacts.mjs";
 /** Runtime archives must run without host Node, npm, or compilers. */
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -58,6 +59,11 @@ const StageWorkspaceConfig = Schema.Struct({
   nodeLinker: Schema.optional(Schema.Literals(["hoisted"])),
 });
 const encodeStageWorkspaceConfig = Schema.encodeEffect(fromYaml(StageWorkspaceConfig));
+
+class NativeComponentPackagingError extends Schema.TaggedError<NativeComponentPackagingError>()(
+  "NativeComponentPackagingError",
+  { cause: Schema.Defect() },
+) {}
 
 const RepoRoot = Effect.service(Path.Path).pipe(
   Effect.flatMap((path) => path.fromFileUrl(new URL("..", import.meta.url))),
@@ -634,6 +640,15 @@ const buildCliArchive = Effect.fn("buildCliArchive")(function* (input: {
 
   yield* Effect.log(`[cli-archive] Staging ${stem}...`);
   yield* fs.copyFile(builtExecutable, path.join(contentDir, executableName));
+  yield* Effect.try({
+    try: () =>
+      stageNativeArtifacts(
+        path.join(serverDir, "dist-exe/native-bin"),
+        path.join(contentDir, "native-bin"),
+        `${input.platform === "mac" ? "darwin" : input.platform === "win" ? "win32" : input.platform}-${input.arch}`,
+      ),
+    catch: (cause) => new NativeComponentPackagingError({ cause }),
+  });
   yield* stageWebClient(webClient, path.join(contentDir, "client"));
   yield* fs.copy(resourceMonitorDir, path.join(contentDir, "resource-monitor"));
   yield* stageRuntimeExternals({

@@ -1,4 +1,4 @@
-# t3 code ls design and divergence
+# t3code-ls design and divergence
 
 ## Ownership and direction
 
@@ -16,16 +16,16 @@ through Lust is recorded separately.
 
 ## Required layout and naming exceptions
 
-| Retained implementation or path | Why it remains | Replacement gate |
-| --- | --- | --- |
-| `apps/server`, `apps/web`, `apps/desktop`, `apps/mobile` | These contain the current application entry points and UI. Native component binaries cannot replace the application lifecycle. | Equivalent application behavior, platform builds, recovery, and client flows |
-| `packages/*`, `@t3tools/*`, `t3` CLI | Workspace dependency names, imports, wire contracts, launcher and packaging references depend on them. | Audit every consumer and qualify renamed packages and launchers before changing identifiers |
-| `scripts`, `patches`, root pnpm/Vite manifests | Existing application builds and patched dependencies use these exact paths. | Meaningful build and packaging qualification after an exact reference audit |
-| `native/resource-monitor` | Independent platform resource-monitor workspace. | Keep its existing build contract |
-| TypeScript adapters and production SQLite | Events, projections, receipts, outbox and provider lifecycle still share the existing transaction boundary. | Migrate all participants together with parity, backup/restore and cutover evidence |
-| Cargo-built Iroh and redb hosts | Their dependencies exceed the currently documented Lust compiler support. | Actual compiler execution and application tests with the replacement toolchain |
-| `infra/relay` and platform storage/bindings | Iroh byte forwarding does not implement account/session flows, push delivery, browser key storage or mobile lifecycle. | Authorization and lifecycle tests in each real client |
-| `.repos`, licenses and upstream notices | Read-only reference material and attribution retain their original identity. | Keep provenance and license obligations intact; never treat references as owned runtime code |
+| Retained implementation or path                          | Why it remains                                                                                                                 | Replacement gate                                                                             |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------- |
+| `apps/server`, `apps/web`, `apps/desktop`, `apps/mobile` | These contain the current application entry points and UI. Native component binaries cannot replace the application lifecycle. | Equivalent application behavior, platform builds, recovery, and client flows                 |
+| `packages/*`, `@t3tools/*`, `t3` CLI                     | Workspace dependency names, imports, wire contracts, launcher and packaging references depend on them.                         | Audit every consumer and qualify renamed packages and launchers before changing identifiers  |
+| `scripts`, `patches`, root pnpm/Vite manifests           | Existing application builds and patched dependencies use these exact paths.                                                    | Meaningful build and packaging qualification after an exact reference audit                  |
+| `native/resource-monitor`                                | Independent platform resource-monitor workspace.                                                                               | Keep its existing build contract                                                             |
+| TypeScript adapters and production SQLite                | Events, projections, receipts, outbox and provider lifecycle still share the existing transaction boundary.                    | Migrate all participants together with parity, backup/restore and cutover evidence           |
+| Cargo-built Iroh and redb hosts                          | Their dependencies exceed the currently documented Lust compiler support.                                                      | Actual compiler execution and application tests with the replacement toolchain               |
+| `infra/relay` and platform storage/bindings              | Iroh byte forwarding does not implement account/session flows, push delivery, browser key storage or mobile lifecycle.         | Authorization and lifecycle tests in each real client                                        |
+| Reference pins, licenses and upstream notices            | Optional ignored reference caches and historical source retain their original identity.                                        | Keep provenance and license obligations intact; never treat references as owned runtime code |
 
 The Rust workspace, crates, lockfiles and comparison tools live at root. Required
 upstream clients and transaction participants remain alongside them.
@@ -565,3 +565,9 @@ the upstream application tests, real provider protocol fixtures, real client
 flows, mobile lifecycle checks, installation/update/rollback tests, and signed
 packages under the fork's identity. Their absence must remain visible in the
 qualification state.
+
+## Optional development references
+
+Effect and Alchemy source snapshots are not build inputs: application imports resolve installed packages, and CI and Vite exclude `.repos/`. They are now optional ignored caches, restored with `vp run sync:repos --repo effect` or `--repo alchemy-effect`. The manifest in `scripts/lib/reference-repos.ts` preserves upstream ref, commit and tree plus the exact retired snapshot commit/tree and Alchemy gitlink. The retired snapshots omitted some upstream ignored fixtures and carried a different Alchemy gitlink; an upstream restore deliberately verifies the complete upstream tree. Read the exact historical snapshot with `git show <snapshotCommit>:.repos/<id>/<path>`, or restore its files with `git archive <snapshotCommit> .repos/<id> | tar -x`. Licenses remain in history and in restored caches.
+
+The restore tool never stages or commits cache contents and refuses to replace an existing cache. To update a pin, preserve any cache edits, remove that cache explicitly, restore with `--latest`, review the printed commit/tree against the dependency version and update the manifest in a normal source commit. Removing reference snapshots does not add Rust implementation or qualify application/platform execution.
