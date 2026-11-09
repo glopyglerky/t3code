@@ -1,8 +1,8 @@
 {
   "schema": 1,
-  "repository": "https://github.com/t3dotgg/lust-lang",
+  "repository": "https://github.com/glopyglerky/lustr",
   "ref": "refs/heads/next",
-  "revision": "240e08d91d4aed0299639f6f11fd522912b248f9",
+  "revision": "a09efac9ab746de66d208978d5ad46b3df728a77",
   "tinycc_revision": "43c7708b85681a2fd4451c8a541af4494a8919b2",
   "build_profile": "gate",
   "verified_host": "x86_64-unknown-linux-gnu",

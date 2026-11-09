@@ -134,15 +134,15 @@ fn error_response(error: &Error) -> Value {
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let token = std::env::var("T3_CODE_LS_DATABASE_TOKEN")
-        .map_err(|_| Error::Invalid("T3_CODE_LS_DATABASE_TOKEN is required".into()))?;
     let store = match args.as_slice() {
-        [mode, endpoint] if mode == "initialize-loopback" => Store::initialize_loopback(endpoint, &token).await?,
-        [mode, endpoint] if mode == "loopback" => Store::connect_loopback(endpoint, &token).await?,
-        [mode, endpoint] if mode == "remote" => Store::connect_remote(endpoint, &token).await?,
-        _ => return Err(Error::Invalid(
-            "usage: t3-code-ls-db initialize-loopback ws://127.0.0.1:PORT | loopback ws://127.0.0.1:PORT | remote wss://endpoint".into(),
-        ).into()),
+        [mode, path] if mode == "initialize-local" => Store::initialize_local(path).await?,
+        [mode, path] if mode == "local" => Store::open_local(path).await?,
+        _ => {
+            return Err(Error::Invalid(
+                "usage: t3-code-ls-db initialize-local PATH | local PATH".into(),
+            )
+            .into());
+        }
     };
     let planner = std::env::var_os("T3_CODE_LS_PROJECT_STORE_EXECUTABLE").map(PathBuf::from);
     let stdin = io::stdin();

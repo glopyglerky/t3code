@@ -30,10 +30,8 @@ fn batch(command: &str, revision: u64) -> CommitBatch {
 
 #[tokio::test]
 async fn atomic_batch_receipt_and_stale_snapshot() {
-    let daemon = test_support::Daemon::start().await;
-    let store = Store::initialize_loopback(&daemon.endpoint, &daemon.token)
-        .await
-        .unwrap();
+    let fixture = test_support::TestFixture::start().await;
+    let store = fixture.initialize().await;
     assert_eq!(store.snapshot().await.unwrap().revision, 0);
     let command = batch("one", 0);
     let result = store.commit(&command).await.unwrap();
@@ -78,10 +76,8 @@ async fn atomic_batch_receipt_and_stale_snapshot() {
 
 #[tokio::test]
 async fn late_duplicate_rolls_back_every_part_of_batch() {
-    let daemon = test_support::Daemon::start().await;
-    let store = Store::initialize_loopback(&daemon.endpoint, &daemon.token)
-        .await
-        .unwrap();
+    let fixture = test_support::TestFixture::start().await;
+    let store = fixture.initialize().await;
     store.commit(&batch("first", 0)).await.unwrap();
     let before = store.snapshot().await.unwrap();
     let mut collision = batch("collision", 1);
@@ -100,13 +96,9 @@ async fn late_duplicate_rolls_back_every_part_of_batch() {
 
 #[tokio::test]
 async fn concurrent_sessions_cannot_both_commit_a_stale_plan() {
-    let daemon = test_support::Daemon::start().await;
-    let store = Store::initialize_loopback(&daemon.endpoint, &daemon.token)
-        .await
-        .unwrap();
-    let other = Store::connect_loopback(&daemon.endpoint, &daemon.token)
-        .await
-        .unwrap();
+    let fixture = test_support::TestFixture::start().await;
+    let store = fixture.initialize().await;
+    let other = fixture.connect().await;
     let left = batch("left", 0);
     let mut right = batch("right", 0);
     right.projections = vec![ProjectionMutation::Put {
@@ -129,10 +121,8 @@ async fn concurrent_sessions_cannot_both_commit_a_stale_plan() {
 
 #[tokio::test]
 async fn null_projection_and_delete_have_distinct_meanings() {
-    let daemon = test_support::Daemon::start().await;
-    let store = Store::initialize_loopback(&daemon.endpoint, &daemon.token)
-        .await
-        .unwrap();
+    let fixture = test_support::TestFixture::start().await;
+    let store = fixture.initialize().await;
     let mut put = batch("put-null", 0);
     put.events.clear();
     put.effects.clear();
@@ -159,19 +149,25 @@ async fn null_projection_and_delete_have_distinct_meanings() {
 }
 
 #[tokio::test]
-async fn parameterized_identifiers_and_invalid_batches_never_change_state() {
-    let daemon = test_support::Daemon::start().await;
-    let store = Store::initialize_loopback(&daemon.endpoint, &daemon.token)
-        .await
-        .unwrap();
+async fn arbitrary_identifiers_and_invalid_batches_never_change_state() {
+    let fixture = test_support::TestFixture::start().await;
+    let store = fixture.initialize().await;
     let mut valid = batch("x'); DELETE ls_meta; --", 0);
     valid.projections[0] = ProjectionMutation::Put {
         key: "复杂 / key:[]{}'".into(),
-        payload: json!({"surreal": "NONE", "number": 9007199254740991_u64, "uint64": u64::MAX, "int64": i64::MIN}),
+        payload: json!({"text": "NONE", "number": 9007199254740991_u64, "uint64": u64::MAX, "int64": i64::MIN}),
     };
     store.commit(&valid).await.unwrap();
     let before = store.snapshot().await.unwrap();
     assert_eq!(before.projections[0].key, "复杂 / key:[]{}'");
+    assert_eq!(
+        before.projections[0].payload["uint64"].as_u64(),
+        Some(u64::MAX)
+    );
+    assert_eq!(
+        before.projections[0].payload["int64"].as_i64(),
+        Some(i64::MIN)
+    );
     let mut invalid = batch("duplicate", 1);
     invalid.events.push(invalid.events[0].clone());
     assert!(matches!(
@@ -195,10 +191,8 @@ async fn parameterized_identifiers_and_invalid_batches_never_change_state() {
 
 #[tokio::test]
 async fn oversized_snapshot_and_event_page_fail_without_truncating() {
-    let daemon = test_support::Daemon::start().await;
-    let store = Store::initialize_loopback(&daemon.endpoint, &daemon.token)
-        .await
-        .unwrap();
+    let fixture = test_support::TestFixture::start().await;
+    let store = fixture.initialize().await;
     for index in 0..2 {
         let mut command = batch(&format!("large-{index}"), index * 2);
         let payload = json!({"text": "x".repeat(9 * 1024 * 1024)});
@@ -238,18 +232,12 @@ async fn oversized_snapshot_and_event_page_fail_without_truncating() {
 
 #[tokio::test]
 async fn acknowledged_batch_survives_process_kill_and_reopens() {
-    let mut daemon = test_support::Daemon::start().await;
-    Store::initialize_loopback(&daemon.endpoint, &daemon.token)
-        .await
-        .unwrap()
-        .shutdown()
-        .await
-        .unwrap();
+    let mut fixture = test_support::TestFixture::start().await;
+    fixture.initialize().await.shutdown().await.unwrap();
     let executable = env!("CARGO_BIN_EXE_t3-code-ls-db");
     let mut child = Command::new(executable)
-        .arg("loopback")
-        .arg(&daemon.endpoint)
-        .env("T3_CODE_LS_DATABASE_TOKEN", &daemon.token)
+        .arg("local")
+        .arg(fixture.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -267,11 +255,10 @@ async fn acknowledged_batch_survives_process_kill_and_reopens() {
     assert_eq!(acknowledgement["ok"], true, "{acknowledgement}");
     child.kill().unwrap();
     child.wait().unwrap();
-    daemon.crash_and_restart().await;
+    fixture.restart().await;
     let mut reader = Command::new(executable)
-        .arg("loopback")
-        .arg(&daemon.endpoint)
-        .env("T3_CODE_LS_DATABASE_TOKEN", &daemon.token)
+        .arg("local")
+        .arg(fixture.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

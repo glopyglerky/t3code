@@ -1,118 +1,34 @@
 #!/usr/bin/env node
-import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
-import { once } from "node:events";
-import * as fs from "node:fs/promises";
-import * as net from "node:net";
-import * as os from "node:os";
-import * as path from "node:path";
-import * as readline from "node:readline";
-import { DatabaseSync } from "node:sqlite";
-import { fileURLToPath } from "node:url";
+import * as NodeAssert from "node:assert/strict";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeCrypto from "node:crypto";
+import * as NodeEvents from "node:events";
+import * as NodeFSP from "node:fs/promises";
+import * as NodePath from "node:path";
+import * as NodeReadline from "node:readline";
+import * as NodeSqlite from "node:sqlite";
+import * as NodeURL from "node:url";
 
-const [database, planner, engine, proofPath] = process.argv.slice(2);
-for (const [name, executable] of Object.entries({ database, planner, engine })) {
-  assert.ok(executable && path.isAbsolute(executable), `Pass an absolute ${name} executable path`);
-  await fs.access(executable, fs.constants.X_OK);
+import { createFixture } from "./database-fixture.mjs";
+
+const [database, planner, proofPath] = process.argv.slice(2);
+for (const [name, executable] of Object.entries({ database, planner })) {
+  NodeAssert.ok(
+    executable && NodePath.isAbsolute(executable),
+    `Pass an absolute ${name} executable path`,
+  );
+  await NodeFSP.access(executable, NodeFSP.constants.X_OK);
 }
-const version = spawnSync(engine, ["version"], { encoding: "utf8", env: {}, timeout: 10_000 });
-assert.equal(version.status, 0, version.stderr);
-assert.match(version.stdout, /^4\.0\.0(?:\s|\+|$)/);
-const root = await fs.mkdtemp(
-  path.join(process.env.T3_CODE_LS_TEST_TMPDIR ?? os.tmpdir(), "t3-database-gate-"),
-);
+const fixture = await createFixture();
+const { root } = fixture;
 const checks = [];
 const clients = new Set();
-const password = randomBytes(32).toString("hex");
-const listener = net.createServer();
-listener.listen(0, "127.0.0.1");
-await once(listener, "listening");
-const address = `127.0.0.1:${listener.address().port}`;
-await new Promise((resolve, reject) =>
-  listener.close((error) => (error ? reject(error) : resolve())),
-);
-const endpoint = `ws://${address}`;
-let daemon;
-let daemonClosed;
-let token;
-const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
+const hash = (bytes) => NodeCrypto.createHash("sha256").update(bytes).digest("hex");
 const checked = (description) => checks.push(description);
 
-async function startDaemon() {
-  daemon = spawn(
-    engine,
-    [
-      "start",
-      "--bind",
-      address,
-      "--deny-net",
-      "--deny-scripting",
-      "--log",
-      "info",
-      "--log-format",
-      "json",
-      `surrealkv://${path.join(root, "state")}?sync=every`,
-    ],
-    {
-      env: {
-        SURREAL_USER: "database_gate",
-        SURREAL_PASS: password,
-        SURREAL_SURREALKV_BLOCK_CACHE_CAPACITY: "33554432",
-        SURREAL_SURREALKV_MAX_MEMTABLE_SIZE: "16777216",
-      },
-      stdio: ["ignore", "pipe", "pipe"],
-    },
-  );
-  daemonClosed = once(daemon, "close");
-  daemon.stderr.resume();
-  const lines = readline.createInterface({ input: daemon.stdout });
-  await new Promise((resolve, reject) => {
-    const timeout = setTimeout(
-      () => reject(new Error("Database listener readiness timed out")),
-      20_000,
-    );
-    let observed = 0;
-    const fail = () => {
-      clearTimeout(timeout);
-      reject(new Error("Database exited before listener readiness"));
-    };
-    daemon.once("exit", fail);
-    daemon.once("error", reject);
-    lines.on("line", (line) => {
-      observed += line.length;
-      if (observed > 1_048_576) {
-        clearTimeout(timeout);
-        reject(new Error("Excessive database startup output"));
-        return;
-      }
-      let log;
-      try {
-        log = JSON.parse(line);
-      } catch {
-        return;
-      }
-      if (log.fields?.message === `Started web server on ${address}`) {
-        clearTimeout(timeout);
-        daemon.removeListener("exit", fail);
-        resolve();
-      }
-    });
-  });
-  const response = await fetch(`http://${address}/signin`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify({ user: "database_gate", pass: password }),
-    signal: AbortSignal.timeout(10_000),
-  });
-  assert.equal(response.status, 200);
-  token = (await response.json()).token;
-  assert.equal(typeof token, "string");
-}
-
-function client(mode = "loopback", selectedPlanner = planner) {
-  const child = spawn(database, [mode, endpoint], {
-    env: { T3_CODE_LS_DATABASE_TOKEN: token, T3_CODE_LS_PROJECT_STORE_EXECUTABLE: selectedPlanner },
+function client(mode = "connect", selectedPlanner = planner) {
+  const child = NodeChildProcess.spawn(database, fixture.cliArgs(mode), {
+    env: { T3_CODE_LS_PROJECT_STORE_EXECUTABLE: selectedPlanner },
     stdio: ["pipe", "pipe", "pipe"],
   });
   const pending = [];
@@ -125,12 +41,12 @@ function client(mode = "loopback", selectedPlanner = planner) {
     for (const request of pending.splice(0)) request.reject(error);
   };
   child.on("error", fail);
-  const closed = once(child, "close").then(([code, signal]) => {
+  const closed = NodeEvents.once(child, "close").then(([code, signal]) => {
     exited = true;
     fail(new Error(`Database client closed (${code ?? signal}): ${errors}`));
     return { code, signal, errors };
   });
-  readline.createInterface({ input: child.stdout }).on("line", (line) => {
+  NodeReadline.createInterface({ input: child.stdout }).on("line", (line) => {
     const request = pending.shift();
     if (!request) {
       fail(new Error("Unsolicited database response"));
@@ -173,8 +89,8 @@ function client(mode = "loopback", selectedPlanner = planner) {
       if (!exited) child.stdin.end();
       const result = await closed;
       clients.delete(api);
-      assert.equal(result.code, 0, result.errors);
-      assert.equal(result.errors, "");
+      NodeAssert.equal(result.code, 0, result.errors);
+      NodeAssert.equal(result.errors, "");
     },
     async kill() {
       if (!exited) child.kill("SIGKILL");
@@ -187,7 +103,7 @@ function client(mode = "loopback", selectedPlanner = planner) {
 }
 
 function successful(response) {
-  assert.equal(response.ok, true, JSON.stringify(response));
+  NodeAssert.equal(response.ok, true, JSON.stringify(response));
   return response.result;
 }
 const snapshot = async (connection) => successful(await connection.send({ operation: "snapshot" }));
@@ -206,19 +122,37 @@ const create = (commandId, projectId, workspaceRoot) => ({
 });
 
 try {
-  await startDaemon();
-  let left = client("initialize-loopback");
-  assert.deepEqual(await snapshot(left), { revision: 0, last_sequence: 0, projections: [] });
+  for (const args of [
+    ["local", fixture.databasePath],
+    ["initialize-loopback", "ws://127.0.0.1:8000"],
+    ["loopback", "ws://127.0.0.1:8000"],
+    ["remote", "wss://example.invalid"],
+  ]) {
+    const rejected = NodeChildProcess.spawnSync(database, args, {
+      cwd: root,
+      input: '{"operation":"snapshot"}\n',
+      encoding: "utf8",
+      env: {},
+      timeout: 10_000,
+    });
+    NodeAssert.equal(rejected.status, 1, rejected.stderr);
+    NodeAssert.equal(rejected.stdout, "");
+    NodeAssert.notEqual(rejected.stderr, "");
+    NodeAssert.deepEqual(await NodeFSP.readdir(root), []);
+  }
+  checked("ordinary open requires an existing store and removed network modes cannot create one");
+  let left = client("initialize");
+  NodeAssert.deepEqual(await snapshot(left), { revision: 0, last_sequence: 0, projections: [] });
   let right = client();
   checked("explicit schema initialization and empty durable store");
 
   const createCommand = create("create-one", "one", "/fixture/one");
   const created = successful(await left.send(project(createCommand, "created-one")));
-  assert.equal(created.replayed, false);
-  assert.equal(created.receipt.result.ok.project.title, "Rust project");
-  assert.equal(created.receipt.result.ok.project.defaultModelSelection, null);
-  assert.equal(created.receipt.first_sequence, 1);
-  assert.deepEqual(
+  NodeAssert.equal(created.replayed, false);
+  NodeAssert.equal(created.receipt.result.ok.project.title, "Rust project");
+  NodeAssert.equal(created.receipt.result.ok.project.defaultModelSelection, null);
+  NodeAssert.equal(created.receipt.first_sequence, 1);
+  NodeAssert.deepEqual(
     (await snapshot(right)).projections[0].payload,
     created.receipt.result.ok.project,
   );
@@ -229,14 +163,14 @@ try {
   const replay = successful(
     await right.send(project(createCommand, "unused-retry-event", 1794139999999)),
   );
-  assert.equal(replay.replayed, true);
-  assert.deepEqual(replay.receipt, created.receipt);
-  assert.equal((await events(left)).length, 1);
+  NodeAssert.equal(replay.replayed, true);
+  NodeAssert.deepEqual(replay.receipt, created.receipt);
+  NodeAssert.equal((await events(left)).length, 1);
   checked("same command replays the original timestamp and event without duplicates");
   const collision = await left.send(
     project({ ...createCommand, title: "Different request" }, "collision"),
   );
-  assert.equal(collision.error.kind, "command_conflict");
+  NodeAssert.equal(collision.error.kind, "command_conflict");
   checked("command ID reuse with different intent is rejected");
 
   const model = {
@@ -276,11 +210,11 @@ try {
     ),
   );
   const row = updated.receipt.result.ok.project;
-  assert.deepEqual(row.defaultModelSelection, model);
-  assert.deepEqual(row.scripts, [script]);
-  assert.equal(row.projectIcon.text, "a\u0301");
-  assert.equal(row.pinnedAt, "2026-11-08T12:00:01.123Z");
-  assert.equal(row.archivedAt, row.pinnedAt);
+  NodeAssert.deepEqual(row.defaultModelSelection, model);
+  NodeAssert.deepEqual(row.scripts, [script]);
+  NodeAssert.equal(row.projectIcon.text, "a\u0301");
+  NodeAssert.equal(row.pinnedAt, "2026-11-08T12:00:01.123Z");
+  NodeAssert.equal(row.archivedAt, row.pinnedAt);
   checked(
     "native validation, Unicode graphemes, nested model/scripts/icon data and timestamp projection",
   );
@@ -302,12 +236,12 @@ try {
     ),
   );
   const nulledRow = nulled.receipt.result.ok.project;
-  assert.equal(nulledRow.defaultModelSelection, null);
-  assert.equal(nulledRow.defaultThreadEnvMode, "worktree");
-  assert.deepEqual(nulledRow.projectIcon, row.projectIcon);
-  assert.deepEqual(nulledRow.scripts, row.scripts);
-  assert.equal(nulledRow.pinnedAt, row.pinnedAt);
-  assert.equal(nulledRow.archivedAt, row.archivedAt);
+  NodeAssert.equal(nulledRow.defaultModelSelection, null);
+  NodeAssert.equal(nulledRow.defaultThreadEnvMode, "worktree");
+  NodeAssert.deepEqual(nulledRow.projectIcon, row.projectIcon);
+  NodeAssert.deepEqual(nulledRow.scripts, row.scripts);
+  NodeAssert.equal(nulledRow.pinnedAt, row.pinnedAt);
+  NodeAssert.equal(nulledRow.archivedAt, row.archivedAt);
   checked(
     "explicit null clears one field while omitted fields and original pin/archive timestamps survive",
   );
@@ -318,17 +252,17 @@ try {
       project(create("workspace-conflict", "two", "/fixture/one"), "unused-conflict"),
     ),
   );
-  assert.ok(rejected.receipt.result.error);
+  NodeAssert.ok(rejected.receipt.result.error);
   const afterRejected = await snapshot(left);
-  assert.equal(afterRejected.revision, beforeRejected.revision + 1);
-  assert.equal(afterRejected.last_sequence, beforeRejected.last_sequence);
-  assert.deepEqual(afterRejected.projections, beforeRejected.projections);
+  NodeAssert.equal(afterRejected.revision, beforeRejected.revision + 1);
+  NodeAssert.equal(afterRejected.last_sequence, beforeRejected.last_sequence);
+  NodeAssert.deepEqual(afterRejected.projections, beforeRejected.projections);
   const replayedRejection = successful(
     await left.send(
       project(create("workspace-conflict", "two", "/fixture/one"), "unused-conflict-again"),
     ),
   );
-  assert.deepEqual(replayedRejection.receipt, rejected.receipt);
+  NodeAssert.deepEqual(replayedRejection.receipt, rejected.receipt);
   checked(
     "domain rejection has a durable replayable receipt without an event or projection mutation",
   );
@@ -344,7 +278,7 @@ try {
     },
     { ...create("extra-field", "extra", "/fixture/extra"), unexpected: true },
   ])
-    assert.equal(
+    NodeAssert.equal(
       (await left.send(project(command, command.commandId + "-event"))).error.kind,
       "invalid_request",
     );
@@ -354,21 +288,25 @@ try {
     '{"operation":"snapshot"}\r\n',
   ]) {
     const malformed = await left.raw(frame);
-    assert.equal(malformed.error?.kind, "invalid_request", JSON.stringify({ frame, malformed }));
+    NodeAssert.equal(
+      malformed.error?.kind,
+      "invalid_request",
+      JSON.stringify({ frame, malformed }),
+    );
   }
-  assert.deepEqual(await snapshot(left), beforeInvalid);
+  NodeAssert.deepEqual(await snapshot(left), beforeInvalid);
   checked(
     "unported deletion, malformed contracts, duplicate keys, and invalid framing fail without persistence",
   );
 
-  const fakePlanner = path.join(root, "fake-planner");
-  await fs.writeFile(
+  const fakePlanner = NodePath.join(root, "fake-planner");
+  await NodeFSP.writeFile(
     fakePlanner,
     '#!/bin/sh\nprintf \'{"version":1,"ok":{"event":{},"project":{}}}\\n\'\n',
     { mode: 0o700 },
   );
-  const forgedClient = client("loopback", fakePlanner);
-  assert.equal(
+  const forgedClient = client("connect", fakePlanner);
+  NodeAssert.equal(
     (
       await forgedClient.send(
         project(create("forged", "forged", "/fixture/forged"), "forged-event"),
@@ -377,7 +315,7 @@ try {
     "invalid_request",
   );
   await forgedClient.close();
-  assert.deepEqual(await snapshot(left), beforeInvalid);
+  NodeAssert.deepEqual(await snapshot(left), beforeInvalid);
   checked("a forged selected planner response cannot write the database");
 
   const competingCommands = [
@@ -389,21 +327,21 @@ try {
     right.send(project(competingCommands[1], "claim-event-right")),
   ]);
   const isAccepted = (response) => response.ok && response.result.receipt.result.ok !== undefined;
-  assert.equal(competing.filter(isAccepted).length, 1);
+  NodeAssert.equal(competing.filter(isAccepted).length, 1);
   const rejectedIndex = competing.findIndex((response) => !isAccepted(response));
   if (!competing[rejectedIndex].ok) {
-    assert.ok(
+    NodeAssert.ok(
       ["stale_revision", "transaction_conflict"].includes(competing[rejectedIndex].error.kind),
     );
   }
   const ownershipRejection = successful(
     await left.send(project(competingCommands[rejectedIndex], "claim-retry-unused")),
   );
-  assert.ok(ownershipRejection.receipt.result.error);
+  NodeAssert.ok(ownershipRejection.receipt.result.error);
   const sharedOwners = (await snapshot(left)).projections.filter(
     (projection) => projection.payload.workspaceRoot === "/fixture/shared",
   );
-  assert.equal(sharedOwners.length, 1);
+  NodeAssert.equal(sharedOwners.length, 1);
   checked("concurrent native project commands and conflict retry preserve one workspace owner");
 
   const revision = (await snapshot(left)).revision;
@@ -421,34 +359,43 @@ try {
     left.send({ operation: "commit", batch: batches[0] }),
     right.send({ operation: "commit", batch: batches[1] }),
   ]);
-  assert.equal(outcomes.filter((result) => result.ok).length, 1);
+  NodeAssert.equal(outcomes.filter((result) => result.ok).length, 1);
   const loser = outcomes.findIndex((result) => !result.ok);
-  assert.ok(["stale_revision", "transaction_conflict"].includes(outcomes[loser].error.kind));
-  assert.equal((await snapshot(left)).revision, revision + 1);
-  assert.equal(successful(await left.send({ operation: "pending_effects", limit: 100 })).length, 1);
+  NodeAssert.ok(["stale_revision", "transaction_conflict"].includes(outcomes[loser].error.kind));
+  NodeAssert.equal((await snapshot(left)).revision, revision + 1);
+  NodeAssert.equal(
+    successful(await left.send({ operation: "pending_effects", limit: 100 })).length,
+    1,
+  );
   checked("independent application processes cannot both commit from the same revision");
   batches[loser].expected_revision = revision + 1;
   successful(await right.send({ operation: "commit", batch: batches[loser] }));
-  assert.equal(successful(await left.send({ operation: "pending_effects", limit: 100 })).length, 2);
+  NodeAssert.equal(
+    successful(await left.send({ operation: "pending_effects", limit: 100 })).length,
+    2,
+  );
   const replayedBatch = successful(await left.send({ operation: "commit", batch: batches[loser] }));
-  assert.equal(replayedBatch.replayed, true);
+  NodeAssert.equal(replayedBatch.replayed, true);
   checked("explicit replan succeeds and retry cannot duplicate outbox work");
 
   const beforeRollback = await snapshot(left);
   const broken = makeBatch("rollback");
   broken.expected_revision = beforeRollback.revision;
   broken.effects[0].id = "effect-writer-left";
-  assert.equal(
+  NodeAssert.equal(
     (await left.send({ operation: "commit", batch: broken })).error.kind,
     "duplicate_record",
   );
-  assert.deepEqual(await snapshot(right), beforeRollback);
-  assert.equal(successful(await left.send({ operation: "receipt", command_id: "rollback" })), null);
+  NodeAssert.deepEqual(await snapshot(right), beforeRollback);
+  NodeAssert.equal(
+    successful(await left.send({ operation: "receipt", command_id: "rollback" })),
+    null,
+  );
   checked("a late outbox collision rolls back the event, projection, receipt, and counters");
 
-  const sourcePath = path.join(root, "source.sqlite");
-  const exportPath = path.join(root, "source.ndjson");
-  const source = new DatabaseSync(sourcePath);
+  const sourcePath = NodePath.join(root, "source.sqlite");
+  const exportPath = NodePath.join(root, "source.ndjson");
+  const source = new NodeSqlite.DatabaseSync(sourcePath);
   source.exec(
     "PRAGMA user_version=7; CREATE TABLE records(id INTEGER PRIMARY KEY AUTOINCREMENT, counter INTEGER, body BLOB, note TEXT);",
   );
@@ -456,31 +403,31 @@ try {
     .prepare("INSERT INTO records(counter,body,note) VALUES (?,?,?)")
     .run(9223372036854775807n, Buffer.from([0, 255, 128]), "Unicode 🦀\u0000 preserved");
   source.close();
-  const sourceHash = hash(await fs.readFile(sourcePath));
-  const exporter = fileURLToPath(new URL("./export-sqlite-state.mjs", import.meta.url));
-  const exportResult = spawnSync(
+  const sourceHash = hash(await NodeFSP.readFile(sourcePath));
+  const exporter = NodeURL.fileURLToPath(new URL("./export-sqlite-state.mjs", import.meta.url));
+  const exportResult = NodeChildProcess.spawnSync(
     process.execPath,
     ["--disable-warning=ExperimentalWarning", exporter, sourcePath, exportPath],
     { encoding: "utf8", timeout: 30_000 },
   );
-  assert.equal(exportResult.status, 0, exportResult.stderr);
+  NodeAssert.equal(exportResult.status, 0, exportResult.stderr);
   const archived = successful(await left.send({ operation: "archive_sqlite", path: exportPath }));
-  assert.equal(archived.replayed, false);
-  assert.equal(archived.summary.table_count, 1);
-  assert.equal(archived.summary.row_count, 1);
-  assert.equal(archived.summary.file_sha256, hash(await fs.readFile(exportPath)));
+  NodeAssert.equal(archived.replayed, false);
+  NodeAssert.equal(archived.summary.table_count, 1);
+  NodeAssert.equal(archived.summary.row_count, 1);
+  NodeAssert.equal(archived.summary.file_sha256, hash(await NodeFSP.readFile(exportPath)));
   const archiveReplay = successful(
     await right.send({ operation: "archive_sqlite", path: exportPath }),
   );
-  assert.equal(archiveReplay.replayed, true);
-  assert.equal(archiveReplay.archive_id, archived.archive_id);
-  assert.equal(hash(await fs.readFile(sourcePath)), sourceHash);
-  assert.deepEqual(await snapshot(right), beforeRollback);
+  NodeAssert.equal(archiveReplay.replayed, true);
+  NodeAssert.equal(archiveReplay.archive_id, archived.archive_id);
+  NodeAssert.equal(hash(await NodeFSP.readFile(sourcePath)), sourceHash);
+  NodeAssert.deepEqual(await snapshot(right), beforeRollback);
   checked(
     "read-only SQLite export is verified and archived idempotently without changing live projections",
   );
 
-  const recoveredPath = path.join(root, "recovered.ndjson");
+  const recoveredPath = NodePath.join(root, "recovered.ndjson");
   successful(
     await right.send({
       operation: "restore_sqlite_export",
@@ -488,8 +435,8 @@ try {
       destination: recoveredPath,
     }),
   );
-  assert.deepEqual(await fs.readFile(recoveredPath), await fs.readFile(exportPath));
-  assert.equal(
+  NodeAssert.deepEqual(await NodeFSP.readFile(recoveredPath), await NodeFSP.readFile(exportPath));
+  NodeAssert.equal(
     (
       await right.send({
         operation: "restore_sqlite_export",
@@ -500,33 +447,50 @@ try {
     false,
   );
   checked("archive recovery reconstructs identical verified bytes and refuses to overwrite a file");
-  const malformedPath = path.join(root, "tampered.ndjson");
-  const original = await fs.readFile(exportPath, "utf8");
-  await fs.writeFile(malformedPath, original.replace("Unicode", "Damaged"));
-  assert.equal((await right.send({ operation: "archive_sqlite", path: malformedPath })).ok, false);
-  assert.deepEqual(await snapshot(left), beforeRollback);
+  const malformedPath = NodePath.join(root, "tampered.ndjson");
+  const original = await NodeFSP.readFile(exportPath, "utf8");
+  await NodeFSP.writeFile(malformedPath, original.replace("Unicode", "Damaged"));
+  NodeAssert.equal(
+    (await right.send({ operation: "archive_sqlite", path: malformedPath })).ok,
+    false,
+  );
+  NodeAssert.deepEqual(await snapshot(left), beforeRollback);
   checked("checksum failure prevents publishing a complete archive");
 
   const durableState = await snapshot(left);
   const durableEvents = await events(left);
+  const durableEffects = successful(await left.send({ operation: "pending_effects", limit: 100 }));
   await Promise.all([left.kill(), right.kill()]);
-  daemon.kill("SIGKILL");
-  await daemonClosed;
-  await startDaemon();
   left = client();
   right = client();
-  assert.deepEqual(await snapshot(left), durableState);
-  assert.deepEqual(await events(right), durableEvents);
-  assert.deepEqual(
+  NodeAssert.deepEqual(await snapshot(left), durableState);
+  NodeAssert.deepEqual(await events(right), durableEvents);
+  NodeAssert.deepEqual(
+    successful(await right.send({ operation: "pending_effects", limit: 100 })),
+    durableEffects,
+  );
+  NodeAssert.deepEqual(
     successful(await left.send(project(createCommand, "never-recommitted"))).receipt,
     created.receipt,
   );
   const recoveredArchive = successful(
     await right.send({ operation: "sqlite_archive", archive_id: archived.archive_id }),
   );
-  assert.equal(recoveredArchive.summary.file_sha256, archived.summary.file_sha256);
+  NodeAssert.equal(recoveredArchive.summary.file_sha256, archived.summary.file_sha256);
+  const crashRecoveredPath = NodePath.join(root, "recovered-after-crash.ndjson");
+  successful(
+    await right.send({
+      operation: "restore_sqlite_export",
+      archive_id: archived.archive_id,
+      destination: crashRecoveredPath,
+    }),
+  );
+  NodeAssert.deepEqual(
+    await NodeFSP.readFile(crashRecoveredPath),
+    await NodeFSP.readFile(exportPath),
+  );
   checked(
-    "acknowledged state, receipts, events and archives survive SIGKILL of both clients and database",
+    "acknowledged state, receipts, events, outbox and archive bytes survive SIGKILL of every process holding the redb file",
   );
 
   const corruptRow = {
@@ -550,7 +514,7 @@ try {
     }),
   );
   const corruptState = await snapshot(right);
-  assert.equal(
+  NodeAssert.equal(
     (
       await left.send(
         project(create("cannot-bypass-owner", "new-owner", "/fixture/corrupt"), "never-committed"),
@@ -558,36 +522,32 @@ try {
     ).error.kind,
     "invalid_request",
   );
-  assert.deepEqual(await snapshot(left), corruptState);
+  NodeAssert.deepEqual(await snapshot(left), corruptState);
   checked("malformed stored project rows cannot bypass workspace ownership checks");
   await Promise.all([left.close(), right.close()]);
 
   const proof = {
     status: "passed",
-    engine: "SurrealDB 4.0.0 / SurrealKV sync=every",
+    engine: fixture.engineLabel,
     sourceCommit: process.env.GITHUB_SHA ?? null,
-    databaseSha256: hash(await fs.readFile(database)),
-    plannerSha256: hash(await fs.readFile(planner)),
+    databaseSha256: hash(await NodeFSP.readFile(database)),
+    plannerSha256: hash(await NodeFSP.readFile(planner)),
     passed: checks.length,
     checks,
     boundaries: [
-      "single database node; no HA qualification",
-      "Lust planner and projector; Cargo-built database service/client",
+      "one local database file; serialized write transactions; no distributed HA",
+      "Lust planner and projector; Cargo-built embedded database host",
       "standalone native store; existing application remains SQLite",
       "archive recovery restores NDJSON, not a live application database",
       "no throughput or power-failure durability claim",
     ],
   };
   if (proofPath) {
-    await fs.mkdir(path.dirname(proofPath), { recursive: true });
-    await fs.writeFile(proofPath, JSON.stringify(proof, null, 2) + "\n");
+    await NodeFSP.mkdir(NodePath.dirname(proofPath), { recursive: true });
+    await NodeFSP.writeFile(proofPath, JSON.stringify(proof, null, 2) + "\n");
   }
   console.log(JSON.stringify(proof));
 } finally {
   await Promise.allSettled([...clients].map((connection) => connection.kill()));
-  if (daemon) {
-    daemon.kill("SIGKILL");
-    await daemonClosed.catch(() => {});
-  }
-  await fs.rm(root, { recursive: true, force: true });
+  await fixture.close();
 }

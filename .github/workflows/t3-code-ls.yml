@@ -214,11 +214,11 @@ jobs:
           git fetch --no-tags --depth 1 https://github.com/pingdotgg/t3code.git "$upstream_commit"
       - name: Install the pinned Rust toolchain
         run: rustup toolchain install 1.99.1 --profile minimal
-      - name: Fetch the pinned Lust compiler
+      - name: Fetch the pinned Lustr compiler
         run: |
           git init "$RUNNER_TEMP/lust-lang"
-          git -C "$RUNNER_TEMP/lust-lang" remote add origin https://github.com/t3dotgg/lust-lang.git
-          git -C "$RUNNER_TEMP/lust-lang" fetch --depth 1 origin 240e08d91d4aed0299639f6f11fd522912b248f9
+          git -C "$RUNNER_TEMP/lust-lang" remote add origin https://github.com/glopyglerky/lustr.git
+          git -C "$RUNNER_TEMP/lust-lang" fetch --depth 1 origin a09efac9ab746de66d208978d5ad46b3df728a77
           git -C "$RUNNER_TEMP/lust-lang" checkout --detach FETCH_HEAD
       - name: Compile and execute application code through Lust
         run: python3 tools/check-lust.py --source "$RUNNER_TEMP/lust-lang" --artifacts target/lust-bin
@@ -340,17 +340,23 @@ jobs:
           sha256sum --check target/t3-code-ls-lust-linux-x64.tar.gz.sha256
           tar -xzf target/t3-code-ls-lust-linux-x64.tar.gz -C target
           test -x target/lust-bin/t3-code-ls-project-store
-      - name: Fetch the checksum-pinned Rust database engine
+      - name: Select isolated database test storage
+        run: echo "T3_CODE_LS_TEST_TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - name: Verify the embedded database pin
         run: |
-          database_url="$(python3 -c 'import json; print(json.load(open("database.lock.json"))["linuxAmd64"]["url"])')"
-          database_sha="$(python3 -c 'import json; print(json.load(open("database.lock.json"))["linuxAmd64"]["sha256"])')"
-          curl --fail --location --retry 3 "$database_url" --output "$RUNNER_TEMP/surreal.tgz"
-          echo "$database_sha  $RUNNER_TEMP/surreal.tgz" | sha256sum --check --
-          mkdir -p "$RUNNER_TEMP/surreal"
-          tar -xzf "$RUNNER_TEMP/surreal.tgz" -C "$RUNNER_TEMP/surreal"
-          "$RUNNER_TEMP/surreal/surreal" version
-          echo "T3_CODE_LS_SURREAL_EXECUTABLE=$RUNNER_TEMP/surreal/surreal" >> "$GITHUB_ENV"
-          echo "T3_CODE_LS_TEST_TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          python3 - <<'PY'
+          import json, tomllib
+          from pathlib import Path
+          pin = json.loads(Path("database.lock.json").read_text())
+          manifest = tomllib.loads(Path("crates/storage/Cargo.toml").read_text())
+          lock = tomllib.loads(Path("Cargo.lock").read_text())
+          engine = [p for p in lock["package"] if p["name"] == "redb"]
+          assert pin["product"] == pin["crate"]["name"] == "redb"
+          assert manifest["dependencies"]["redb"] == "=" + pin["version"]
+          assert len(engine) == 1 and engine[0]["version"] == pin["version"] == pin["crate"]["version"]
+          assert engine[0]["checksum"] == pin["crate"]["sha256"]
+          assert pin["license"] == "MIT OR Apache-2.0"
+          PY
       - name: Check database code
         run: cargo clippy --locked -p t3-code-ls-storage --all-targets -- -D warnings
       - name: Test real database transactions and recovery
@@ -362,7 +368,7 @@ jobs:
           cargo build --locked -p t3-code-ls-storage --bin t3-code-ls-db
           node --disable-warning=ExperimentalWarning tools/check-database.mjs \
             "$PWD/target/debug/t3-code-ls-db" "$PWD/target/lust-bin/t3-code-ls-project-store" \
-            "$T3_CODE_LS_SURREAL_EXECUTABLE" "$PWD/target/database-proof.json"
+            "$PWD/target/database-proof.json"
       - name: Package the verified database client and receipt
         run: |
           tar -czf target/t3-code-ls-database-linux-x64.tar.gz \

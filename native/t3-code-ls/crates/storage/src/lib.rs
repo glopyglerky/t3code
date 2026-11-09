@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+mod backend;
+
 pub mod project_service;
 pub mod project_validation;
 pub mod sqlite_import;
@@ -8,22 +10,19 @@ mod test_support;
 
 use std::collections::HashSet;
 use std::fmt;
+use std::path::Path;
 
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use backend::{Backend, Transaction};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
-use surrealdb::Surreal;
-use surrealdb::engine::any::{Any, connect};
-use surrealdb::method::Transaction;
-use surrealdb::types::QueryError;
 
 pub const MAX_BATCH_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_BATCH_RECORDS: usize = 65_536;
 pub const MAX_ID_BYTES: usize = 1_024;
-const FORMAT_VERSION: u64 = 1;
+const FORMAT_VERSION: u64 = 2;
 const MAX_COUNTER: u64 = 9_007_199_254_740_991;
-const NAMESPACE: &str = "t3_code_ls";
-const DATABASE: &str = "state";
+const STORE_KIND: &str = "t3-code-ls-redb-store";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -140,34 +139,8 @@ impl std::error::Error for Error {}
 
 type Result<T> = std::result::Result<T, Error>;
 
-fn database_error(error: surrealdb::Error) -> Error {
-    if matches!(error.query_details(), Some(QueryError::TransactionConflict)) {
-        Error::TransactionConflict
-    } else if error.details().is_already_exists() {
-        Error::DuplicateRecord
-    } else {
-        // Database messages can echo query bindings, which may contain prompts or secrets.
-        Error::Database(error.kind_str().to_string())
-    }
-}
-
-fn commit_error(error: surrealdb::Error) -> Error {
-    if matches!(error.query_details(), Some(QueryError::TransactionConflict)) {
-        Error::TransactionConflict
-    } else {
-        Error::UnknownCommit
-    }
-}
-
 fn json_error(_: serde_json::Error) -> Error {
-    Error::Database("invalid stored JSON".to_string())
-}
-
-fn take_json(response: &mut surrealdb::IndexedResults, index: usize) -> Result<Value> {
-    Ok(response
-        .take::<surrealdb::types::Value>(index)
-        .map_err(database_error)?
-        .into_json_value())
+    Error::IncompatibleStore
 }
 
 fn id_is_valid(value: &str) -> bool {
@@ -270,144 +243,139 @@ fn hash_json(value: &Value, hash: &mut Sha256) {
     }
 }
 
+#[derive(Clone)]
 pub struct Store {
-    db: Surreal<Any>,
+    pub(crate) db: Backend,
 }
 
-impl Clone for Store {
-    fn clone(&self) -> Self {
-        Self {
-            db: self.db.clone(),
-        }
-    }
+pub(crate) fn store_key(path: &str) -> Vec<u8> {
+    let mut key = b"t3-code-ls/v2/".to_vec();
+    key.extend_from_slice(path.as_bytes());
+    key
+}
+
+fn prefix_range(path: &str) -> (Vec<u8>, Vec<u8>) {
+    let start = store_key(path);
+    let mut end = start.clone();
+    // All internal prefixes end in '/', whose lexical successor is '0'.
+    *end.last_mut().expect("internal store prefix is nonempty") += 1;
+    (start, end)
+}
+
+fn encode(value: &impl Serialize) -> Result<Vec<u8>> {
+    serde_json::to_vec(value).map_err(json_error)
+}
+
+fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T> {
+    serde_json::from_slice(bytes).map_err(json_error)
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Metadata {
+    format_version: u64,
+    store_kind: String,
+    revision: u64,
+    sequence: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProjectionMetadata {
+    key: String,
+    payload_bytes: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EventMetadata {
+    id: String,
+    sequence: u64,
+    command_id: String,
+    payload_bytes: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EffectMetadata {
+    id: String,
+    command_id: String,
+    payload_bytes: usize,
 }
 
 impl Store {
-    pub async fn shutdown(self) -> Result<()> {
-        self.db.shutdown().await.map_err(database_error)
-    }
-
-    pub async fn initialize_loopback(endpoint: &str, token: &str) -> Result<Self> {
-        validate_loopback(endpoint, token)?;
-        let db = connect(endpoint).await.map_err(database_error)?;
-        db.authenticate(token.to_owned())
-            .await
-            .map_err(database_error)?;
-        db.query(
-            "DEFINE NAMESPACE IF NOT EXISTS t3_code_ls; \
-             USE NS t3_code_ls; DEFINE DATABASE IF NOT EXISTS state;",
-        )
-        .await
-        .map_err(database_error)?
-        .check()
-        .map_err(database_error)?;
-        db.use_ns(NAMESPACE)
-            .use_db(DATABASE)
-            .await
-            .map_err(database_error)?;
-        let store = Self { db };
-        store.initialize().await?;
+    /// Explicitly create a new store, or validate an already initialized compatible store.
+    pub async fn initialize_local(path: impl AsRef<Path>) -> Result<Self> {
+        let store = Self {
+            db: Backend::open(path, true).await?,
+        };
+        let mut tx = store.db.begin().await?;
+        let initialized = async {
+            if let Some(bytes) = tx.get(&store_key("meta/state")).await? {
+                decode_metadata(&bytes)?;
+                return Ok(false);
+            }
+            let (start, end) = prefix_range("");
+            if !tx.scan(&start, &end, 1).await?.is_empty() {
+                return Err(Error::IncompatibleStore);
+            }
+            let metadata = Metadata {
+                format_version: FORMAT_VERSION,
+                store_kind: STORE_KIND.into(),
+                revision: 0,
+                sequence: 0,
+            };
+            tx.insert(store_key("meta/state"), encode(&metadata)?)
+                .await?;
+            Ok(true)
+        }
+        .await;
+        match initialized {
+            Ok(true) => match tx.commit().await {
+                Ok(()) => {}
+                Err(Error::TransactionConflict) => {
+                    store.metadata().await?;
+                }
+                Err(error) => return Err(error),
+            },
+            Ok(false) => tx.rollback().await?,
+            Err(error) => {
+                let _ = tx.rollback().await;
+                return Err(error);
+            }
+        }
         Ok(store)
     }
 
-    /// Connect to an already initialized, authenticated deployment of this store.
-    pub async fn connect_remote(endpoint: &str, token: &str) -> Result<Self> {
-        let url = url::Url::parse(endpoint)
-            .map_err(|_| Error::Invalid("invalid database endpoint".into()))?;
-        if url.scheme() != "wss"
-            || url.host_str().is_none()
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.query().is_some()
-            || url.fragment().is_some()
-            || token.is_empty()
-        {
-            return Err(Error::Invalid(
-                "remote database requires WSS and a token".into(),
-            ));
-        }
-        Self::connect_authenticated(endpoint, token).await
-    }
-
-    pub async fn connect_loopback(endpoint: &str, token: &str) -> Result<Self> {
-        validate_loopback(endpoint, token)?;
-        Self::connect_authenticated(endpoint, token).await
-    }
-
-    async fn connect_authenticated(endpoint: &str, token: &str) -> Result<Self> {
-        let db = connect(endpoint).await.map_err(database_error)?;
-        db.authenticate(token.to_owned())
-            .await
-            .map_err(database_error)?;
-        db.use_ns(NAMESPACE)
-            .use_db(DATABASE)
-            .await
-            .map_err(database_error)?;
-        let store = Self { db };
+    /// Open an existing compatible store. This never creates a missing database file.
+    pub async fn open_local(path: impl AsRef<Path>) -> Result<Self> {
+        let store = Self {
+            db: Backend::open(path, false).await?,
+        };
         store.metadata().await?;
         Ok(store)
     }
 
-    async fn initialize(&self) -> Result<()> {
-        let mut info = self
-            .db
-            .query("INFO FOR DB")
-            .await
-            .map_err(database_error)?
-            .check()
-            .map_err(database_error)?;
-        let info = take_json(&mut info, 0)?;
-        let tables = info
-            .get("tables")
-            .and_then(Value::as_object)
-            .ok_or(Error::IncompatibleStore)?;
-        if !tables.is_empty() && !tables.contains_key("ls_meta") {
-            return Err(Error::IncompatibleStore);
-        }
-        if tables.is_empty() {
-            let response = self
-                .db
-                .query(INITIALIZE_QUERY)
-                .await
-                .map_err(database_error)?;
-            match response.check().map_err(database_error) {
-                Ok(_) | Err(Error::DuplicateRecord) => {}
-                Err(error) => return Err(error),
-            }
-        }
-        self.metadata().await?;
-        Ok(())
+    pub async fn shutdown(self) -> Result<()> {
+        self.db.shutdown().await
     }
 
     async fn metadata(&self) -> Result<Metadata> {
-        let mut response = self
+        let bytes = self
             .db
-            .query(METADATA_QUERY)
-            .await
-            .map_err(database_error)?
-            .check()
-            .map_err(database_error)?;
-        decode_metadata(take_json(&mut response, 0)?)
+            .read(&store_key("meta/state"))
+            .await?
+            .ok_or(Error::IncompatibleStore)?;
+        decode_metadata(&bytes)
     }
 
     pub async fn read_receipt(&self, command_id: &str) -> Result<Option<Receipt>> {
         validate_id(command_id)?;
-        let mut response = self
-            .db
-            .query(RECEIPT_QUERY)
-            .bind(("command_id", command_id.to_owned()))
-            .await
-            .map_err(database_error)?
-            .check()
-            .map_err(database_error)?;
-        let receipt = decode_receipt(take_json(&mut response, 0)?)?;
-        if receipt
-            .as_ref()
-            .is_some_and(|receipt| receipt.command_id != command_id)
-        {
-            return Err(Error::IncompatibleStore);
-        }
-        Ok(receipt)
+        self.db
+            .read(&store_key(&format!("receipt/{command_id}")))
+            .await?
+            .map(|bytes| decode_receipt(&bytes, command_id))
+            .transpose()
     }
 
     pub async fn snapshot(&self) -> Result<Snapshot> {
@@ -419,63 +387,58 @@ impl Store {
     }
 
     async fn snapshot_matching(&self, projects_only: bool) -> Result<Snapshot> {
-        let tx = self
-            .db
-            .clone()
-            .begin()
-            .read_only()
-            .await
-            .map_err(database_error)?;
-        let result = self.snapshot_in(&tx, projects_only).await;
-        tx.cancel().await.map_err(database_error)?;
+        let mut tx = self.db.begin().await?;
+        let result = self.snapshot_in(&mut tx, projects_only).await;
+        tx.rollback().await?;
         result
     }
 
-    async fn snapshot_in(&self, tx: &Transaction<Any>, projects_only: bool) -> Result<Snapshot> {
-        let predicate = if projects_only {
-            "WHERE record_key >= 'project/' AND record_key < 'project0' "
+    async fn snapshot_in(&self, tx: &mut Transaction, projects_only: bool) -> Result<Snapshot> {
+        let bytes = tx
+            .get(&store_key("meta/state"))
+            .await?
+            .ok_or(Error::IncompatibleStore)?;
+        let metadata = decode_metadata(&bytes)?;
+        let prefix = if projects_only {
+            "projection/meta/project/"
         } else {
-            ""
+            "projection/meta/"
         };
-        let mut response = tx.query(
-            format!("SELECT format_version, store_kind, revision, sequence FROM ONLY ls_meta:state; \
-             SELECT record_key, payload_bytes FROM ls_projection {predicate}ORDER BY record_key LIMIT $row_limit;"),
-        ).bind(("row_limit", (MAX_BATCH_RECORDS + 1) as u64))
-            .await.map_err(database_error)?.check().map_err(database_error)?;
-        let metadata = decode_metadata(take_json(&mut response, 0)?)?;
-        let sizes: Vec<Value> = response.take(1).map_err(database_error)?;
-        if sizes.len() > MAX_BATCH_RECORDS {
+        let (start, end) = prefix_range(prefix);
+        let rows = tx.scan(&start, &end, MAX_BATCH_RECORDS + 1).await?;
+        if rows.len() > MAX_BATCH_RECORDS {
             return Err(Error::Invalid("snapshot exceeds record limit".into()));
         }
-        let mut snapshot_bytes = 0_u64;
-        for row in &sizes {
-            snapshot_bytes = snapshot_bytes
-                .saturating_add(stored_counter(row, "payload_bytes")?)
-                .saturating_add(stored_string(row, "record_key")?.len() as u64);
-            if snapshot_bytes > MAX_BATCH_BYTES as u64 {
-                return Err(Error::Invalid("snapshot exceeds 16 MiB".into()));
-            }
-        }
-        let mut response = tx.query(
-            format!("SELECT record_key, payload_json FROM ls_projection {predicate}ORDER BY record_key LIMIT $row_limit;"),
-        ).bind(("row_limit", (MAX_BATCH_RECORDS + 1) as u64))
-            .await.map_err(database_error)?.check().map_err(database_error)?;
-        let rows: Vec<Value> = response.take(0).map_err(database_error)?;
-        if rows.len() != sizes.len() {
-            return Err(Error::IncompatibleStore);
-        }
-        let mut projections = Vec::with_capacity(rows.len());
-        for (row, size) in rows.into_iter().zip(sizes.iter()) {
-            if stored_string(&row, "record_key")? != stored_string(size, "record_key")?
-                || stored_string(&row, "payload_json")?.len() as u64
-                    != stored_counter(size, "payload_bytes")?
+        let mut total = 0usize;
+        let mut entries = Vec::with_capacity(rows.len());
+        for (key, bytes) in rows {
+            let entry: ProjectionMetadata = decode(&bytes)?;
+            if !id_is_valid(&entry.key)
+                || key != store_key(&format!("projection/meta/{}", entry.key))
+                || (projects_only && !entry.key.starts_with("project/"))
+                || entry.payload_bytes > MAX_BATCH_BYTES
             {
                 return Err(Error::IncompatibleStore);
             }
+            total = total
+                .saturating_add(entry.key.len())
+                .saturating_add(entry.payload_bytes);
+            if total > MAX_BATCH_BYTES {
+                return Err(Error::Invalid("snapshot exceeds 16 MiB".into()));
+            }
+            entries.push(entry);
+        }
+        let keys = entries
+            .iter()
+            .map(|entry| store_key(&format!("projection/payload/{}", entry.key)))
+            .collect::<Vec<_>>();
+        let payloads = tx.get_many(&keys).await?;
+        let mut projections = Vec::with_capacity(entries.len());
+        for (entry, bytes) in entries.into_iter().zip(payloads) {
+            let payload = decode_payload(bytes, entry.payload_bytes)?;
             projections.push(Projection {
-                key: stored_string(&row, "record_key")?.to_owned(),
-                payload: serde_json::from_str(stored_string(&row, "payload_json")?)
-                    .map_err(json_error)?,
+                key: entry.key,
+                payload,
             });
         }
         let snapshot = Snapshot {
@@ -483,9 +446,7 @@ impl Store {
             last_sequence: metadata.sequence,
             projections,
         };
-        if serde_json::to_vec(&snapshot).map_err(json_error)?.len() > MAX_BATCH_BYTES {
-            return Err(Error::Invalid("snapshot exceeds 16 MiB".into()));
-        }
+        validate_response_bytes(&snapshot)?;
         Ok(snapshot)
     }
 
@@ -493,49 +454,58 @@ impl Store {
         if after_sequence > MAX_COUNTER || limit == 0 || limit > 4096 {
             return Err(Error::Invalid("invalid event page".into()));
         }
-        let mut response = self
-            .db
-            .query(
-                "SELECT record_key, sequence, payload_bytes FROM ls_event \
-             WHERE sequence > $after ORDER BY sequence LIMIT $limit;",
-            )
-            .bind(("after", after_sequence))
-            .bind(("limit", limit))
-            .await
-            .map_err(database_error)?
-            .check()
-            .map_err(database_error)?;
-        let sizes: Vec<Value> = response.take(0).map_err(database_error)?;
-        validate_page_bytes(&sizes)?;
-        let Some(last) = sizes.last() else {
-            return Ok(Vec::new());
-        };
-        let mut response = self
-            .db
-            .query(
-                "SELECT record_key, sequence, command_id, payload_json FROM ls_event \
-             WHERE sequence > $after AND sequence <= $through ORDER BY sequence;",
-            )
-            .bind(("after", after_sequence))
-            .bind(("through", stored_counter(last, "sequence")?))
-            .await
-            .map_err(database_error)?
-            .check()
-            .map_err(database_error)?;
-        let rows: Vec<Value> = response.take(0).map_err(database_error)?;
-        validate_page_rows(&rows, &sizes)?;
-        let events: Vec<StoredEvent> = rows
-            .into_iter()
-            .map(|row| {
-                Ok(StoredEvent {
-                    id: stored_string(&row, "record_key")?.to_owned(),
-                    sequence: stored_counter(&row, "sequence")?,
-                    command_id: stored_string(&row, "command_id")?.to_owned(),
-                    payload: serde_json::from_str(stored_string(&row, "payload_json")?)
-                        .map_err(json_error)?,
-                })
-            })
-            .collect::<Result<_>>()?;
+        let mut tx = self.db.begin().await?;
+        let result = self.events_in(&mut tx, after_sequence, limit).await;
+        tx.rollback().await?;
+        result
+    }
+
+    async fn events_in(
+        &self,
+        tx: &mut Transaction,
+        after: u64,
+        limit: u32,
+    ) -> Result<Vec<StoredEvent>> {
+        let start = store_key(&format!("event/meta/{:020}", after + 1));
+        let (_, end) = prefix_range("event/meta/");
+        let rows = tx.scan(&start, &end, limit as usize).await?;
+        let mut entries = Vec::with_capacity(rows.len());
+        let mut total = 0usize;
+        let mut previous = after;
+        for (key, bytes) in rows {
+            let entry: EventMetadata = decode(&bytes)?;
+            if !id_is_valid(&entry.id)
+                || !id_is_valid(&entry.command_id)
+                || entry.sequence <= previous
+                || entry.sequence > MAX_COUNTER
+                || key != store_key(&format!("event/meta/{:020}", entry.sequence))
+                || entry.payload_bytes > MAX_BATCH_BYTES
+            {
+                return Err(Error::IncompatibleStore);
+            }
+            previous = entry.sequence;
+            total = total
+                .saturating_add(entry.payload_bytes)
+                .saturating_add(entry.id.len())
+                .saturating_add(entry.command_id.len());
+            validate_page_bytes(total)?;
+            entries.push(entry);
+        }
+        let keys = entries
+            .iter()
+            .map(|entry| store_key(&format!("event/payload/{:020}", entry.sequence)))
+            .collect::<Vec<_>>();
+        let payloads = tx.get_many(&keys).await?;
+        let mut events = Vec::with_capacity(entries.len());
+        for (entry, bytes) in entries.into_iter().zip(payloads) {
+            let payload = decode_payload(bytes, entry.payload_bytes)?;
+            events.push(StoredEvent {
+                id: entry.id,
+                sequence: entry.sequence,
+                command_id: entry.command_id,
+                payload,
+            });
+        }
         validate_response_bytes(&events)?;
         Ok(events)
     }
@@ -544,87 +514,75 @@ impl Store {
         if limit == 0 || limit > 4096 {
             return Err(Error::Invalid("invalid effect page".into()));
         }
-        let mut response = self
-            .db
-            .query(
-                "SELECT record_key, payload_bytes FROM ls_outbox \
-             WHERE state = 'pending' ORDER BY record_key LIMIT $limit;",
-            )
-            .bind(("limit", limit))
-            .await
-            .map_err(database_error)?
-            .check()
-            .map_err(database_error)?;
-        let sizes: Vec<Value> = response.take(0).map_err(database_error)?;
-        validate_page_bytes(&sizes)?;
-        if sizes.is_empty() {
-            return Ok(Vec::new());
+        let mut tx = self.db.begin().await?;
+        let result = self.effects_in(&mut tx, limit).await;
+        tx.rollback().await?;
+        result
+    }
+
+    async fn effects_in(&self, tx: &mut Transaction, limit: u32) -> Result<Vec<PendingEffect>> {
+        let (start, end) = prefix_range("outbox/pending/");
+        let rows = tx.scan(&start, &end, limit as usize).await?;
+        let mut entries = Vec::with_capacity(rows.len());
+        let mut total = 0usize;
+        for (key, bytes) in rows {
+            let entry: EffectMetadata = decode(&bytes)?;
+            if !id_is_valid(&entry.id)
+                || !id_is_valid(&entry.command_id)
+                || key != store_key(&format!("outbox/pending/{}", entry.id))
+                || entry.payload_bytes > MAX_BATCH_BYTES
+            {
+                return Err(Error::IncompatibleStore);
+            }
+            total = total
+                .saturating_add(entry.payload_bytes)
+                .saturating_add(entry.id.len())
+                .saturating_add(entry.command_id.len());
+            validate_page_bytes(total)?;
+            entries.push(entry);
         }
-        let keys: Vec<String> = sizes
+        let keys = entries
             .iter()
-            .map(|row| stored_string(row, "record_key").map(str::to_owned))
-            .collect::<Result<_>>()?;
-        let mut response = self
-            .db
-            .query(
-                "SELECT record_key, command_id, payload_json FROM ls_outbox \
-             WHERE record_key IN $keys ORDER BY record_key;",
-            )
-            .bind(("keys", keys))
-            .await
-            .map_err(database_error)?
-            .check()
-            .map_err(database_error)?;
-        let rows: Vec<Value> = response.take(0).map_err(database_error)?;
-        validate_page_rows(&rows, &sizes)?;
-        let effects: Vec<PendingEffect> = rows
-            .into_iter()
-            .map(|row| {
-                Ok(PendingEffect {
-                    id: stored_string(&row, "record_key")?.to_owned(),
-                    command_id: stored_string(&row, "command_id")?.to_owned(),
-                    payload: serde_json::from_str(stored_string(&row, "payload_json")?)
-                        .map_err(json_error)?,
-                })
-            })
-            .collect::<Result<_>>()?;
+            .map(|entry| store_key(&format!("outbox/payload/{}", entry.id)))
+            .collect::<Vec<_>>();
+        let payloads = tx.get_many(&keys).await?;
+        let mut effects = Vec::with_capacity(entries.len());
+        for (entry, bytes) in entries.into_iter().zip(payloads) {
+            let payload = decode_payload(bytes, entry.payload_bytes)?;
+            effects.push(PendingEffect {
+                id: entry.id,
+                command_id: entry.command_id,
+                payload,
+            });
+        }
         validate_response_bytes(&effects)?;
         Ok(effects)
     }
 
     pub async fn commit(&self, batch: &CommitBatch) -> Result<CommitOutcome> {
         validate_batch(batch)?;
-        let tx = self.db.clone().begin().await.map_err(database_error)?;
-        let staged = self.stage(&tx, batch).await;
+        let mut tx = self.db.begin().await?;
+        let staged = self.stage(&mut tx, batch).await;
         match staged {
             Ok(outcome) if outcome.replayed => {
-                tx.cancel().await.map_err(database_error)?;
+                tx.rollback().await?;
                 Ok(outcome)
             }
             Ok(outcome) => {
-                tx.commit().await.map_err(commit_error)?;
+                tx.commit().await?;
                 Ok(outcome)
             }
             Err(error) => {
-                // No COMMIT was sent, so cancellation failure cannot make this batch durable.
-                let _ = tx.cancel().await;
+                let _ = tx.rollback().await;
                 Err(error)
             }
         }
     }
 
-    async fn stage(&self, tx: &Transaction<Any>, batch: &CommitBatch) -> Result<CommitOutcome> {
-        let mut response = tx
-            .query(format!("{RECEIPT_QUERY}; {METADATA_QUERY}"))
-            .bind(("command_id", batch.command_id.clone()))
-            .await
-            .map_err(database_error)?
-            .check()
-            .map_err(database_error)?;
-        if let Some(receipt) = decode_receipt(take_json(&mut response, 0)?)? {
-            if receipt.command_id != batch.command_id {
-                return Err(Error::IncompatibleStore);
-            }
+    async fn stage(&self, tx: &mut Transaction, batch: &CommitBatch) -> Result<CommitOutcome> {
+        let receipt_key = store_key(&format!("receipt/{}", batch.command_id));
+        if let Some(bytes) = tx.get(&receipt_key).await? {
+            let receipt = decode_receipt(&bytes, &batch.command_id)?;
             if receipt.request_digest != batch.request_digest {
                 return Err(Error::CommandConflict);
             }
@@ -633,15 +591,19 @@ impl Store {
                 replayed: true,
             });
         }
-        let meta = decode_metadata(take_json(&mut response, 1)?)?;
+        let bytes = tx
+            .get(&store_key("meta/state"))
+            .await?
+            .ok_or(Error::IncompatibleStore)?;
+        let mut meta = decode_metadata(&bytes)?;
         if meta.revision != batch.expected_revision {
             return Err(Error::StaleRevision {
                 expected: batch.expected_revision,
                 actual: meta.revision,
             });
         }
-        let last_sequence = meta
-            .sequence
+        let sequence = meta.sequence;
+        let last_sequence = sequence
             .checked_add(batch.events.len() as u64)
             .filter(|sequence| *sequence <= MAX_COUNTER)
             .ok_or_else(|| Error::Invalid("event sequence exhausted".into()))?;
@@ -649,84 +611,80 @@ impl Store {
             command_id: batch.command_id.clone(),
             request_digest: batch.request_digest.clone(),
             revision: meta.revision + 1,
-            first_sequence: if batch.events.is_empty() {
-                None
-            } else {
-                Some(meta.sequence + 1)
-            },
+            first_sequence: (!batch.events.is_empty()).then_some(sequence + 1),
             last_sequence,
             result: batch.result.clone(),
         };
-        let events: Vec<Value> = batch
-            .events
-            .iter()
-            .enumerate()
-            .map(|(index, event)| {
-                json!({
-                    "record_key": event.id,
-                    "sequence": meta.sequence + index as u64 + 1,
-                    "command_id": batch.command_id,
-                    "payload_json": event.payload.to_string(),
-                    "payload_bytes": event.payload.to_string().len(),
-                })
-            })
-            .collect();
-        let projections: Vec<Value> = batch
-            .projections
-            .iter()
-            .map(|mutation| match mutation {
-                ProjectionMutation::Put { key, payload } => json!({
-                    "record_key": key, "remove": false, "payload_json": payload.to_string(),
-                    "payload_bytes": payload.to_string().len(),
-                }),
-                ProjectionMutation::Delete { key } => json!({"record_key": key, "remove": true}),
-            })
-            .collect();
-        let effects: Vec<Value> = batch
-            .effects
-            .iter()
-            .map(|effect| {
-                json!({
-                    "record_key": effect.id, "command_id": batch.command_id,
-                    "payload_json": effect.payload.to_string(), "state": "pending",
-                    "payload_bytes": effect.payload.to_string().len(),
-                })
-            })
-            .collect();
-        let stored_receipt = json!({
-            "command_id": receipt.command_id,
-            "request_digest": receipt.request_digest,
-            "revision": receipt.revision,
-            "first_sequence": receipt.first_sequence,
-            "last_sequence": receipt.last_sequence,
-            "result_json": receipt.result.to_string(),
-        });
-        tx.query(
-            "UPDATE ls_meta:state SET revision = $revision, sequence = $sequence; \
-             FOR $event IN $events { \
-                 CREATE type::record('ls_event', $event.record_key) CONTENT $event; \
-             }; \
-             FOR $projection IN $projections { \
-                 IF $projection.remove { \
-                     DELETE type::record('ls_projection', $projection.record_key); \
-                 } ELSE { \
-                     UPSERT type::record('ls_projection', $projection.record_key) \
-                         SET record_key = $projection.record_key, payload_json = $projection.payload_json, \
-                         payload_bytes = $projection.payload_bytes; \
-                 }; \
-             }; \
-             FOR $effect IN $effects { \
-                 CREATE type::record('ls_outbox', $effect.record_key) CONTENT $effect; \
-             }; \
-             CREATE type::record('ls_receipt', $command_id) CONTENT $receipt;",
-        ).bind(("revision", receipt.revision))
-            .bind(("sequence", receipt.last_sequence))
-            .bind(("events", events))
-            .bind(("projections", projections))
-            .bind(("effects", effects))
-            .bind(("command_id", batch.command_id.clone()))
-            .bind(("receipt", stored_receipt))
-            .await.map_err(database_error)?.check().map_err(database_error)?;
+        meta.revision = receipt.revision;
+        meta.sequence = last_sequence;
+        tx.put(store_key("meta/state"), encode(&meta)?).await?;
+        for (index, event) in batch.events.iter().enumerate() {
+            let sequence = sequence + index as u64 + 1;
+            let payload = encode(&event.payload)?;
+            let entry = EventMetadata {
+                id: event.id.clone(),
+                sequence,
+                command_id: batch.command_id.clone(),
+                payload_bytes: payload.len(),
+            };
+            tx.insert(
+                store_key(&format!("event/id/{}", event.id)),
+                sequence.to_be_bytes().to_vec(),
+            )
+            .await?;
+            tx.insert(
+                store_key(&format!("event/meta/{sequence:020}")),
+                encode(&entry)?,
+            )
+            .await?;
+            tx.insert(store_key(&format!("event/payload/{sequence:020}")), payload)
+                .await?;
+        }
+        for mutation in &batch.projections {
+            match mutation {
+                ProjectionMutation::Put { key, payload } => {
+                    let payload = encode(payload)?;
+                    let entry = ProjectionMetadata {
+                        key: key.clone(),
+                        payload_bytes: payload.len(),
+                    };
+                    tx.put(
+                        store_key(&format!("projection/meta/{key}")),
+                        encode(&entry)?,
+                    )
+                    .await?;
+                    tx.put(store_key(&format!("projection/payload/{key}")), payload)
+                        .await?;
+                }
+                ProjectionMutation::Delete { key } => {
+                    tx.delete(store_key(&format!("projection/meta/{key}")))
+                        .await?;
+                    tx.delete(store_key(&format!("projection/payload/{key}")))
+                        .await?;
+                }
+            }
+        }
+        for effect in &batch.effects {
+            let payload = encode(&effect.payload)?;
+            let entry = EffectMetadata {
+                id: effect.id.clone(),
+                command_id: batch.command_id.clone(),
+                payload_bytes: payload.len(),
+            };
+            tx.insert(
+                store_key(&format!("outbox/id/{}", effect.id)),
+                batch.command_id.as_bytes().to_vec(),
+            )
+            .await?;
+            tx.insert(
+                store_key(&format!("outbox/pending/{}", effect.id)),
+                encode(&entry)?,
+            )
+            .await?;
+            tx.insert(store_key(&format!("outbox/payload/{}", effect.id)), payload)
+                .await?;
+        }
+        tx.insert(receipt_key, encode(&receipt)?).await?;
         Ok(CommitOutcome {
             receipt,
             replayed: false,
@@ -734,150 +692,61 @@ impl Store {
     }
 }
 
-fn validate_loopback(endpoint: &str, token: &str) -> Result<()> {
-    let url = url::Url::parse(endpoint)
-        .map_err(|_| Error::Invalid("invalid database endpoint".into()))?;
-    let loopback = match url.host() {
-        Some(url::Host::Ipv4(address)) => address.is_loopback(),
-        Some(url::Host::Ipv6(address)) => address.is_loopback(),
-        _ => false,
-    };
-    if url.scheme() != "ws"
-        || !loopback
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-        || token.is_empty()
-    {
-        return Err(Error::Invalid(
-            "plaintext database connections require a numeric loopback address and a token".into(),
-        ));
-    }
-    Ok(())
-}
-
-const METADATA_QUERY: &str =
-    "SELECT format_version, store_kind, revision, sequence FROM ONLY ls_meta:state";
-const RECEIPT_QUERY: &str = "SELECT command_id, request_digest, revision, first_sequence, last_sequence, result_json \
-     FROM ONLY type::record('ls_receipt', $command_id)";
-
-const INITIALIZE_QUERY: &str = "BEGIN; \
-    DEFINE TABLE ls_meta SCHEMALESS; \
-    DEFINE TABLE ls_event SCHEMALESS; \
-    DEFINE TABLE ls_projection SCHEMALESS; \
-    DEFINE TABLE ls_receipt SCHEMALESS; \
-    DEFINE TABLE ls_outbox SCHEMALESS; \
-    DEFINE TABLE ls_sqlite_archive SCHEMALESS; \
-    DEFINE TABLE ls_sqlite_archive_chunk SCHEMALESS; \
-    DEFINE INDEX ls_event_sequence ON ls_event FIELDS sequence UNIQUE; \
-    DEFINE INDEX ls_projection_key ON ls_projection FIELDS record_key UNIQUE; \
-    DEFINE INDEX ls_outbox_pending ON ls_outbox FIELDS state, record_key; \
-    CREATE ls_meta:state SET format_version = 1, \
-        store_kind = 't3-code-ls-command-store', revision = 0, sequence = 0; \
-    COMMIT;";
-
-struct Metadata {
-    revision: u64,
-    sequence: u64,
-}
-
-fn stored_counter(value: &Value, key: &str) -> Result<u64> {
-    value
-        .get(key)
-        .and_then(Value::as_u64)
-        .filter(|v| *v <= MAX_COUNTER)
-        .ok_or(Error::IncompatibleStore)
-}
-
-fn stored_string<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .ok_or(Error::IncompatibleStore)
-}
-
-fn validate_page_bytes(rows: &[Value]) -> Result<()> {
-    let mut bytes = 0_u64;
-    for row in rows {
-        bytes = bytes
-            .saturating_add(stored_counter(row, "payload_bytes")?)
-            .saturating_add(stored_string(row, "record_key")?.len() as u64);
-        if bytes > MAX_BATCH_BYTES as u64 {
-            return Err(Error::Invalid(
-                "page exceeds 16 MiB; request fewer records".into(),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn validate_page_rows(rows: &[Value], sizes: &[Value]) -> Result<()> {
-    if rows.len() != sizes.len() {
+fn decode_payload(bytes: Option<Vec<u8>>, expected_bytes: usize) -> Result<Value> {
+    let bytes = bytes.ok_or(Error::IncompatibleStore)?;
+    if bytes.len() != expected_bytes {
         return Err(Error::IncompatibleStore);
     }
-    for (row, size) in rows.iter().zip(sizes) {
-        if stored_string(row, "record_key")? != stored_string(size, "record_key")?
-            || stored_string(row, "payload_json")?.len() as u64
-                != stored_counter(size, "payload_bytes")?
-        {
-            return Err(Error::IncompatibleStore);
-        }
-    }
-    Ok(())
+    decode(&bytes)
 }
 
-fn validate_response_bytes(value: &impl Serialize) -> Result<()> {
-    if serde_json::to_vec(value).map_err(json_error)?.len() > MAX_BATCH_BYTES {
-        Err(Error::Invalid(
-            "response exceeds 16 MiB; request fewer records".into(),
-        ))
-    } else {
-        Ok(())
-    }
-}
-
-fn decode_metadata(value: Value) -> Result<Metadata> {
-    if value.get("format_version").and_then(Value::as_u64) != Some(FORMAT_VERSION)
-        || value.get("store_kind").and_then(Value::as_str) != Some("t3-code-ls-command-store")
+fn decode_metadata(bytes: &[u8]) -> Result<Metadata> {
+    let metadata: Metadata = decode(bytes)?;
+    if metadata.format_version != FORMAT_VERSION
+        || metadata.store_kind != STORE_KIND
+        || metadata.revision > MAX_COUNTER
+        || metadata.sequence > MAX_COUNTER
     {
         return Err(Error::IncompatibleStore);
     }
-    Ok(Metadata {
-        revision: stored_counter(&value, "revision")?,
-        sequence: stored_counter(&value, "sequence")?,
-    })
+    Ok(metadata)
 }
 
-fn decode_receipt(value: Value) -> Result<Option<Receipt>> {
-    if value.is_null() {
-        return Ok(None);
-    }
-    let first_sequence = if value.get("first_sequence").is_some_and(Value::is_null) {
-        None
-    } else {
-        Some(stored_counter(&value, "first_sequence")?)
-    };
-    let receipt = Receipt {
-        command_id: stored_string(&value, "command_id")?.to_owned(),
-        request_digest: stored_string(&value, "request_digest")?.to_owned(),
-        revision: stored_counter(&value, "revision")?,
-        first_sequence,
-        last_sequence: stored_counter(&value, "last_sequence")?,
-        result: serde_json::from_str(stored_string(&value, "result_json")?).map_err(json_error)?,
-    };
-    if !id_is_valid(&receipt.command_id)
+fn decode_receipt(bytes: &[u8], command_id: &str) -> Result<Receipt> {
+    let receipt: Receipt = decode(bytes)?;
+    if receipt.command_id != command_id
+        || !id_is_valid(&receipt.command_id)
         || receipt.request_digest.len() != 64
         || !receipt
             .request_digest
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         || receipt.revision == 0
+        || receipt.revision > MAX_COUNTER
+        || receipt.last_sequence > MAX_COUNTER
         || receipt
             .first_sequence
             .is_some_and(|first| first == 0 || first > receipt.last_sequence)
     {
         return Err(Error::IncompatibleStore);
     }
-    Ok(Some(receipt))
+    Ok(receipt)
+}
+
+fn validate_page_bytes(bytes: usize) -> Result<()> {
+    if bytes > MAX_BATCH_BYTES {
+        return Err(Error::Invalid(
+            "page exceeds 16 MiB; request fewer records".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_response_bytes(value: &impl Serialize) -> Result<()> {
+    if encode(value)?.len() > MAX_BATCH_BYTES {
+        return Err(Error::Invalid(
+            "response exceeds 16 MiB; request fewer records".into(),
+        ));
+    }
+    Ok(())
 }

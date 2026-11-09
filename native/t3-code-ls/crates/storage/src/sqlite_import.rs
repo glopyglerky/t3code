@@ -11,7 +11,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::{Error, Result, Store, commit_error, database_error, take_json};
+use crate::{Error, Result, Store, store_key};
 
 const FORMAT: &str = "t3-code-ls/sqlite-export";
 const CHUNK_BYTES: usize = 1024 * 1024;
@@ -805,21 +805,9 @@ impl Store {
         let mut restored = RestoredFile::create(destination.as_ref())?;
         let mut file_hash = Sha256::new();
         for chunk in &record.chunks {
-            let mut response = self.db.query("SELECT payload, byte_count FROM ONLY type::record('ls_sqlite_archive_chunk', $chunk_id)")
-                .bind(("chunk_id", chunk.sha256.clone())).await.map_err(database_error)?.check().map_err(database_error)?;
-            let value = take_json(&mut response, 0)?;
-            let payload = string(&value, "payload")?;
-            if payload.len() as u64 != chunk.byte_count
-                || number(&value, "byte_count")? != chunk.byte_count
-                || hash(payload.as_bytes()) != chunk.sha256
-            {
-                return Err(Error::IncompatibleStore);
-            }
-            restored
-                .file
-                .write_all(payload.as_bytes())
-                .map_err(io_error)?;
-            file_hash.update(payload.as_bytes());
+            let payload = self.read_archive_chunk(chunk).await?;
+            restored.file.write_all(&payload).map_err(io_error)?;
+            file_hash.update(&payload);
         }
         if hex(&file_hash.finalize()) != record.summary.file_sha256 {
             return Err(Error::IncompatibleStore);
@@ -861,24 +849,15 @@ impl Store {
         if !is_hash(archive_id) {
             return invalid("invalid archive ID");
         }
-        let mut response = self
-            .db
-            .query("SELECT record_json FROM ONLY type::record('ls_sqlite_archive', $archive_id)")
-            .bind(("archive_id", archive_id.to_owned()))
-            .await
-            .map_err(database_error)?
-            .check()
-            .map_err(database_error)?;
-        let value = take_json(&mut response, 0)?;
-        if value.is_null() {
+        let key = store_key(&format!("archive/ready/{archive_id}"));
+        let Some(encoded) = self.db.read(&key).await? else {
             return Ok(None);
-        }
-        let encoded = string(&value, "record_json")?;
+        };
         if encoded.len() > MAX_TRANSACTION_BYTES {
             return Err(Error::IncompatibleStore);
         }
         let record: ArchiveRecord =
-            serde_json::from_str(encoded).map_err(|_| Error::IncompatibleStore)?;
+            serde_json::from_slice(&encoded).map_err(|_| Error::IncompatibleStore)?;
         if record.format_version != 1
             || !record.ready
             || record.summary.export_sha256 != archive_id
@@ -1024,39 +1003,57 @@ impl Store {
                 Ok(()) => break,
             }
         }
-        let mut response = self.db.query("SELECT payload, byte_count FROM ONLY type::record('ls_sqlite_archive_chunk', $chunk_id)")
-            .bind(("chunk_id", chunk.sha256.clone())).await.map_err(database_error)?.check().map_err(database_error)?;
-        let value = take_json(&mut response, 0)?;
-        let stored = string(&value, "payload")?;
-        if number(&value, "byte_count")? != chunk.byte_count
-            || stored.len() as u64 != chunk.byte_count
-            || hash(stored.as_bytes()) != chunk.sha256
-        {
-            return Err(Error::IncompatibleStore);
-        }
+        self.read_archive_chunk(&chunk).await?;
         Ok(chunk)
     }
 
+    async fn read_archive_chunk(&self, chunk: &ChunkRef) -> Result<Vec<u8>> {
+        let witness_key = store_key(&format!("archive/chunk-meta/{}", chunk.sha256));
+        let witness = self.db.read(&witness_key).await?;
+        if witness.as_deref() != Some(chunk.byte_count.to_be_bytes().as_slice()) {
+            return Err(Error::IncompatibleStore);
+        }
+        let payload_key = store_key(&format!("archive/chunk/{}", chunk.sha256));
+        let payload = self
+            .db
+            .read(&payload_key)
+            .await?
+            .ok_or(Error::IncompatibleStore)?;
+        if payload.len() as u64 != chunk.byte_count || hash(&payload) != chunk.sha256 {
+            return Err(Error::IncompatibleStore);
+        }
+        Ok(payload)
+    }
+
     async fn stage_archive_chunk(&self, chunk: &ChunkRef, payload: &str) -> Result<()> {
-        let tx = self.db.clone().begin().await.map_err(database_error)?;
+        let payload_key = store_key(&format!("archive/chunk/{}", chunk.sha256));
+        let witness_key = store_key(&format!("archive/chunk-meta/{}", chunk.sha256));
+        let witness = chunk.byte_count.to_be_bytes().to_vec();
+        let mut tx = self.db.begin().await?;
         let result = async {
-            let mut response = tx.query("SELECT payload, byte_count FROM ONLY type::record('ls_sqlite_archive_chunk', $chunk_id)")
-                .bind(("chunk_id", chunk.sha256.clone())).await.map_err(database_error)?.check().map_err(database_error)?;
-            let value = take_json(&mut response, 0)?;
-            if !value.is_null() {
-                if string(&value, "payload")? != payload || number(&value, "byte_count")? != chunk.byte_count { return Err(Error::IncompatibleStore); }
+            let stored_payload = tx.get(&payload_key).await?;
+            let stored_witness = tx.get(&witness_key).await?;
+            if let Some(stored_payload) = stored_payload {
+                if stored_payload != payload.as_bytes()
+                    || stored_witness.as_deref() != Some(witness.as_slice())
+                {
+                    return Err(Error::IncompatibleStore);
+                }
                 return Ok(false);
             }
-            tx.query("CREATE type::record('ls_sqlite_archive_chunk', $chunk_id) SET payload = $payload, byte_count = $byte_count;")
-                .bind(("chunk_id", chunk.sha256.clone())).bind(("payload", payload.to_owned())).bind(("byte_count", chunk.byte_count))
-                .await.map_err(database_error)?.check().map_err(database_error)?;
+            if stored_witness.is_some() {
+                return Err(Error::IncompatibleStore);
+            }
+            tx.insert(payload_key, payload.as_bytes().to_vec()).await?;
+            tx.insert(witness_key, witness).await?;
             Ok(true)
-        }.await;
+        }
+        .await;
         match result {
-            Ok(true) => tx.commit().await.map(|_| ()).map_err(commit_error),
-            Ok(false) => tx.cancel().await.map(|_| ()).map_err(database_error),
+            Ok(true) => tx.commit().await,
+            Ok(false) => tx.rollback().await,
             Err(error) => {
-                let _ = tx.cancel().await;
+                let _ = tx.rollback().await;
                 Err(error)
             }
         }
@@ -1074,37 +1071,39 @@ impl Store {
         {
             return invalid("archive manifest exceeds transaction budget");
         }
-        let tx = self.db.clone().begin().await.map_err(database_error)?;
+        let ready_key = store_key(&format!("archive/ready/{}", record.summary.export_sha256));
+        let mut tx = self.db.begin().await?;
         let result = async {
-            let mut response = tx.query("SELECT record_json FROM ONLY type::record('ls_sqlite_archive', $archive_id)")
-                .bind(("archive_id", record.summary.export_sha256.clone())).await.map_err(database_error)?.check().map_err(database_error)?;
-            let value = take_json(&mut response, 0)?;
-            if !value.is_null() {
-                if string(&value, "record_json")? != record_json { return Err(Error::IncompatibleStore); }
+            if let Some(stored) = tx.get(&ready_key).await? {
+                if stored != record_json.as_bytes() {
+                    return Err(Error::IncompatibleStore);
+                }
                 return Ok(true);
             }
-            tx.query(
-                "FOR $chunk IN $chunks { \
-                    LET $stored = (SELECT byte_count FROM ONLY type::record('ls_sqlite_archive_chunk', $chunk.sha256)); \
-                    IF $stored = NONE OR $stored.byte_count != $chunk.byte_count { THROW 'SQLite archive chunk missing'; }; \
-                }; \
-                CREATE type::record('ls_sqlite_archive', $archive_id) SET record_json = $record_json;",
-            ).bind(("chunks", serde_json::to_value(&record.chunks).map_err(|_| Error::Invalid("archive chunk serialization failed".into()))?))
-                .bind(("archive_id", record.summary.export_sha256.clone())).bind(("record_json", record_json))
-                .await.map_err(database_error)?.check().map_err(database_error)?;
+            // Immutable witnesses are committed with their payloads; publication need not reread the full archive.
+            for chunk in &record.chunks {
+                let witness_key = store_key(&format!("archive/chunk-meta/{}", chunk.sha256));
+                if tx.get(&witness_key).await?.as_deref()
+                    != Some(chunk.byte_count.to_be_bytes().as_slice())
+                {
+                    return Err(Error::IncompatibleStore);
+                }
+            }
+            tx.insert(ready_key, record_json.into_bytes()).await?;
             Ok(false)
-        }.await;
+        }
+        .await;
         match result {
             Ok(true) => {
-                tx.cancel().await.map_err(database_error)?;
+                tx.rollback().await?;
                 Ok(true)
             }
             Ok(false) => {
-                tx.commit().await.map_err(commit_error)?;
+                tx.commit().await?;
                 Ok(false)
             }
             Err(error) => {
-                let _ = tx.cancel().await;
+                let _ = tx.rollback().await;
                 Err(error)
             }
         }
@@ -1242,10 +1241,8 @@ mod tests {
         let path = directory.path().join("snapshot.ndjson");
         let bytes = fixture(vec![json!({"type":"text","value":"preserved"})]);
         std::fs::write(&path, &bytes).unwrap();
-        let mut daemon = crate::test_support::Daemon::start().await;
-        let store = Store::initialize_loopback(&daemon.endpoint, &daemon.token)
-            .await
-            .unwrap();
+        let mut database = crate::test_support::TestFixture::start().await;
+        let store = database.initialize().await;
         let receipt = store
             .archive_sqlite_export(&path, ImportLimits::default())
             .await
@@ -1279,10 +1276,8 @@ mod tests {
         );
         assert_eq!(std::fs::read(&restored).unwrap(), bytes);
         store.shutdown().await.unwrap();
-        daemon.crash_and_restart().await;
-        let store = Store::connect_loopback(&daemon.endpoint, &daemon.token)
-            .await
-            .unwrap();
+        database.restart().await;
+        let store = database.connect().await;
         let recovered = store
             .sqlite_archive(&receipt.archive_id)
             .await
@@ -1311,10 +1306,8 @@ mod tests {
                 .replace("original", "modified"),
         )
         .unwrap();
-        let daemon = crate::test_support::Daemon::start().await;
-        let store = Store::initialize_loopback(&daemon.endpoint, &daemon.token)
-            .await
-            .unwrap();
+        let database = crate::test_support::TestFixture::start().await;
+        let store = database.initialize().await;
         assert!(
             store
                 .archive_sqlite_export(&path, ImportLimits::default())
@@ -1339,8 +1332,41 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        store.db.query("UPDATE type::record('ls_sqlite_archive_chunk', $chunk_id) SET payload = 'tampered'")
-            .bind(("chunk_id", record.chunks[0].sha256.clone())).await.unwrap().check().unwrap();
+        let witness_key = store_key(&format!("archive/chunk-meta/{}", record.chunks[0].sha256));
+        let mut missing_witness = store.db.begin().await.unwrap();
+        missing_witness.delete(witness_key.clone()).await.unwrap();
+        missing_witness
+            .delete(store_key(&format!("archive/ready/{}", receipt.archive_id)))
+            .await
+            .unwrap();
+        missing_witness.commit().await.unwrap();
+        assert!(store.publish_archive(&record).await.is_err());
+        assert!(
+            store
+                .sqlite_archive(&receipt.archive_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let mut repaired_witness = store.db.begin().await.unwrap();
+        repaired_witness
+            .insert(
+                witness_key,
+                record.chunks[0].byte_count.to_be_bytes().to_vec(),
+            )
+            .await
+            .unwrap();
+        repaired_witness.commit().await.unwrap();
+        assert!(!store.publish_archive(&record).await.unwrap());
+        let mut corruption = store.db.begin().await.unwrap();
+        corruption
+            .put(
+                store_key(&format!("archive/chunk/{}", record.chunks[0].sha256)),
+                b"tampered".to_vec(),
+            )
+            .await
+            .unwrap();
+        corruption.commit().await.unwrap();
         let restored = directory.path().join("restored.ndjson");
         assert!(
             store
@@ -1370,10 +1396,8 @@ mod tests {
         let expected = validate_reader(BufReader::new(&mut file), limits, |_| Ok(())).unwrap();
         file.seek(SeekFrom::Start(0)).unwrap();
         std::fs::write(&path, changed).unwrap();
-        let daemon = crate::test_support::Daemon::start().await;
-        let store = Store::initialize_loopback(&daemon.endpoint, &daemon.token)
-            .await
-            .unwrap();
+        let database = crate::test_support::TestFixture::start().await;
+        let store = database.initialize().await;
         assert!(
             store
                 .archive_validated_file(file, expected.clone(), limits)

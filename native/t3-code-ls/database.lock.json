@@ -1,12 +1,17 @@
 {
-  "product": "SurrealDB",
-  "version": "4.0.0",
-  "sourceCommit": "284fe93afc851c3baec2c262c01289602021a70d",
-  "localStorageEngine": "SurrealKV",
-  "localDurability": "sync=every",
-  "linuxAmd64": {
-    "url": "https://github.com/surrealdb/surrealdb/releases/download/v4.0.0/surreal-v4.0.0.linux-amd64.tgz",
-    "sha256": "e910760179b9f13d0773ce98ac50f9a537051156365239284c2dc687adf3049d"
+  "product": "redb",
+  "version": "4.5.0",
+  "sourceCommit": "96ce31fe5cafcf735425a02f1781487a4287e2de",
+  "sourceUrl": "https://github.com/cberner/redb/tree/96ce31fe5cafcf735425a02f1781487a4287e2de",
+  "license": "MIT OR Apache-2.0",
+  "crate": {
+    "name": "redb",
+    "version": "4.5.0",
+    "url": "https://static.crates.io/crates/redb/redb-4.5.0.crate",
+    "sha256": "8b317ef681e18f6091efbfab532eaf924a135c492d9d0299d0fbfae07e92a39b"
   },
-  "futureDistributedStorage": "SurrealDS through SurrealDB Enterprise or Cloud Scale; separate paid licensing and deployment qualification required"
+  "concurrencyMode": "MultiWriter",
+  "durability": "Immediate",
+  "integrityCheckOnOpen": true,
+  "scope": "Multiple local processes may open one database file; one write transaction at a time. No replication, distributed active-active writes, or HA implementation."
 }

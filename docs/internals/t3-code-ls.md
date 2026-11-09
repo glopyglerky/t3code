@@ -28,8 +28,10 @@ remains in its current languages. Replacing those boundaries requires compiler
 or application work with its own runtime evidence. Renaming `.rs` files, wrapping
 the TypeScript app, or accepting a Cargo build cannot establish an all-Lust port.
 
-The verified compiler is the current `next` implementation, pinned in
-`lust-toolchain.json`. Its source also contains a C/zig release path for selected
+The native Lust compiler comes from `glopyglerky/lustr`'s `next` branch, pinned in
+`lust-toolchain.json`. The gate executes that compiler's native Lust engine;
+the coordinator's Cargo/rustc route does not qualify application code as Lust.
+Its source also contains a C/zig release path for selected
 Linux, macOS, and Windows targets. Those targets do not include iOS, Android, or
 browser WebAssembly. This fork has not qualified that release path and continues
 to use Cargo for release artifacts.
@@ -124,49 +126,46 @@ durable child deletions followed by project deletion, so a native project-plan
 failure preserves partial progress for retry. Claiming one transaction for the
 whole cascade would change upstream behavior and hide lost cleanup work.
 
-Source basis: [Lust's implementation contract](https://github.com/t3dotgg/lust-lang/blob/240e08d91d4aed0299639f6f11fd522912b248f9/README.md),
-[release target allowlist](https://github.com/t3dotgg/lust-lang/blob/240e08d91d4aed0299639f6f11fd522912b248f9/src/resolve/cfg.rs),
-and [C/zig release driver](https://github.com/t3dotgg/lust-lang/blob/240e08d91d4aed0299639f6f11fd522912b248f9/src/cc.rs).
+Source basis: [Lustr's implementation contract](https://github.com/glopyglerky/lustr/blob/a09efac9ab746de66d208978d5ad46b3df728a77/README.md),
+[release target allowlist](https://github.com/glopyglerky/lustr/blob/a09efac9ab746de66d208978d5ad46b3df728a77/src/resolve/cfg.rs),
+and [C/zig release driver](https://github.com/glopyglerky/lustr/blob/a09efac9ab746de66d208978d5ad46b3df728a77/src/cc.rs).
 
 ## Database decision
 
-The native authoritative database target is **SurrealDB 4.0.0**, using
-**SurrealKV** on a single node now and the supported **SurrealDS** distributed
-backend for a future active-active deployment. The database service and local
-storage engine are Rust. The application uses the database's authenticated
-network API so independent application processes share a service rather than
-opening the same local files. Local tests use `sync=every` and explicitly verify
-recovery after killing both the database process and its clients.
+The native storage engine is **redb 4.5.0**, a pure Rust embedded database
+licensed **MIT OR Apache-2.0**. This follows the maintainer's choice to use redb
+and avoid a commercial license or paid clustering requirement. The engine,
+crate checksum, and source commit are pinned in
+`native/t3-code-ls/database.lock.json`; `Cargo.lock` pins the actual dependency.
+There is one backend and no network database service.
 
-SurrealKV itself is not replicated HA. SurrealDS is available through SurrealDB
-Enterprise and Cloud Scale, with paid licensing required for that path. This
-choice accepts that future commercial dependency; it does not implement a
-cluster or claim that the free single-node engine provides active-active HA.
-The engine version, official Linux archive, and checksum are pinned in
-`native/t3-code-ls/database.lock.json`.
+The host opens files with `ConcurrencyMode::MultiWriter`, allowing independent
+local processes to use the same database. redb admits one write transaction at
+a time. Each durable commit uses `Durability::Immediate`. The global application
+revision remains part of every command transaction: a plan from a stale snapshot
+must fail even when it writes a different row. This protects predicates such as
+"no other project owns this workspace." Concurrent clients do not imply
+horizontal write scaling or a measured application throughput improvement.
 
-The choice preserves one query/transaction API when the storage deployment
-changes. SurrealDB's single-node SurrealKV configuration uses snapshot isolation,
-not general serializability. The application therefore compares and updates a
-global revision record inside every write transaction. Independent commands
-that read the same revision cannot both commit, even when they modify different
-projects. This prevents write skew from decisions such as "no other project owns
-this workspace." It also serializes successful commits across the entire store.
-Removing that bottleneck requires a separately tested partition/constraint
-design; concurrent clients alone are not evidence of higher throughput.
-SurrealDS accepts transactions at any node but routes commits through one
-sequencer with a durable acknowledgement from another zone. Adding nodes
-increases read/query capacity and failover options, not write capacity. This
-supports active application nodes; it does not promise horizontal write scaling.
+Multiprocess mode became stable in redb 4.5.0. Its locking protocol is not
+compatible with the experimental modes in 4.3/4.4, so cooperating processes must
+use the pinned version and dedicated database files. Local filesystem locking
+and flush semantics are required. A shared network filesystem is not a route to
+active-active HA. redb provides neither replication nor cross-machine consensus;
+those are outside this component's qualification. Existing engine data needs an
+explicit, validated migration and must never be opened as a redb file.
 
-Turso's Rust engine remains a plausible SQLite-compatible option for local
-applications. Its documented offline synchronization conflict resolution uses
-rollback/replay and last-push-wins behavior, which is not sufficient for this
-application's authoritative ownership and event-ordering contracts. CRDT stores
-or Iroh docs likewise do not replace a transactional event log. SurrealDB's
-PostgreSQL/MySQL compatibility layer does not make it a SQLite driver replacement.
-FTS5, SQLite JSON expressions, `INDEXED BY`, AUTOINCREMENT, migrations, savepoints,
-and SQLite-specific schemas all require repository work.
+Every open enables redb's committed-tree integrity verification. Without it,
+the default open path trusts clean files: a same-length change that leaves valid
+JSON can silently alter a projection. Verification rejects that corruption,
+including after a clean shutdown. It scans the committed data while holding the
+writer lock; existing read snapshots remain usable. This startup cost is part
+of the reliability contract.
+
+redb is a transactional key-value engine, not a SQLite SQL driver. Upstream FTS5,
+JSON expressions, `INDEXED BY`, AUTOINCREMENT, migrations, savepoints, and schemas
+still require repository-specific replacements. Platform caches and external
+SQLite file formats remain separate responsibilities.
 
 ### Implemented native transaction boundary
 
@@ -179,10 +178,10 @@ fails. Event and outbox IDs use create-only writes. The client distinguishes
 an explicit conflict from an unknown commit outcome and performs no blind
 automatic retry. Callers resolve uncertainty by the original receipt ID.
 
-The bounded JSONL client supports local authenticated loopback connections and
-TLS remote connections. Initialization is explicit, versioned, and limited to
-the native namespace/database. Read operations validate stored sizes before
-fetching payloads and reject oversized snapshots rather than truncating them.
+The bounded JSONL host takes a local file path. Initialization is explicit and
+versioned; ordinary open requires an existing compatible store. Read operations
+validate stored sizes before fetching payloads and reject oversized snapshots
+rather than truncating them.
 Project planning reads a revision-consistent snapshot of the indexed
 `project/` key range, so unrelated domains do not consume its allowance. This
 initial project snapshot is bounded to 16 MiB and 65,536 rows; it needs direct
@@ -233,14 +232,14 @@ committing stores. In particular, `EventSink.ts` atomically combines events,
 project/thread projections, command receipts, and outbox work; those participants
 must migrate together.
 
-| Database surface                                      | Current state                                           | Required work before replacement                                                                                 |
-| ----------------------------------------------------- | ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| Native event/projection/receipt/outbox store          | SurrealDB/SurrealKV with atomic revision-guarded writes | Domain repositories, indexed reads, outbox execution and application integration                                 |
-| Production server `statev2.sqlite`                    | Existing TypeScript/SQLite remains authoritative        | Migrate all transaction participants, typed row transforms, read parity, verified backup/restore and cutover     |
-| Mobile SQLite caches and preferences                  | Existing Expo/platform adapters                         | Cache schema and lifecycle port; local offline storage is a different role from the server's authoritative store |
-| Relay PostgreSQL and Cloudflare Durable Object SQLite | Existing hosted infrastructure                          | Rewrite the relay's account/session/device/delivery repositories and deploy its replacement                      |
-| Browser IndexedDB and nonexportable key storage       | Existing browser adapters                               | Preserve browser lifecycle and key protection; a server database cannot replace platform key storage             |
-| External SQLite formats read by integrations          | Remain readers of their owners' formats                 | Keep SQLite import/read adapters where interoperability requires them                                            |
+| Database surface                                      | Current state                                    | Required work before replacement                                                                                 |
+| ----------------------------------------------------- | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| Native event/projection/receipt/outbox store          | redb with atomic revision-guarded writes         | Domain repositories, indexed reads, outbox execution and application integration                                 |
+| Production server `statev2.sqlite`                    | Existing TypeScript/SQLite remains authoritative | Migrate all transaction participants, typed row transforms, read parity, verified backup/restore and cutover     |
+| Mobile SQLite caches and preferences                  | Existing Expo/platform adapters                  | Cache schema and lifecycle port; local offline storage is a different role from the server's authoritative store |
+| Relay PostgreSQL and Cloudflare Durable Object SQLite | Existing hosted infrastructure                   | Rewrite the relay's account/session/device/delivery repositories and deploy its replacement                      |
+| Browser IndexedDB and nonexportable key storage       | Existing browser adapters                        | Preserve browser lifecycle and key protection; a server database cannot replace platform key storage             |
+| External SQLite formats read by integrations          | Remain readers of their owners' formats          | Keep SQLite import/read adapters where interoperability requires them                                            |
 
 Future active-active application work also includes durable cross-node event
 notification, outbox leases/fencing, provider-session ownership, workspace
@@ -250,13 +249,10 @@ mechanisms. Database multiwriter support does not make the current application
 an active-active system. No performance gain, HA result, complete database
 replacement, or full application port is claimed by this component.
 
-Sources: [SurrealDB architecture](https://surrealdb.com/docs/learn/data-models/architecture),
-[SurrealDS commit and scaling model](https://surrealdb.com/docs/manage/enterprise/product/surrealds),
-[deployment models](https://surrealdb.com/docs/manage/self-hosted/deployment-models),
-[Enterprise licensing](https://surrealdb.com/docs/manage/enterprise/product/licensing),
-[transactions](https://surrealdb.com/docs/learn/querying/concepts-and-guides/transactions),
-[SQL compatibility](https://surrealdb.com/docs/reference/rest-api/sql-compatibility),
-and [Turso sync conflict resolution](https://docs.turso.tech/sync/conflict-resolution).
+Sources: [redb 4.5.0 crate and licenses](https://docs.rs/crate/redb/4.5.0),
+[redb 4.5.0 changelog](https://docs.rs/crate/redb/4.5.0/source/CHANGELOG.md),
+[concurrency mode](https://docs.rs/redb/4.5.0/redb/enum.ConcurrencyMode.html),
+and [durability](https://docs.rs/redb/4.5.0/redb/enum.Durability.html).
 
 ## Admission and application authority
 

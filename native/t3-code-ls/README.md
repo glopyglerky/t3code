@@ -80,12 +80,12 @@ contract validators. The production project service still owns locks, enrichment
 SQLite events, projections, and command receipts. Unicode grapheme segmentation
 remains an explicit adapter input for the monogram-length rule.
 
-The native persistence component uses SurrealDB 4.0.0 with SurrealKV through the
-database's authenticated network API. Independent application processes share
-one database service. A revision check commits events, projections, command
+The native persistence component embeds redb 4.5.0, a Rust database licensed
+under MIT or Apache-2.0. Independent local application processes share one
+file through redb's MultiWriter mode. A revision check commits events, projections, command
 receipts, and outbox entries atomically, and rejects stale plans. The new
 `t3-code-ls-project-store` executable plans project commands and projects their
-rows through Lust. The Cargo-built `t3-code-ls-db` service validates the complete
+rows through Lust. The Cargo-built `t3-code-ls-db` host validates the complete
 response and persists native project creation and metadata updates. This is a
 standalone native storage path; the existing production server still uses SQLite.
 Its thread lifecycle and transaction participants must migrate together before
@@ -272,65 +272,39 @@ implementations. The verified executable is Linux x86-64.
 
 ## Run the native database component
 
-The selected database and binary checksum are pinned in
-[database.lock.json](./database.lock.json). SurrealDB and SurrealKV are written
-in Rust. One authenticated database service owns the local SurrealKV directory;
-application processes connect over WebSocket instead of opening the files
-independently. This supports concurrent clients on one node. Future active-active
-deployment uses SurrealDB's distributed SurrealDS backend, available through
-Enterprise or Cloud Scale. That requires paid licensing and its own deployment
-qualification; the local SurrealKV configuration is not a replicated HA cluster.
-SurrealDS accepts transactions on any node but uses one commit sequencer; adding
-nodes does not increase write capacity.
+The engine version, source identity, license, and crate checksum are pinned in
+[database.lock.json](./database.lock.json) and `Cargo.lock`. redb is embedded in
+the host executable; it needs no database daemon, network endpoint, or paid
+feature. Multiple local processes can open the same file using the pinned
+`MultiWriter` mode. redb serializes write transactions. This is local process
+concurrency, not replicated or distributed active-active HA.
 See the [database decision](../../docs/internals/t3-code-ls.md#database-decision).
 
-From `native/t3-code-ls`, build the Cargo client and use the Lust-built projector
+From `native/t3-code-ls`, build the host and use the Lust-built projector
 from the verification gate:
 
 ```sh
 cargo build --locked --release -p t3-code-ls-storage --bin t3-code-ls-db
-export T3_CODE_LS_SURREAL_EXECUTABLE=/absolute/path/to/verified/surreal
 export T3_CODE_LS_PROJECT_STORE_EXECUTABLE="$PWD/target/lust-bin/t3-code-ls-project-store"
-```
-
-Start the pinned database with a new, dedicated data directory. Set a username
-and strong password in `SURREAL_USER` and `SURREAL_PASS`; credentials are passed
-through the environment rather than process arguments:
-
-```sh
-"$T3_CODE_LS_SURREAL_EXECUTABLE" start \
-  --bind 127.0.0.1:8000 --deny-net --deny-scripting \
-  'surrealkv:///absolute/path/to/new-t3-ls-database?sync=every'
-```
-
-`sync=every` requests durable acknowledgement for each commit. The tests kill
-and reopen the database process after acknowledged writes; they do not simulate
-a machine losing power or qualify filesystem and hardware behavior.
-
-In a separate shell with the same credentials, obtain a token and initialize
-the native schema explicitly. This command creates only the fixed
-`t3_code_ls` namespace and `state` database:
-
-```sh
-export T3_CODE_LS_DATABASE_TOKEN="$(node --input-type=module -e '
-const response = await fetch("http://127.0.0.1:8000/signin", {
-  method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" },
-  body: JSON.stringify({ user: process.env.SURREAL_USER, pass: process.env.SURREAL_PASS })
-});
-if (!response.ok) throw new Error("Database authentication failed");
-const { token } = await response.json();
-if (typeof token !== "string") throw new Error("Missing database token");
-process.stdout.write(token);
-')"
 printf '%s\n' '{"operation":"snapshot"}' | \
-  target/release/t3-code-ls-db initialize-loopback ws://127.0.0.1:8000
+  target/release/t3-code-ls-db initialize-local /absolute/path/to/new-state.redb
 ```
 
-Subsequent clients use `loopback ws://127.0.0.1:8000`. Loopback mode requires a
-numeric loopback address and token. `remote wss://host` requires TLS, a token,
-and an already initialized compatible database. Neither connect mode creates
-or resets the schema. Root credentials above are for local schema bootstrap;
-a deployed application should use a database-scoped service identity.
+Use a dedicated new file on a local filesystem. Subsequent clients open it with
+`local /absolute/path/to/new-state.redb`. Initialization is explicit; ordinary
+open does not create or reset a store. Existing SQLite files and the prior
+native engine's data are not automatically converted. All cooperating processes
+must use the pinned redb version: its multiprocess locking is incompatible with
+the experimental modes in redb 4.3 and 4.4. Do not put the file on a network
+filesystem or copy a live file as a backup.
+
+Every open verifies the committed tree checksums before exposing application
+data. That scans the database and holds the writer lock during verification;
+existing readers retain their snapshots. Commits explicitly use redb's
+`Immediate` durability. The gate kills every
+process holding the database and verifies acknowledged state after reopening.
+That verifies process-crash recovery; it does not simulate power loss or qualify
+the storage device's flush behavior.
 
 The CLI consumes one JSON request per line and emits one JSON response per
 line. A native project command looks like this:
@@ -410,7 +384,7 @@ This recovery archive does not activate imported rows as native projections,
 rebuild a live SQLite database, or change the application's database selector.
 The original SQLite data remains the application's authority until a complete
 repository migration, read comparison, and cutover/recovery procedure are
-implemented. The exporter is a Node SQLite adapter and the database SDK is
+implemented. The exporter is a Node SQLite adapter and the database host is
 Cargo-built Rust; neither is qualified as Lust code.
 
 ## Connect two machines
@@ -500,11 +474,11 @@ node tools/check-provider.mjs target/debug/t3-code-ls-provider
 python3 -B -m unittest discover -s tools -p 'test_*.py'
 ```
 
-For the independent Lust gate, check out `t3dotgg/lust-lang` at the exact revision
+For the independent Lust gate, check out `glopyglerky/lustr` at the exact revision
 in [lust-toolchain.json](./lust-toolchain.json), then run:
 
 ```sh
-python3 tools/check-lust.py --source /absolute/path/to/lust-lang --artifacts target/lust-bin
+python3 tools/check-lust.py --source /absolute/path/to/lustr --artifacts target/lust-bin
 tools/server-test-runtime/node_modules/.bin/effect-tsgo tsrs --noEmit --project tools/provider-tsconfig.json
 node tools/check-provider-adapter.mjs "$PWD/target/lust-bin/t3-code-ls-provider"
 tools/server-test-runtime/node_modules/.bin/effect-tsgo tsrs --noEmit --project tools/recovery-tsconfig.json
@@ -522,6 +496,14 @@ ignored tests, source changes during verification, and mismatched behavior. The
 receipt records hashes of the exact Git blobs, binaries, and command results at
 `target/lust-proof.json`. There is no Cargo fallback for these Lust checks.
 
+The full Rust database host and Iroh adapter use the pinned Rust toolchain.
+A [blueFe](https://github.com/glopyglerky/blueFe) compiler must be a produced
+stage1 sysroot with its source identity, standard libraries, test harness, and
+rustdoc. Select its `RUSTC` and `RUSTDOC` explicitly through the Lustr coordinator
+and rerun the same crate and process gates before adopting it. The downloaded
+stage0 compiler and a successful compile alone do not qualify that route.
+No build-speed improvement is claimed for an unmeasured compiler selection.
+
 The dedicated CI additionally typechecks the server-policy integration and
 executes the actual `CommandPolicyV2` layer with the real Effect runtime. Those
 checks cover native selection, success and refusal mapping, concurrent calls,
@@ -538,18 +520,16 @@ CI retains these verified components and their proof receipts as an artifact,
 including the dispatch, SQLite recovery, and guest-share integration receipts.
 They are development components, not desktop or mobile installers.
 
-The database gate requires the pinned SurrealDB binary; its integration tests
-fail if the executable is absent rather than silently skipping:
+The database gate uses real redb files and independent host processes:
 
 ```sh
-export T3_CODE_LS_SURREAL_EXECUTABLE=/absolute/path/to/verified/surreal
 cargo clippy --locked -p t3-code-ls-storage --all-targets -- -D warnings
 cargo test --locked -p t3-code-ls-storage --all-targets -- --test-threads=2
 cargo build --locked -p t3-code-ls-storage --bin t3-code-ls-db
 node --disable-warning=ExperimentalWarning --test tools/export-sqlite-state.test.mjs
 node --disable-warning=ExperimentalWarning tools/check-database.mjs \
   "$PWD/target/debug/t3-code-ls-db" "$PWD/target/lust-bin/t3-code-ls-project-store" \
-  "$T3_CODE_LS_SURREAL_EXECUTABLE" "$PWD/target/database-proof.json"
+  "$PWD/target/database-proof.json"
 ```
 
 The dedicated CI database job consumes the exact Lust artifact from the same

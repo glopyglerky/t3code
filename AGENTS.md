@@ -17,6 +17,17 @@ Do not describe the upstream TypeScript UI or Cargo-built Iroh adapter as a
 completed Lust recreation. Track incomplete application, UI, compiler, Connect,
 and mobile work explicitly until the relevant execution checks pass.
 
+Use the maintainer's `glopyglerky/lustr` compiler at the pin in
+`native/t3-code-ls/lust-toolchain.json`. Qualify a produced `glopyglerky/blueFe`
+compiler against the actual application tests before selecting it for full Rust
+builds; a downloaded bootstrap compiler is not a blueFe build. Use
+`glopyglerky/gitr` for repository operations only when those operations are
+implemented and qualified. Keep compiler speed claims tied to measurements.
+
+Native storage uses redb. Do not reintroduce a database whose required features
+depend on paid or business licensing. Local multiwriter access does not qualify
+distributed active-active HA.
+
 Preserve the separate `codex/archived-thread-subscribe` and
 `codex/mobile-catalog-durable-backup` branches. Maintain `main` through tested,
 non-forced updates against published nightlies. Keep upstream checks every two
