@@ -4,10 +4,11 @@ The default tree contains Rust implementation only. Preserve licenses, provenanc
 passive assets, data fixtures and Git history. Do not restore foreign executable
 code, embed it in Rust strings, or use language-classification overrides.
 
-The root Cargo workspace contains decision/protocol tools, Unix provider and
-structured-generation runtimes, redb storage and Iroh transport. It is not a
-complete application. Web, Electron, mobile, Node server and Windows provider
-fallbacks have been retired without replacements. Never claim full application,
+The root Cargo workspace contains an authenticated native API/CLI, durable
+project/thread services, Codex sessions, decision/protocol tools, Unix structured
+generation, redb storage and Iroh transport. It is not a complete application.
+Web, Electron, mobile, Node server and Windows provider fallbacks have been
+retired; the native service subset does not replace their full behavior. Never claim full application,
 platform or whole-stack memory-safety qualification from component tests.
 
 Build with the pinned qualified Lustr coordinator and produced BlueFe rustc and
@@ -60,7 +61,7 @@ or add speculative attribution comments. Carry this rule into worker handoffs.
 
 ## Runtime and storage safety
 
-- Use GitHub repositories and the hosted workspace for implementation and qualification. Do not discover, connect to, or depend on the maintainer's personal infrastructure.
+- Use GitHub repositories and the hosted workspace for implementation and qualification.
 - Use controlled provider fixtures for qualification, without real provider turns or personal credentials.
 - Use the session's verified model/settings; reasoning above xhigh and non-Standard speed are prohibited.
 - Run authorized workers through T3's supported lifecycle APIs. Do not spawn workers for a bounded task assigned to work alone.

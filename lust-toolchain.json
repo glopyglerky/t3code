@@ -10,5 +10,11 @@
   "packaged_native_sha256": {
     "lust": "e804d8b9834337ed4b14c7aa2eae251372f995f51c43de0cbfc123ebe29ba163",
     "lust-core": "465cc9afbb8f7ff4a2667b05b7827fe87de4091059077c81c6b55e8676cbd885"
+  },
+  "source_build": {
+    "helper": "tools/src/bin/t3code-ls-bootstrap.rs",
+    "bluefe_revision": "7005dc02c9fb6674380eade443022bbc04215276",
+    "stage0": "nightly-2026-11-03",
+    "qualification": "Source-built payload hashes and execution evidence are recorded per workflow run. packaged_native_sha256 identifies the earlier packaged subset compiler, not newly built binaries."
   }
 }

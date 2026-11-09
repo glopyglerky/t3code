@@ -1,0 +1,37 @@
+[package]
+name = "t3-code-ls-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+default-run = "t3-code-ls-app"
+
+[dependencies]
+bytes = "=1.12.1"
+chrono = { version = "=0.4.45", default-features = false, features = ["clock"] }
+clap = { version = "=4.6.7", features = ["derive"] }
+getrandom = "=0.4.3"
+http-body-util = "=0.1.5"
+hyper = { version = "=1.12.0", features = ["server", "client", "http1"] }
+hyper-util = { version = "=0.1.21", features = ["tokio"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+t3-code-ls-core = { path = "../core" }
+t3-code-ls-storage = { path = "../storage" }
+tokio = { version = "=1.54.1", features = ["macros", "rt-multi-thread", "sync", "net", "io-util", "time", "signal"] }
+
+[dev-dependencies]
+tempfile = "=3.27.0"
+
+[[bin]]
+name = "t3-code-ls-app"
+path = "src/main.rs"
+
+[[bin]]
+name = "t3-code-ls-provider-fixture"
+path = "tests/support/codex_fixture.rs"
+test = false
+
+[lints]
+workspace = true

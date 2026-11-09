@@ -397,7 +397,9 @@ fn build_native_compiler(lustr: &Path, sysroot: &Path, work: &Path) -> Result<()
     fs::create_dir_all(tinycc.parent().ok_or("TinyCC source needs a parent")?)?;
     fetch_source(&tinycc, "https://github.com/TinyCC/tinycc.git", TINYCC, 1)?;
     let prefix = native.join("third_party/tcc");
-    run(Command::new(tinycc.join("configure"))
+    // TinyCC detects an in-tree build from the spelling of $0. An absolute
+    // configure path makes it copy its Makefiles onto themselves and fail.
+    run(Command::new("./configure")
         .current_dir(&tinycc)
         .arg(format!("--prefix={}", prefix.display())))?;
     run(Command::new("make").current_dir(&tinycc).arg("-j2"))?;
