@@ -3,12 +3,12 @@
   "upstream": {
     "repository": "pingdotgg/t3code",
     "channel": "nightly",
-    "release_id": 438446495,
-    "tag": "v0.1.8-nightly.20261108.4380",
-    "published_at": "2026-11-08T18:48:01Z",
-    "release_url": "https://github.com/pingdotgg/t3code/releases/tag/v0.1.8-nightly.20261108.4380",
-    "commit": "ade473018d32003658b7d38693e083ee2e314bd8",
-    "root_tree": "107c4f087f85dd137429e3d441ab770fd4b2a67b"
+    "release_id": 438639042,
+    "tag": "v0.1.8-nightly.20261109.4392",
+    "published_at": "2026-11-09T01:00:20Z",
+    "release_url": "https://github.com/pingdotgg/t3code/releases/tag/v0.1.8-nightly.20261109.4392",
+    "commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+    "root_tree": "ccf94b3b8b4e382d76cf50140810a0e796d3be75"
   },
   "qualification": {
     "status": "unqualified",
@@ -20,33 +20,33 @@
   "source_surfaces": {
     "server": {
       "path_prefixes": ["apps/server/"],
-      "entries": 1593,
-      "inventory_sha256": "18be3653924fc7cb16eabf309d327ed96dce138c5be45c331eedf2d1b05e79ee"
+      "entries": 1600,
+      "inventory_sha256": "d6991ddd0ae2fc5b254688fc349c02ff9991d7d600e53bd9e89eed18ae50778b"
     },
     "contracts": {
       "path_prefixes": ["packages/contracts/"],
       "entries": 110,
-      "inventory_sha256": "56c2f28b4cea50f370e9e2baf09ff12cbcaccaff1d04e402d98ea0b2de3b4bb0"
+      "inventory_sha256": "298584f222b7683d581855244cc035b767f3acf7604b09dfa26ba8160999fea3"
     },
     "client_runtime": {
       "path_prefixes": ["packages/client-runtime/"],
       "entries": 396,
-      "inventory_sha256": "f21a743e6ffcc30c0eab299ddb014d1d778d32ff993ff62848ccea1f84260d93"
+      "inventory_sha256": "a48e1f4f6d9a08d791dc622c9ba63a98fa68f07f1588088cd00ce2b7321d13b8"
     },
     "web": {
       "path_prefixes": ["apps/web/"],
-      "entries": 1920,
-      "inventory_sha256": "8f594525833c3ad3b1544dfdf14cceb7166016a35b1d18294c2c0dfd45ec85fc"
+      "entries": 1917,
+      "inventory_sha256": "2b70cf5da894b02d25a9337b1d4a050f2bbb25b2cd963e2376fec19eabd0e87e"
     },
     "desktop": {
       "path_prefixes": ["apps/desktop/"],
       "entries": 293,
-      "inventory_sha256": "e21cfc3c6d4266c3afc43b2c58d10aa26ed0683a24234ed38f64d49a05c2b74c"
+      "inventory_sha256": "5f2d34e114f8d270481bccf0b4aac4f86a7b4894133f8499ca10aae9851ca6fe"
     },
     "mobile": {
       "path_prefixes": ["apps/mobile/"],
-      "entries": 1693,
-      "inventory_sha256": "0eadc28c8dde5e636852f38cb671c4952f6ab93c9de22453689ddde3a3670b7d"
+      "entries": 1700,
+      "inventory_sha256": "5915dbf0b3322b39f5bbe135c2eb00d8fd50d092c4b5911723749d22c06476df"
     },
     "connect": {
       "path_prefixes": [
@@ -61,7 +61,7 @@
         "packages/contracts/src/relay"
       ],
       "entries": 245,
-      "inventory_sha256": "a4b4930d7cbe6c316922e986a9e10acc1cc50bf9d62dd4970288145db1fe9e68"
+      "inventory_sha256": "54c33466c69b0ba2509e78723c66fa4b1be2ad94dab4f91892106bffb123b849"
     },
     "providers": {
       "path_prefixes": [
@@ -75,7 +75,7 @@
     "shared": {
       "path_prefixes": ["packages/shared/"],
       "entries": 237,
-      "inventory_sha256": "6ef3ac25888bfac0156845f37a74d6298ba264e7ee73962de8c5bf043684a7c0"
+      "inventory_sha256": "f63b7806baadd17829dbe2be125666a4ba813ad201915802cf9bff19b596ac9e"
     }
   }
 }

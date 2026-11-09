@@ -3,7 +3,7 @@
 
 Example, from the repository root:
   python3 native/t3-code-ls/tools/verify-upstream.py \
-    --archive /tmp/t3-0.1.8-nightly.20261108.4380-linux-x64.tar.gz \
+    --archive /tmp/t3-0.1.8-nightly.20261109.4392-linux-x64.tar.gz \
     --output /tmp/t3-code-ls-upstream-verification.json
 
 This runs real processes and local sockets; unit-test discovery must not run it.
@@ -41,10 +41,10 @@ from typing import Any, Callable
 from urllib.parse import urlsplit
 
 
-VERSION = "0.1.8-nightly.20261108.4380"
+VERSION = "0.1.8-nightly.20261109.4392"
 TAG = "v" + VERSION
-COMMIT = "ade473018d32003658b7d38693e083ee2e314bd8"
-ARCHIVE_SHA256 = "f74b9d7157a7aa9468be39f06951e30669fb2ea36e4ad118449109e409b8d74e"
+COMMIT = "521ac7c218b3faa74281fb72fc36ce74a0951fb3"
+ARCHIVE_SHA256 = "bf62906d81fa9a641d2f512d9082e71a77a86afc078b46c2c3a28a9462d9a55a"
 RELEASE_URL = "https://github.com/pingdotgg/t3code/releases/tag/" + TAG
 BUNDLE_NAME = "t3-" + VERSION + "-linux-x64"
 READ_SCOPE = "orchestration:read"
