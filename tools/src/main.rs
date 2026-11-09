@@ -225,6 +225,9 @@ fn build() -> Result<()> {
         if value["reason"] != "compiler-artifact" {
             continue;
         }
+        if value["target"]["name"] == "t3-code-ls-provider-fixture" {
+            continue;
+        }
         if let Some(executable) = value["executable"].as_str() {
             let input = Path::new(executable);
             let name = input.file_name().ok_or("missing executable name")?;

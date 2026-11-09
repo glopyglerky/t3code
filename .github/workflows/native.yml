@@ -1,0 +1,88 @@
+name: Native application with source-built Lustr and BlueFe
+
+on:
+  push:
+    branches: [main, 'codex/t3code-ls-native-*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      GIT_TERMINAL_PROMPT: '0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Reserve space on the disposable hosted runner
+        run: |
+          echo "T3_CODE_LS_BOOTSTRAP_DIR=$RUNNER_TEMP/t3-bluefe" >> "$GITHUB_ENV"
+          echo "T3_CODE_LS_TOOLCHAIN=$RUNNER_TEMP/t3-toolchain" >> "$GITHUB_ENV"
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h "$RUNNER_TEMP"
+
+      - name: Compile the source bootstrap coordinator
+        run: |
+          rustup toolchain install nightly-2026-11-03 --profile minimal
+          rustc +nightly-2026-11-03 --edition=2024 tools/src/bin/t3code-ls-bootstrap.rs -o "$RUNNER_TEMP/t3-bootstrap"
+          rustc +nightly-2026-11-03 --edition=2024 --test tools/src/bin/t3code-ls-bootstrap.rs -o "$RUNNER_TEMP/t3-bootstrap-tests"
+          "$RUNNER_TEMP/t3-bootstrap-tests"
+
+      - name: Restore the produced compiler payload
+        id: compiler-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ env.T3_CODE_LS_TOOLCHAIN }}
+          key: bluefe-ubuntu24-x64-${{ hashFiles('tools/src/bin/t3code-ls-bootstrap.rs') }}
+          # Migrate the first source-built payload without changing its runtime hashes.
+          restore-keys: bluefe-ubuntu24-x64-a5e6c6e44ce94dbe65b79381195c5c9666956323c06763d1361fed2075f80138
+
+      - name: Validate a restored compiler before using it
+        if: steps.compiler-cache.outputs.cache-matched-key != ''
+        run: '"$RUNNER_TEMP/t3-bootstrap" --restore "$T3_CODE_LS_TOOLCHAIN"'
+
+      - name: Build pinned BlueFe and Lustr sources
+        if: steps.compiler-cache.outputs.cache-matched-key == ''
+        run: '"$RUNNER_TEMP/t3-bootstrap"'
+
+      - name: Save the verified compiler payload
+        if: steps.compiler-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ env.T3_CODE_LS_TOOLCHAIN }}
+          key: bluefe-ubuntu24-x64-${{ hashFiles('tools/src/bin/t3code-ls-bootstrap.rs') }}
+
+      - name: Fetch the immutable upstream behavior reference
+        run: git fetch --no-tags --depth=1 https://github.com/pingdotgg/t3code.git 521ac7c218b3faa74281fb72fc36ce74a0951fb3
+
+      - name: Test the application with the produced compiler
+        run: |
+          export CARGO_ENCODED_RUSTFLAGS=$'--sysroot\x1f'"$T3_CODE_LS_TOOLCHAIN"
+          "$T3_CODE_LS_TOOLCHAIN/bin/lustr" --bluefe-root "$T3_CODE_LS_TOOLCHAIN" test --locked --workspace --all-targets
+          "$T3_CODE_LS_TOOLCHAIN/bin/lustr" --bluefe-root "$T3_CODE_LS_TOOLCHAIN" run --locked -p t3code-ls-tools -- check-source
+          "$T3_CODE_LS_TOOLCHAIN/bin/lustr" --bluefe-root "$T3_CODE_LS_TOOLCHAIN" run --locked -p t3code-ls-tools -- check-upstream-readme
+
+      - name: Retain compiler provenance
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: source-built-toolchain-proof
+          path: |
+            ${{ env.T3_CODE_LS_TOOLCHAIN }}/toolchain-proof.json
+            ${{ env.T3_CODE_LS_TOOLCHAIN }}/source-identity.txt
+            ${{ env.T3_CODE_LS_TOOLCHAIN }}/payload.sha256
+          if-no-files-found: ignore
+          retention-days: 7

@@ -1,5 +1,6 @@
 [package]
 name = "t3code-ls-tools"
+default-run = "t3code-ls-tools"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

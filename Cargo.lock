@@ -2841,6 +2841,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "t3-code-ls-app"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "chrono",
+ "clap",
+ "getrandom 0.4.3",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "serde",
+ "serde_json",
+ "t3-code-ls-core",
+ "t3-code-ls-storage",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "t3-code-ls-core"
 version = "0.1.0"
 dependencies = [

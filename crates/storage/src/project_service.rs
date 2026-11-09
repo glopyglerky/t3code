@@ -137,10 +137,26 @@ async fn run_planner(executable: &Path, request: &Value) -> Result<Value, Error>
     serde_json::from_str(body).map_err(|_| invalid("invalid planner JSON response"))
 }
 
-/// Executes native project metadata commands; the upstream application has a separate store.
+/// Execute the same planner in the full Rust application, without a subprocess boundary.
+pub async fn execute_project_native(
+    store: &Store,
+    request: ProjectRequest,
+) -> Result<CommitOutcome, Error> {
+    execute_project_with(store, None, request).await
+}
+
+/// Qualify an independently compiled native Lust planner against the same transaction contract.
 pub async fn execute_project(
     store: &Store,
     planner: &Path,
+    request: ProjectRequest,
+) -> Result<CommitOutcome, Error> {
+    execute_project_with(store, Some(planner), request).await
+}
+
+async fn execute_project_with(
+    store: &Store,
+    planner: Option<&Path>,
     request: ProjectRequest,
 ) -> Result<CommitOutcome, Error> {
     let command = validate_command(&request.command)?;
@@ -214,7 +230,26 @@ pub async fn execute_project(
         "now": request.now,
         "monogramGraphemeCount": monogram_graphemes(&command),
     });
-    let result = run_planner(planner, &planner_input).await?;
+    let result = match planner {
+        Some(planner) => run_planner(planner, &planner_input).await?,
+        None => {
+            let encoded = serde_json::to_string(&planner_input)
+                .map_err(|_| invalid("invalid project input encoding"))?;
+            let input = core_json::parse_with_limits(
+                &encoded,
+                core_json::Limits {
+                    max_bytes: project_persistence_wire::MAX_FRAME_BYTES,
+                    max_depth: 64,
+                    max_values: 262_144,
+                },
+            )
+            .map_err(|_| invalid("invalid project planner input"))?;
+            let result = project_persistence_wire::evaluate(&input)
+                .map_err(|_| invalid("invalid project command or stored projection"))?;
+            serde_json::from_str(&core_json::stringify(&result))
+                .map_err(|_| invalid("invalid project planner result"))?
+        }
+    };
     let mut events = Vec::new();
     let mut projections = Vec::new();
     if let Some(accepted) = result.get("ok") {

@@ -6,6 +6,7 @@ pub mod outbox;
 pub mod project_service;
 pub mod project_validation;
 pub mod sqlite_import;
+pub mod thread_service;
 #[cfg(test)]
 mod test_support;
 
