@@ -126,12 +126,15 @@ pub async fn serve(
     let permits = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     let mut connections = JoinSet::new();
     tokio::pin!(shutdown);
-    loop {
+    let result = loop {
         tokio::select! {
-            _ = &mut shutdown => break,
+            _ = &mut shutdown => break Ok(()),
             _ = connections.join_next(), if !connections.is_empty() => {},
             accepted = listener.accept() => {
-                let (stream, _) = accepted?;
+                let (stream, _) = match accepted {
+                    Ok(accepted) => accepted,
+                    Err(error) => break Err(error),
+                };
                 let Ok(permit) = permits.clone().try_acquire_owned() else { continue };
                 let app = app.clone();
                 let token = token.clone();
@@ -147,9 +150,9 @@ pub async fn serve(
                 });
             }
         }
-    }
+    };
     connections.shutdown().await;
-    Ok(())
+    result
 }
 
 pub async fn request(address: SocketAddr, token: &Token, value: Value) -> io::Result<Value> {

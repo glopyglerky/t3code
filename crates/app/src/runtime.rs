@@ -723,14 +723,15 @@ impl ProviderHub {
     pub async fn close(&self, thread: &str) -> Result<Value> {
         identifier(thread)?;
         let mut actors = self.actors.lock().await;
-        let Some(actor) = actors.remove(thread) else {
+        let Some(actor) = actors.get_mut(thread) else {
             return Ok(row(&self.store.snapshot().await?, &session_key(thread))
                 .cloned()
                 .unwrap_or(Value::Null));
         };
         actor.stop.store(true, Ordering::Release);
-        drop(actor.sender);
-        let _ = actor.task.await;
+        // Keep the handle owned by the hub if this caller is cancelled while joining.
+        let _ = (&mut actor.task).await;
+        let actor = actors.remove(thread).expect("joined actor remains owned");
         let result = close_owned(
             &self.store,
             thread,

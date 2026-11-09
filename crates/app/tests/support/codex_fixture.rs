@@ -220,11 +220,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let line = line?;
         if !line.trim().is_empty() {
             let message: Value = serde_json::from_str(&line)?;
-            serde_json::to_writer(
-                &mut received,
-                &json!({"pid":std::process::id(),"message":message}),
-            )?;
-            writeln!(received)?;
+            let mut record =
+                serde_json::to_vec(&json!({"pid":std::process::id(),"message":message}))?;
+            record.push(b'\n');
+            received.write_all(&record)?;
             received.flush()?;
             peer.handle(message, &scenario)?;
         }
