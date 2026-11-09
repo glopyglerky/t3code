@@ -55,10 +55,10 @@
         "scripts/verify-background-live.ts",
         "src/provider/testFixtures/*.mjs",
         // CI qualifies native storage adapters before production storage selects them.
-        "../../native/t3-code-ls/tools/check-native-database.mjs",
-        "../../native/t3-code-ls/tools/check-native-outbox-worker.mjs",
-        "../../native/t3-code-ls/tools/check-maintenance-adapter.mjs",
-        "../../native/t3-code-ls/tools/check-generation-adapter.mjs",
+        "../../tools/check-native-database.mjs",
+        "../../tools/check-native-outbox-worker.mjs",
+        "../../tools/check-maintenance-adapter.mjs",
+        "../../tools/check-generation-adapter.mjs",
         // graphqlgen reads its config.
         "graphql.config.ts",
       ],

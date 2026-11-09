@@ -542,6 +542,10 @@
     "./speech": {
       "types": "./src/speech.ts",
       "import": "./src/speech.ts"
+    },
+    "./nativeExecutable": {
+      "types": "./src/nativeExecutable.ts",
+      "import": "./src/nativeExecutable.ts"
     }
   },
   "scripts": {

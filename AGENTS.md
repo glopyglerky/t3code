@@ -9,8 +9,8 @@ The repository ID is `1352693431`; resolve that identity when the repository is
 renamed instead of assuming its old URL still names the intended repository.
 
 The root README describes this fork. Keep the upstream README body byte-for-byte
-in `native/t3-code-ls/upstream-README.md` at the immutable source revision in
-`native/t3-code-ls/upstream.lock.json`. Use the README synchronization tool when
+in `upstream-README.md` at the immutable source revision in
+`upstream.lock.json`. Use the README synchronization tool when
 updating the nightly baseline. Maintain decisions and layout exceptions in
 `docs/internals/t3-code-ls.md`.
 
@@ -21,7 +21,7 @@ completed Lust recreation. Track incomplete application, UI, compiler, Connect,
 and mobile work explicitly until the relevant execution checks pass.
 
 Use the maintainer's `glopyglerky/lustr` compiler at the pin in
-`native/t3-code-ls/lust-toolchain.json`. Qualify a produced `glopyglerky/blueFe`
+`lust-toolchain.json`. Qualify a produced `glopyglerky/blueFe`
 compiler against the actual application tests before selecting it for full Rust
 builds; a downloaded bootstrap compiler is not a blueFe build. Use
 `glopyglerky/gitr` for repository operations only when those operations are

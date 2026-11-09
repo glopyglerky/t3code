@@ -8,9 +8,9 @@ on:
     branches: [main, t3-code-ls, "codex/t3-code-ls-*"]
     paths:
       - .github/workflows/t3-code-ls-upstream.yml
-      - native/t3-code-ls/tools/nightly.py
-      - native/t3-code-ls/tools/activity.py
-      - native/t3-code-ls/upstream.lock.json
+      - tools/nightly.py
+      - tools/activity.py
+      - upstream.lock.json
 
 permissions:
   contents: read
@@ -38,24 +38,24 @@ jobs:
           git init .
           git remote add origin "https://github.com/${SOURCE_REPOSITORY}.git"
           git -c credential.helper= fetch --no-tags --depth=1 origin "$SOURCE_REVISION"
-          git sparse-checkout set --cone native/t3-code-ls packages/contracts
+          git sparse-checkout set --cone crates tools packages/contracts
           git checkout --detach FETCH_HEAD
       - name: Restore the completed activity cursor
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
-          path: native/t3-code-ls/target/upstream-activity-state.json
+          path: target/upstream-activity-state.json
           key: t3-code-ls-activity-v1-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: t3-code-ls-activity-v1-
       - name: Compare the published nightly with the pinned source
         run: |
-          python3 native/t3-code-ls/tools/nightly.py check \
-            --repo-root . --lock native/t3-code-ls/upstream.lock.json \
+          python3 tools/nightly.py check \
+            --repo-root . --lock upstream.lock.json \
             --output "$RUNNER_TEMP/t3-code-ls-nightly.json" --fetch
       - name: Track changed PRs and issues
         id: activity
         run: |
-          python3 native/t3-code-ls/tools/activity.py \
-            --state native/t3-code-ls/target/upstream-activity-state.json \
+          python3 tools/activity.py \
+            --state target/upstream-activity-state.json \
             --output "$RUNNER_TEMP/t3-code-ls-activity.json" \
             --lookback-hours 24 --max-items 1000 --overlap-minutes 60 --details none
       - name: Retain read-only monitoring reports
@@ -67,12 +67,12 @@ jobs:
           path: |
             ${{ runner.temp }}/t3-code-ls-nightly.json
             ${{ runner.temp }}/t3-code-ls-activity.json
-            native/t3-code-ls/target/upstream-activity-state.json
+            target/upstream-activity-state.json
           if-no-files-found: warn
           retention-days: 30
       - name: Save the completed activity cursor
         if: steps.activity.outcome == 'success' && steps.reports.outcome == 'success'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
-          path: native/t3-code-ls/target/upstream-activity-state.json
+          path: target/upstream-activity-state.json
           key: t3-code-ls-activity-v1-${{ github.run_id }}-${{ github.run_attempt }}

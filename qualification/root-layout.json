@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "baseline": "3ba083e4c2532014ad9b740c26b69b0183916ecb",
+  "scope": "Root workspace promotion and server component default cutover; no installed application changes",
+  "crate_files_promoted_unchanged": 59,
+  "compiler": {
+    "coordinator": "6339fbb104d6adda4be7e6be7dc637a6a9e5586b",
+    "full_rust": "produced BlueFe 1.102.0-dev 7005dc02c9fb6674380eade443022bbc04215276, LLVM 23.1.5",
+    "cargo": "bootstrap Cargo 1.101 nightly 31d3246e0; not produced Cargo",
+    "native_subset": "packaged lust/lust-core hashes pinned separately"
+  },
+  "passed": {
+    "full_rust_workspace_all_targets_tests": 142,
+    "native_subset_unit_tests": 56,
+    "native_subset_generation_assertions": 5,
+    "policy_service_checks": 1354,
+    "project_service_scenarios": 18,
+    "guest_share_service_scenarios": 25,
+    "recovery_service_scenarios": 25,
+    "provider_service_scenarios": 25,
+    "maintenance_service_checks": 33,
+    "generation_service_checks": 38,
+    "tool_tests": 47,
+    "affected_typescript_configs": [
+      "policy",
+      "project",
+      "guest-share",
+      "recovery",
+      "provider",
+      "maintenance",
+      "generation"
+    ],
+    "upstream_readme": "byte-for-byte matched immutable upstream",
+    "workflow_yaml": "parsed"
+  },
+  "not_run": {
+    "check_changed": "vp is unavailable on qualification host; command attempted",
+    "clippy": "matching produced Clippy absent; no stock driver substitution",
+    "full_application_ui_and_platform_release": "outside component qualification; no real provider sessions"
+  },
+  "removal_record": "docs/internals/t3-code-ls.md",
+  "required_remnants": [
+    "TypeScript contracts, wire/Effect/side-effect adapters and provider SDK translations",
+    "shared SQLite event/projection/receipt/outbox transactions",
+    "React web, Electron desktop and React Native clients",
+    "Connect identity, pairing, push and mobile lifecycle",
+    "Windows Codex process/generation runtime until native Windows qualification"
+  ]
+}

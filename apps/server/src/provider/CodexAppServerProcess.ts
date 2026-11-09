@@ -1,3 +1,4 @@
+import { nativeExecutable } from "@t3tools/shared/nativeExecutable";
 // @effect-diagnostics nodeBuiltinImport:off - The native process launcher resolves paths using its host OS.
 import * as NodePath from "node:path";
 import * as Effect from "effect/Effect";
@@ -21,8 +22,9 @@ export const selectCodexAppServerCommand = Effect.fn("selectCodexAppServerComman
     readonly args: ReadonlyArray<string>;
     readonly cwd?: string | undefined;
   }) {
-    const executable = (yield* HostProcess.Environment).T3_CODE_LS_PROVIDER_EXECUTABLE;
-    if (executable === undefined) return { command: input.command, args: input.args };
+    const override = (yield* HostProcess.Environment).T3_CODE_LS_PROVIDER_EXECUTABLE;
+    if ((yield* HostProcess.Platform) === "win32" && override === undefined) return { command: input.command, args: input.args };
+    const executable = nativeExecutable("provider", override);
     if (!NodePath.isAbsolute(executable) || executable.includes("\0")) {
       return yield* new CodexAppServerProcessConfigurationError({ reason: "invalid-executable" });
     }

@@ -4,13 +4,13 @@
   "type": "module",
   "scripts": {
     "prepare": "vp config --no-agent",
-    "dev": "node scripts/dev-runner.ts dev",
+    "dev": "node tools/build-native.mjs && node scripts/dev-runner.ts dev",
     "profile:startup": "node scripts/profile-startup.mjs",
-    "dev:share": "node scripts/dev-runner.ts dev --share",
-    "dev:server": "node scripts/dev-runner.ts dev:server",
+    "dev:share": "node tools/build-native.mjs && node scripts/dev-runner.ts dev --share",
+    "dev:server": "node tools/build-native.mjs && node scripts/dev-runner.ts dev:server",
     "dev:web": "node scripts/dev-runner.ts dev:web",
     "dev:marketing": "vp run --filter @t3tools/marketing dev",
-    "dev:desktop": "node scripts/dev-runner.ts dev:desktop",
+    "dev:desktop": "node tools/build-native.mjs && node scripts/dev-runner.ts dev:desktop",
     "migrate-dev-db": "node apps/server/scripts/migrate-dev-db.ts",
     "start": "vp run --filter t3 start",
     "start:desktop": "vp run --filter @t3tools/desktop start",
@@ -57,7 +57,8 @@
     "dist:desktop:win:x64": "node scripts/build-desktop-artifact.ts --platform win --target nsis --arch x64",
     "release:smoke": "node scripts/release-smoke.ts",
     "clean": "rm -rf node_modules apps/*/node_modules packages/*/node_modules apps/*/dist apps/*/dist-electron packages/*/dist .vite-plus apps/*/.vite-plus packages/*/.vite-plus",
-    "sync:repos": "node scripts/sync-reference-repos.ts"
+    "sync:repos": "node scripts/sync-reference-repos.ts",
+    "build:native": "node tools/build-native.mjs"
   },
   "devDependencies": {
     "@coderabbitai/config": "1.1.0",

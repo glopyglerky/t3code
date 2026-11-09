@@ -1,0 +1,12 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "lib": ["ESNext", "esnext.disposable"]
+  },
+  "files": [
+    "../apps/server/src/orchestration-v2/NativeGuestShare.ts",
+    "../apps/server/src/orchestration-v2/Orchestrator.ts",
+    "../apps/server/src/guest/GuestShareService.ts"
+  ]
+}

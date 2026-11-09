@@ -48,3 +48,11 @@ node_modules/
 
 # pnpm content-addressable store; never belongs in the repo.
 .pnpm-store/
+
+/target/
+.lust-cache/
+.lust-daemon-*.sock
+__pycache__/
+*.pyc
+
+/bin/

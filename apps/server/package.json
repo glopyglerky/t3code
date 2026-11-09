@@ -17,7 +17,7 @@
   "scripts": {
     "dev": "node --watch --watch-path=src --watch-path=../../packages --watch-path=package.json src/bin.ts",
     "dev:built": "vp run dev",
-    "build:bundle": "vp pack",
+    "build:bundle": "vp pack && node ../../tools/build-native.mjs apps/server/dist/native-bin",
     "build:exe": "node scripts/cli.ts build-exe",
     "start": "node dist/bin.mjs",
     "typecheck": "effect-tsgo tsrs --noEmit",

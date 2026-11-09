@@ -1,8 +1,8 @@
 import type { OrchestrationV2Run, OrchestrationV2ThreadProjection, RunId } from "@t3tools/contracts";
-import type { resolveMessageDispatchIntent } from "./CommandPolicy.ts";
+import type { CommandPolicyV2Shape } from "./CommandPolicy.ts";
 
-type Arguments = Parameters<typeof resolveMessageDispatchIntent>;
-type Mode = ReturnType<typeof resolveMessageDispatchIntent>;
+type Arguments = Parameters<CommandPolicyV2Shape["resolveMessageDispatchIntent"]>;
+type Mode = Arguments[1];
 
 function isActive(run: OrchestrationV2Run): boolean {
   return ["preparing", "starting", "running", "waiting"].includes(run.status);

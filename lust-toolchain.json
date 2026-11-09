@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "repository": "https://github.com/glopyglerky/lustr",
+  "ref": "refs/heads/next",
+  "revision": "6339fbb104d6adda4be7e6be7dc637a6a9e5586b",
+  "tinycc_revision": "43c7708b85681a2fd4451c8a541af4494a8919b2",
+  "build_profile": "gate",
+  "verified_host": "x86_64-unknown-linux-gnu",
+  "scope": "Application decisions and JSON codec, plus synchronous Unix provider and structured-generation process runtimes using the compiler's pinned signal-hook and ryu-js adapters. This is not qualification of the Iroh runtime or the complete desktop, web, or mobile applications.",
+  "packaged_native_sha256": {
+    "lust": "e804d8b9834337ed4b14c7aa2eae251372f995f51c43de0cbfc123ebe29ba163",
+    "lust-core": "465cc9afbb8f7ff4a2667b05b7827fe87de4091059077c81c6b55e8676cbd885"
+  }
+}

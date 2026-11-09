@@ -6,7 +6,11 @@ on:
     paths:
       - README.md
       - docs/internals/t3-code-ls.md
-      - native/t3-code-ls/**
+      - crates/**
+      - tools/**
+      - Cargo.*
+      - lust-toolchain.json
+      - upstream.lock.json
       - packages/contracts/src/auth.ts
       - apps/server/src/orchestration-v2/CommandPolicy.ts
       - apps/server/src/orchestration-v2/NativeCommandPolicy.ts
@@ -65,7 +69,11 @@ on:
     paths:
       - README.md
       - docs/internals/t3-code-ls.md
-      - native/t3-code-ls/**
+      - crates/**
+      - tools/**
+      - Cargo.*
+      - lust-toolchain.json
+      - upstream.lock.json
       - packages/contracts/src/auth.ts
       - apps/server/src/orchestration-v2/CommandPolicy.ts
       - apps/server/src/orchestration-v2/NativeCommandPolicy.ts
@@ -136,7 +144,7 @@ jobs:
     timeout-minutes: 25
     defaults:
       run:
-        working-directory: native/t3-code-ls
+        working-directory: .
     steps:
       - name: Check out the exact public source
         working-directory: ${{ github.workspace }}
@@ -148,7 +156,7 @@ jobs:
           git init .
           git remote add origin "https://github.com/${SOURCE_REPOSITORY}.git"
           git -c credential.helper= fetch --no-tags --depth=1 origin "$SOURCE_REVISION"
-          git sparse-checkout set --cone native/t3-code-ls packages patches apps/server
+          git sparse-checkout set --cone crates tools packages patches apps/server
           git checkout --detach FETCH_HEAD
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
@@ -169,6 +177,11 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Test native code
         run: cargo test --locked --all-targets
+      - name: Stage required default decision executables
+        run: |
+          cargo build --locked -p t3-code-ls-core --bins
+          mkdir -p bin
+          for component in policy project guest-share recovery maintenance provider generate; do cp "target/debug/t3-code-ls-$component" bin/; done
       - name: Compare permissions with the actual upstream functions
         run: node --disable-warning=ExperimentalWarning tools/check-permissions.mjs
       - name: Compare connection retry policy with the actual upstream functions
@@ -247,7 +260,7 @@ jobs:
     timeout-minutes: 25
     defaults:
       run:
-        working-directory: native/t3-code-ls
+        working-directory: .
     steps:
       - name: Check out the exact public source
         working-directory: ${{ github.workspace }}
@@ -259,7 +272,7 @@ jobs:
           git init .
           git remote add origin "https://github.com/${SOURCE_REPOSITORY}.git"
           git -c credential.helper= fetch --no-tags --depth=1 origin "$SOURCE_REVISION"
-          git sparse-checkout set --cone native/t3-code-ls packages apps/server patches
+          git sparse-checkout set --cone crates tools packages apps/server patches
           git checkout --detach FETCH_HEAD
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
@@ -276,10 +289,13 @@ jobs:
         run: |
           git init "$RUNNER_TEMP/lust-lang"
           git -C "$RUNNER_TEMP/lust-lang" remote add origin https://github.com/glopyglerky/lustr.git
-          git -C "$RUNNER_TEMP/lust-lang" fetch --depth 1 origin a09efac9ab746de66d208978d5ad46b3df728a77
+          git -C "$RUNNER_TEMP/lust-lang" fetch --depth 1 origin 6339fbb104d6adda4be7e6be7dc637a6a9e5586b
           git -C "$RUNNER_TEMP/lust-lang" checkout --detach FETCH_HEAD
       - name: Compile and execute application code through Lust
-        run: python3 tools/check-lust.py --source "$RUNNER_TEMP/lust-lang" --artifacts target/lust-bin
+        run: |
+          python3 tools/check-lust.py --source "$RUNNER_TEMP/lust-lang" --artifacts target/lust-bin
+          mkdir -p bin
+          cp target/lust-bin/* bin/
       - name: Typecheck the server-policy integration
         run: |
           tools/server-test-runtime/node_modules/.bin/effect-tsgo tsrs --noEmit --project tools/policy-tsconfig.json
@@ -341,8 +357,8 @@ jobs:
         with:
           name: t3-code-ls-lust-linux-x64
           path: |
-            native/t3-code-ls/target/t3-code-ls-lust-linux-x64.tar.gz
-            native/t3-code-ls/target/t3-code-ls-lust-linux-x64.tar.gz.sha256
+            target/t3-code-ls-lust-linux-x64.tar.gz
+            target/t3-code-ls-lust-linux-x64.tar.gz.sha256
           if-no-files-found: error
           retention-days: 14
       - name: Retain Lust execution evidence
@@ -351,23 +367,23 @@ jobs:
         with:
           name: t3-code-ls-lust-proof
           path: |
-            native/t3-code-ls/target/lust-proof.json
-            native/t3-code-ls/target/lust/policy-adapter-proof.json
-            native/t3-code-ls/target/lust/dispatch-proof.json
-            native/t3-code-ls/target/lust/provider-adapter-proof.json
-            native/t3-code-ls/target/lust/recovery-adapter-proof.json
-            native/t3-code-ls/target/lust/guest-share-adapter-proof.json
-            native/t3-code-ls/target/lust/project-adapter-proof.json
-            native/t3-code-ls/target/lust/maintenance-adapter-proof.json
-            native/t3-code-ls/target/lust/generation-adapter-proof.json
-            native/t3-code-ls/tools/server-test-runtime/package-lock.json
+            target/lust-proof.json
+            target/lust/policy-adapter-proof.json
+            target/lust/dispatch-proof.json
+            target/lust/provider-adapter-proof.json
+            target/lust/recovery-adapter-proof.json
+            target/lust/guest-share-adapter-proof.json
+            target/lust/project-adapter-proof.json
+            target/lust/maintenance-adapter-proof.json
+            target/lust/generation-adapter-proof.json
+            tools/server-test-runtime/package-lock.json
           if-no-files-found: ignore
           retention-days: 14
       - name: Retain the verified Lust policy executable
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: t3-code-ls-policy-linux-x64
-          path: native/t3-code-ls/target/lust-bin/t3-code-ls-policy
+          path: target/lust-bin/t3-code-ls-policy
           if-no-files-found: error
           retention-days: 14
 
@@ -378,7 +394,7 @@ jobs:
     timeout-minutes: 25
     defaults:
       run:
-        working-directory: native/t3-code-ls
+        working-directory: .
     env:
       CARGO_BUILD_JOBS: "2"
       CARGO_PROFILE_DEV_DEBUG: "0"
@@ -395,7 +411,7 @@ jobs:
           git init .
           git remote add origin "https://github.com/${SOURCE_REPOSITORY}.git"
           git -c credential.helper= fetch --no-tags --depth=1 origin "$SOURCE_REVISION"
-          git sparse-checkout set --cone native/t3-code-ls packages patches apps/server
+          git sparse-checkout set --cone crates tools packages patches apps/server
           git checkout --detach FETCH_HEAD
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
@@ -412,11 +428,13 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: t3-code-ls-lust-linux-x64
-          path: native/t3-code-ls/target
+          path: target
       - name: Unpack and verify the selected Lust executable
         run: |
           sha256sum --check target/t3-code-ls-lust-linux-x64.tar.gz.sha256
           tar -xzf target/t3-code-ls-lust-linux-x64.tar.gz -C target
+          mkdir -p bin
+          cp target/lust-bin/* bin/
           test -x target/lust-bin/t3-code-ls-project-store
           test -x target/lust-bin/t3-code-ls-outbox
       - name: Select isolated database test storage
@@ -478,13 +496,13 @@ jobs:
         with:
           name: t3-code-ls-database-linux-x64
           path: |
-            native/t3-code-ls/target/database-proof.json
-            native/t3-code-ls/target/outbox-proof.json
-            native/t3-code-ls/target/native-database-proof.json
-            native/t3-code-ls/target/outbox-claim-recovery-proof.json
-            native/t3-code-ls/target/native-outbox-worker-proof.json
-            native/t3-code-ls/target/t3-code-ls-database-linux-x64.tar.gz
-            native/t3-code-ls/target/t3-code-ls-database-linux-x64.tar.gz.sha256
+            target/database-proof.json
+            target/outbox-proof.json
+            target/native-database-proof.json
+            target/outbox-claim-recovery-proof.json
+            target/native-outbox-worker-proof.json
+            target/t3-code-ls-database-linux-x64.tar.gz
+            target/t3-code-ls-database-linux-x64.tar.gz.sha256
           if-no-files-found: ignore
           retention-days: 14
 
@@ -494,7 +512,7 @@ jobs:
     timeout-minutes: 10
     defaults:
       run:
-        working-directory: native/t3-code-ls
+        working-directory: .
     steps:
       - name: Check out the exact public source
         working-directory: ${{ github.workspace }}
@@ -506,7 +524,7 @@ jobs:
           git init .
           git remote add origin "https://github.com/${SOURCE_REPOSITORY}.git"
           git -c credential.helper= fetch --no-tags --depth=1 origin "$SOURCE_REVISION"
-          git sparse-checkout set --cone native/t3-code-ls packages/contracts packages/client-runtime apps/server/src/orchestration-v2
+          git sparse-checkout set --cone crates tools packages/contracts packages/client-runtime apps/server/src/orchestration-v2
           git checkout --detach FETCH_HEAD
       - name: Install mobile, Windows, and WebAssembly standard libraries
         run: |

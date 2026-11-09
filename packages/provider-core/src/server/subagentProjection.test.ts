@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { subagentThreadTitle } from "./subagentProjection.ts";
+import { subagentThreadTitle } from "../../../../tools/oracles/subagentProjection.ts";
 
 describe("subagentThreadTitle", () => {
   it("clips a long prompt without splitting a surrogate pair", () => {

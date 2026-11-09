@@ -804,6 +804,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     const configurationFailed = isCodexAppServerProcessConfigurationError(error);
     const installed = !isCodexAppServerSpawnError(error) && !configurationFailed;
     const nativeRuntimeSelected =
+      (yield* HostProcess.Platform) !== "win32" ||
       (yield* HostProcess.Environment).T3_CODE_LS_PROVIDER_EXECUTABLE !== undefined;
     const version =
       installed && !nativeRuntimeSelected

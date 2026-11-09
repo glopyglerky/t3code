@@ -4,14 +4,15 @@
 
 This is glopyglerky's fork. GitHub repository metadata identifies
 `pingdotgg/t3code` as both its direct parent and source repository. The immutable
-nightly baseline is recorded in [upstream.lock.json](../../native/t3-code-ls/upstream.lock.json);
+nightly baseline is recorded in [upstream.lock.json](../../upstream.lock.json);
 it is distinct from the fork's default branch and from full application qualification.
 
 Working builds come first. The direction is a native Rust application with
 matching server, web, desktop, iOS, and Android behavior, using Iroh for Connect
 traffic. Full conversion and 100% memory-safe Rust using Lustr/BlueFe are future
-goals. The existing component comparisons described below do not qualify a
-complete application or a BlueFe toolchain.
+goals. Component comparisons do not qualify a complete application. The supplied
+produced BlueFe toolchain passed root workspace tests; native subset execution
+through Lust is recorded separately.
 
 ## Required layout and naming exceptions
 
@@ -20,23 +21,36 @@ complete application or a BlueFe toolchain.
 | `apps/server`, `apps/web`, `apps/desktop`, `apps/mobile` | These contain the current application entry points and UI. Native component binaries cannot replace the application lifecycle. | Equivalent application behavior, platform builds, recovery, and client flows |
 | `packages/*`, `@t3tools/*`, `t3` CLI | Workspace dependency names, imports, wire contracts, launcher and packaging references depend on them. | Audit every consumer and qualify renamed packages and launchers before changing identifiers |
 | `scripts`, `patches`, root pnpm/Vite manifests | Existing application builds and patched dependencies use these exact paths. | Meaningful build and packaging qualification after an exact reference audit |
-| `native/t3-code-ls` | Cargo relative crate dependencies, server executable selectors, Python/Node comparison tools, and CI sparse-checkout paths use this location. | Joint reference migration and component/adapter CI qualification |
+| `native/resource-monitor` | Independent platform resource-monitor workspace. | Keep its existing build contract |
 | TypeScript adapters and production SQLite | Events, projections, receipts, outbox and provider lifecycle still share the existing transaction boundary. | Migrate all participants together with parity, backup/restore and cutover evidence |
 | Cargo-built Iroh and redb hosts | Their dependencies exceed the currently documented Lust compiler support. | Actual compiler execution and application tests with the replacement toolchain |
 | `infra/relay` and platform storage/bindings | Iroh byte forwarding does not implement account/session flows, push delivery, browser key storage or mobile lifecycle. | Authorization and lifecycle tests in each real client |
 | `.repos`, licenses and upstream notices | Read-only reference material and attribution retain their original identity. | Keep provenance and license obligations intact; never treat references as owned runtime code |
 
-No physical source moves accompany this documentation adjustment. Existing
-paths remain for the concrete consumers above, rather than presenting a new
-directory name as a port. The inherited upstream package repository metadata is
-also retained until a fork distribution is qualified; the root README establishes
-the fork identity now.
+The Rust workspace, crates, lockfiles and comparison tools live at root. Required
+upstream clients and transaction participants remain alongside them.
+
+Production duplicate algorithms removed in the root cutover:
+
+- `CommandPolicy.ts`: dispatch, goal and capability decisions; contracts and active/maintenance predicates remain.
+- `ProjectCommands.ts`: project event planner; command/error/state contracts remain.
+- `GuestShareDecider.ts`: share lifecycle, send/cancel, release and attribution decisions; input contracts and failure strings remain.
+- `subagentProjection.ts`: orphan and runless-root recovery decisions; other unported projection helpers remain.
+- `ProviderRecoveryPlanner.ts`: TypeScript fallback/reconciliation loop; response validation and event-ID allocation remain.
+- `maintenanceResolver.ts`: mise, package and Homebrew decision branches and dead private lookup helpers; filesystem/process observations, lazy lookups, predicates, quoting and cache handling remain.
+- `CodexTextGeneration.ts`: Unix runner selection now enters Rust directly. The retained Windows implementation is explicitly isolated in `WindowsCodexTextGeneration.ts` until a native Windows process runtime exists.
+
+Test-only pre-cutover oracles live under `tools/oracles`; production never imports them.
+Provider SDK schemas, RPC event translation, credential resolution, attachment
+authorization and Effect resource ownership remain required adapters. SQLite event,
+projection, receipt and outbox participants still share a transaction, so the
+standalone redb host is not a safe drop-in replacement. Client navigation/rendering
+and Connect account/pairing/push lifecycle have no qualified root Rust replacement.
 
 The root README replaces the duplicated upstream product presentation.
 The unchanged upstream body lives in
-[upstream-README.md](../../native/t3-code-ls/upstream-README.md), where
-`tools/sync-readme.py` verifies it against the source pin. Keeping that reference
-under `native/t3-code-ls` also preserves the existing CI sparse-checkout contract.
+[upstream-README.md](../../upstream-README.md), where
+`tools/sync-readme.py` verifies it against the source pin. Root CI sparse checkouts include its lock and reference material.
 The reference's links retain upstream spelling for byte preservation; use the
 fork README and current documentation for navigation.
 
@@ -223,7 +237,7 @@ The native storage engine is **redb 4.5.0**, a pure Rust embedded database
 licensed **MIT OR Apache-2.0**. This follows the maintainer's choice to use redb
 and avoid a commercial license or paid clustering requirement. The engine,
 crate checksum, and source commit are pinned in
-`native/t3-code-ls/database.lock.json`; `Cargo.lock` pins the actual dependency.
+`database.lock.json`; `Cargo.lock` pins the actual dependency.
 There is one backend and no network database service.
 
 The host opens files with `ConcurrencyMode::MultiWriter`, allowing independent

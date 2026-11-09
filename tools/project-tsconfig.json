@@ -1,0 +1,12 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "lib": ["ESNext", "esnext.disposable"]
+  },
+  "files": [
+    "../apps/server/src/orchestration-v2/NativeProjectCommands.ts",
+    "../apps/server/src/project/ProjectService.ts",
+    "../apps/server/src/orchestration-v2/runtimeLayer.ts"
+  ]
+}

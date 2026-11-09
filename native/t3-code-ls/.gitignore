@@ -1,6 +1,0 @@
-/target/
-.lust-cache/
-.lust-daemon-*.sock
-*.key
-__pycache__/
-*.pyc
