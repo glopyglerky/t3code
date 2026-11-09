@@ -62,6 +62,14 @@ and application UI retain their upstream implementations. Codex's separate
 `exec` text-generation path and the other provider adapters are not ported by
 this selection.
 
+Provider installation ownership and update-command construction run through
+`t3-code-ls-maintenance` when `T3_CODE_LS_MAINTENANCE_EXECUTABLE` is set. The
+shared package-managed, mise, and Homebrew resolvers preserve installer priority,
+manual-only installations, verified prefixes, active mise ownership, and lazy
+version lookups. The host retains provider-specific predicates, filesystem and
+process access, semver facts, version parsing, caching, and the update runner.
+The integration gate executes that real runner with controlled update processes.
+
 The recovery planner ports orphaned native subagent and runless root-turn
 completion. Its oracle compares complete event batches, allocator failures, and
 replayed recovery cases against the immutable upstream functions using the real
@@ -185,6 +193,38 @@ and Node process service with controlled provider peers. They cover request and
 approval exchanges, notifications, cancelled requests on a continuing session,
 terminal errors, and scope cleanup. They do not establish a complete server,
 provider conversation, or client application port.
+
+## Use the Lust provider-maintenance resolver
+
+Build the verified Linux components, then select the executable in the server's
+environment. From the repository root:
+
+```sh
+T3CODE_DEV_SEED=0 \
+T3_CODE_LS_MAINTENANCE_EXECUTABLE="$PWD/native/t3-code-ls/target/lust-bin/t3-code-ls-maintenance" \
+vp run dev
+```
+
+Only an unset selector retains the original shared resolver. Invalid selection,
+process failure, or an invalid action fails maintenance resolution. Each
+resolution uses one scoped process with an empty environment and no shell.
+The native process requests typed observations; the host runs the corresponding
+bounded probes and returns their results. It never sends arbitrary provider
+environment values to the policy process. The existing runner still refreshes
+ownership before updating and refuses a changed installation.
+
+Frames, including the terminating LF, are limited to 1 MiB and a resolution's
+input to 16 MiB. Protocol JSON depth is limited to 32, values to 131,072, and observations
+to 4,096. Resolution has a 60-second deadline. Wrapper inspection retains the
+16 KiB limit and package-manager probes retain the 256 KiB output limit. Native
+resource-limit failures reject the operation instead of treating incomplete
+evidence as permission to use another updater. Strings require Unicode scalar
+values; unsupported Unicode in an install listing also fails resolution.
+
+This selection reaches the common resolvers used by Codex, Claude, OpenCode,
+Pi, Grok, and Muse. It does not port their complete drivers, version advisories,
+or installation execution. The compiled artifact is qualified on Linux x86-64;
+Windows decision fixtures do not establish a Windows native runtime build.
 
 ## Use the Lust recovery planner
 
@@ -566,6 +606,8 @@ tools/server-test-runtime/node_modules/.bin/effect-tsgo tsrs --noEmit --project 
 node tools/check-guest-share-adapter.mjs "$PWD/target/lust-bin/t3-code-ls-guest-share"
 tools/server-test-runtime/node_modules/.bin/effect-tsgo tsrs --noEmit --project tools/project-tsconfig.json
 node tools/check-project-adapter.mjs "$PWD/target/lust-bin/t3-code-ls-project"
+tools/server-test-runtime/node_modules/.bin/effect-tsgo tsrs --noEmit --project tools/maintenance-tsconfig.json
+node tools/check-maintenance-adapter.mjs "$PWD/target/lust-bin/t3-code-ls-maintenance"
 ```
 
 The gate builds the pinned compiler and TinyCC, checks the unchanged core, runs
@@ -594,9 +636,10 @@ application, provider-session, browser, or mobile qualification.
 
 After a successful run, `target/lust-bin` contains the standalone Linux x86-64
 `t3-code-ls-policy`, `t3-code-ls-provider`, `t3-code-ls-recovery`,
-`t3-code-ls-guest-share`, `t3-code-ls-project`, and `t3-code-ls-project-store` executables.
+`t3-code-ls-guest-share`, `t3-code-ls-project`, `t3-code-ls-project-store`,
+`t3-code-ls-outbox`, and `t3-code-ls-maintenance` executables.
 CI retains these verified components and their proof receipts as an artifact,
-including the dispatch, SQLite recovery, and guest-share integration receipts.
+including dispatch, SQLite recovery, guest-share, and maintenance integration receipts.
 They are development components, not desktop or mobile installers.
 
 The database gate uses real redb files and independent host processes:

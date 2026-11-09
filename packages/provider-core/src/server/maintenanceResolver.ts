@@ -35,6 +35,7 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import { collectUint8StreamText } from "./collectStreamText.ts";
 import * as ProviderLatestVersions from "./ProviderLatestVersions.ts";
+import * as NativeMaintenancePolicy from "./NativeMaintenancePolicy.ts";
 
 const LATEST_VERSION_TIMEOUT_MS = 4_000;
 const PROBE_TIMEOUT_MS = 10_000;
@@ -513,6 +514,12 @@ export const resolveMiseProviderMaintenance = Effect.fn("resolveMiseProviderMain
     mise: MiseProviderTool | undefined,
     context: ProviderMaintenanceResolutionContext,
   ) {
+    const executable = (yield* HostProcess.Environment).T3_CODE_LS_MAINTENANCE_EXECUTABLE;
+    if (executable !== undefined)
+      return yield* resolveNativeMaintenance(executable, "mise", owner, context, {
+        nativeUpdate: null,
+        ...(mise === undefined ? {} : { mise }),
+      }).pipe(Effect.orDie);
     const commandPaths = [context.resolvedCommandPath, context.realCommandPath];
     const isShim = isMiseExecutablePath(context.realCommandPath);
     const looksMise =
@@ -618,6 +625,21 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
   definition: PackageManagedProviderMaintenanceDefinition,
   context: ProviderMaintenanceResolutionContext | null,
 ) {
+  const executable = (yield* HostProcess.Environment).T3_CODE_LS_MAINTENANCE_EXECUTABLE;
+  if (executable !== undefined) {
+    const resolved = yield* resolveNativeMaintenance(
+      executable,
+      "package",
+      { provider: definition.provider, packageName: definition.npmPackageName },
+      context,
+      definition,
+    ).pipe(Effect.orDie);
+    if (resolved === null)
+      return yield* Effect.die(
+        new NativeMaintenancePolicy.NativeMaintenancePolicyError({ stage: "response" }),
+      );
+    return resolved;
+  }
   if (!context) {
     return makeManualOnlyProviderMaintenanceCapabilities({
       provider: definition.provider,
@@ -811,6 +833,18 @@ export const resolveHomebrewProviderMaintenance = Effect.fn("resolveHomebrewProv
     homebrew: HomebrewOwnership,
     context: ProviderMaintenanceResolutionContext,
   ) {
+    const executable = (yield* HostProcess.Environment).T3_CODE_LS_MAINTENANCE_EXECUTABLE;
+    if (executable !== undefined)
+      return yield* resolveNativeMaintenance(
+        executable,
+        "homebrew",
+        input,
+        context,
+        {
+          nativeUpdate: null,
+        },
+        homebrew,
+      ).pipe(Effect.orDie);
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     // GUI servers may lack Homebrew on PATH; use the keg brew with the same prefix check.
@@ -915,6 +949,513 @@ const resolveNpmGlobalPrefix = Effect.fn("resolveNpmGlobalPrefix")(function* (
     .exists(manifestPath)
     .pipe(Effect.orElseSucceed(() => false));
   return hasManifest ? shimDir : null;
+});
+
+function sameStrings(left: ReadonlyArray<string>, right: ReadonlyArray<string>): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function sameNativeLookup(
+  left: NativeMaintenancePolicy.Capabilities["latestLookup"],
+  right: NativeMaintenancePolicy.Capabilities["latestLookup"],
+): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  if (left.kind !== right.kind) return false;
+  switch (left.kind) {
+    case "chocolatey":
+      return true;
+    case "mise":
+      return (
+        right.kind === "mise" && left.executable === right.executable && left.tool === right.tool
+      );
+    case "pnpm":
+      return right.kind === "pnpm" && left.packageName === right.packageName;
+    case "homebrew":
+      return (
+        right.kind === "homebrew" &&
+        left.executable === right.executable &&
+        left.name === right.name &&
+        left.ownershipKind === right.ownershipKind
+      );
+  }
+}
+
+const resolveNativeMaintenance = Effect.fn("resolveNativeMaintenance")(function* (
+  executable: string,
+  mode: NativeMaintenancePolicy.Request["mode"],
+  owner: { readonly provider: ProviderDriverKind; readonly packageName: string | null },
+  context: ProviderMaintenanceResolutionContext | null,
+  definition: Pick<PackageManagedProviderMaintenanceDefinition, "nativeUpdate" | "mise">,
+  homebrew: HomebrewOwnership | null = null,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const hostPlatform = yield* HostProcess.Platform;
+  const commandPlatform = HostProcess.Platform.defaultValue();
+  const services = yield* Effect.context<ProviderMaintenanceResolverServices>();
+  const native = definition.nativeUpdate;
+  const input: NativeMaintenancePolicy.Request = {
+    mode,
+    owner,
+    context:
+      context === null
+        ? null
+        : {
+            resolvedCommandPath: context.resolvedCommandPath,
+            realCommandPath: context.realCommandPath,
+            platform: context.platform,
+            hostPlatform,
+            commandPlatform,
+            chocolateyInstall: context.env.ChocolateyInstall ?? null,
+          },
+    definition: {
+      mise:
+        definition.mise === undefined
+          ? null
+          : {
+              tool: definition.mise.tool,
+              upgrade: definition.mise.upgrade !== false,
+            },
+      native:
+        native === null
+          ? null
+          : {
+              args: native.args,
+              matchesCommandPath:
+                context !== null &&
+                native.isCommandPath !== undefined &&
+                [context.resolvedCommandPath, context.realCommandPath].some(native.isCommandPath),
+              requiresCommandPath: native.requiresCommandPath === true,
+              hasEnv: native.env !== undefined,
+            },
+    },
+    homebrew,
+  };
+  const observed = (
+    evidence: ReadonlyArray<NativeMaintenancePolicy.Evidence>,
+    kind: NativeMaintenancePolicy.Observation["kind"],
+  ) => evidence.find((entry) => entry.request.kind === kind)?.result;
+  const observedString = (
+    evidence: ReadonlyArray<NativeMaintenancePolicy.Evidence>,
+    kind: NativeMaintenancePolicy.Observation["kind"],
+  ) => {
+    const result = observed(evidence, kind);
+    return typeof result === "string" ? result : null;
+  };
+  const miseExecutable = (evidence: ReadonlyArray<NativeMaintenancePolicy.Evidence>) =>
+    observedString(evidence, "resolveMise") ??
+    (context !== null && isMiseExecutablePath(context.realCommandPath)
+      ? context.realCommandPath
+      : null);
+  const listing = (evidence: ReadonlyArray<NativeMaintenancePolicy.Evidence>) =>
+    miseToolInstalls(observedString(evidence, "miseListing") ?? "", definition.mise?.tool ?? "");
+  const ownership =
+    context === null
+      ? null
+      : (homebrew ?? homebrewOwnershipFromCommandPath(context.realCommandPath));
+  const realPath = Effect.fn("resolveNativeMaintenance.realPath")((target: string) =>
+    fs.realPath(target).pipe(Effect.orElseSucceed(() => target)),
+  );
+  const observe = Effect.fn("resolveNativeMaintenance.observe")(function* (
+    request: NativeMaintenancePolicy.Observation,
+    evidence: ReadonlyArray<NativeMaintenancePolicy.Evidence>,
+  ) {
+    if (context === null)
+      return yield* new NativeMaintenancePolicy.NativeMaintenancePolicyError({
+        stage: "observation",
+      });
+    switch (request.kind) {
+      case "wrapper": {
+        const size = yield* fs.stat(context.realCommandPath).pipe(
+          Effect.map((info) => Number(info.size)),
+          Effect.orElseSucceed(() => Infinity),
+        );
+        if (size > MISE_WRAPPER_MAX_BYTES) return null;
+        return yield* collectUint8StreamText({
+          stream: fs.stream(context.realCommandPath, { bytesToRead: MISE_WRAPPER_MAX_BYTES + 1 }),
+          maxBytes: MISE_WRAPPER_MAX_BYTES + 1,
+        }).pipe(
+          Effect.orElseSucceed(() => null),
+          Effect.flatMap((source) =>
+            source === null
+              ? Effect.succeed(null)
+              : source.bytes <= MISE_WRAPPER_MAX_BYTES
+                ? Effect.succeed(source.text)
+                : Effect.fail(
+                    new NativeMaintenancePolicy.NativeMaintenancePolicyError({
+                      stage: "observation",
+                    }),
+                  ),
+          ),
+        );
+      }
+      case "resolveMise":
+        if (!definition.mise)
+          return yield* new NativeMaintenancePolicy.NativeMaintenancePolicyError({
+            stage: "observation",
+          });
+        return yield* resolveCommandPath("mise", { env: context.env });
+      case "miseWhich": {
+        const manager = miseExecutable(evidence);
+        if (
+          !manager ||
+          !definition.mise ||
+          !evidence.some((entry) => entry.request.kind === "resolveMise")
+        )
+          return yield* new NativeMaintenancePolicy.NativeMaintenancePolicyError({
+            stage: "observation",
+          });
+        const which = nonEmptyString(
+          yield* runProbe(manager, ["which", definition.mise.tool], context.env),
+        );
+        return which === null ? null : yield* realPath(which);
+      }
+      case "miseListing": {
+        const manager = miseExecutable(evidence);
+        if (
+          !manager ||
+          !definition.mise ||
+          !evidence.some((entry) => entry.request.kind === "miseWhich")
+        )
+          return yield* new NativeMaintenancePolicy.NativeMaintenancePolicyError({
+            stage: "observation",
+          });
+        return yield* runProbe(
+          manager,
+          ["ls", "--json", "--installed", definition.mise.tool],
+          context.env,
+        );
+      }
+      case "miseInstallPaths": {
+        const paths = listing(evidence).map((install) => install.install_path);
+        if (!sameStrings(paths, request.paths) || paths.length === 0)
+          return yield* new NativeMaintenancePolicy.NativeMaintenancePolicyError({
+            stage: "observation",
+          });
+        return yield* Effect.forEach(paths, realPath);
+      }
+      case "miseToolPath": {
+        const permitted = listing(evidence).some(
+          (install) =>
+            install.active === true &&
+            install.requested_version === "latest" &&
+            install.install_path
+              .replaceAll("\\", "/")
+              .replace(/\/+$/, "")
+              .replace(/\/[^/]+$/, "") === request.path,
+        );
+        if (!permitted)
+          return yield* new NativeMaintenancePolicy.NativeMaintenancePolicyError({
+            stage: "observation",
+          });
+        return yield* realPath(request.path);
+      }
+      case "pnpmVersion": {
+        const version = yield* runProbe("pnpm", ["--version"], context.env);
+        return version !== null && satisfiesSemverRange(version, ">=10.4.0");
+      }
+      case "voltaPackage":
+        return owner.packageName === null
+          ? false
+          : yield* isVoltaPackageInstall(context, owner.packageName);
+      case "npmShim": {
+        if (hostPlatform !== "win32" || owner.packageName === null)
+          return yield* new NativeMaintenancePolicy.NativeMaintenancePolicyError({
+            stage: "observation",
+          });
+        const directory = path.dirname(context.resolvedCommandPath);
+        const exists = yield* fs
+          .exists(
+            path.join(directory, "node_modules", ...owner.packageName.split("/"), "package.json"),
+          )
+          .pipe(Effect.orElseSucceed(() => false));
+        return { directory, exists };
+      }
+      case "homebrewExecutable": {
+        if (ownership === null || ownership.prefix !== request.prefix)
+          return yield* new NativeMaintenancePolicy.NativeMaintenancePolicyError({
+            stage: "observation",
+          });
+        const kegBrew = path.join(ownership.prefix, "bin", "brew");
+        return (yield* fs.exists(kegBrew).pipe(Effect.orElseSucceed(() => false)))
+          ? kegBrew
+          : yield* resolveCommandPath("brew", { env: context.env });
+      }
+      case "homebrewPrefix": {
+        const brew = observedString(evidence, "homebrewExecutable");
+        if (brew === null)
+          return yield* new NativeMaintenancePolicy.NativeMaintenancePolicyError({
+            stage: "observation",
+          });
+        const prefix = nonEmptyString(yield* runProbe(brew, ["--prefix"], context.env));
+        return prefix === null ? null : yield* realPath(prefix);
+      }
+    }
+  });
+  const { capabilities, evidence } = yield* NativeMaintenancePolicy.resolve(
+    executable,
+    input,
+    observe,
+  );
+  if (capabilities === null) {
+    if (mode === "package")
+      return yield* new NativeMaintenancePolicy.NativeMaintenancePolicyError({ stage: "response" });
+    return null;
+  }
+  if (capabilities.provider !== owner.provider || capabilities.packageName !== owner.packageName)
+    return yield* new NativeMaintenancePolicy.NativeMaintenancePolicyError({ stage: "response" });
+  const update = capabilities.update;
+  const lookup = capabilities.latestLookup;
+  const sameArgs = (args: ReadonlyArray<string>) =>
+    update !== null && sameStrings(update.args, args);
+  const paths = context === null ? [] : [context.resolvedCommandPath, context.realCommandPath];
+  let validUpdate = update === null;
+  let expectedLookup: NativeMaintenancePolicy.Capabilities["latestLookup"];
+  if (update !== null && context !== null) {
+    const packageName = owner.packageName;
+    const rendered = (platform: NodeJS.Platform) =>
+      [
+        quoteUpdateExecutable(update.executable, platform),
+        ...update.args.map((arg) => quoteShellWord(arg, platform)),
+      ].join(" ");
+    const generic = (manager: string, lock: string, args: ReadonlyArray<string>) =>
+      update.executable === manager &&
+      update.lockKey === lock &&
+      update.env === "context" &&
+      sameArgs(args) &&
+      update.command === rendered(commandPlatform);
+    if (native !== null && update.lockKey === `${owner.provider}-native`) {
+      const matched =
+        input.definition.native?.matchesCommandPath === true &&
+        (packageName === null ||
+          npmGlobalPrefixFromCommandPath(context.realCommandPath, packageName) === null);
+      const fallback =
+        native.requiresCommandPath !== true &&
+        !paths.some((entry) => normalizeCommandPath(entry).includes("/node_modules/"));
+      validUpdate =
+        (matched || fallback) &&
+        update.executable === context.resolvedCommandPath &&
+        sameArgs(native.args) &&
+        update.env === (native.env === undefined ? "none" : "native") &&
+        update.command === rendered(context.platform);
+    } else if (packageName !== null && update.lockKey === "vite-plus-global") {
+      validUpdate =
+        paths.some(isVitePlusGlobalCommandPath) &&
+        generic("vp", "vite-plus-global", ["i", "-g", packageName]);
+    } else if (packageName !== null && update.lockKey === "bun-global") {
+      validUpdate =
+        paths.some(isBunGlobalCommandPath) &&
+        generic("bun", "bun-global", ["i", "-g", `${packageName}@latest`]);
+    } else if (packageName !== null && update.lockKey === "pnpm-global") {
+      validUpdate =
+        paths.some(isPnpmGlobalCommandPath) &&
+        generic("pnpm", "pnpm-global", [
+          "add",
+          "-g",
+          ...(observed(evidence, "pnpmVersion") === true ? [`--allow-build=${packageName}`] : []),
+          `${packageName}@latest`,
+        ]);
+      expectedLookup = { kind: "pnpm", packageName };
+    } else if (packageName !== null && update.lockKey === "yarn-global") {
+      validUpdate =
+        paths.some(isYarnGlobalCommandPath) &&
+        generic("yarn", "yarn-global", ["global", "add", `${packageName}@latest`]);
+    } else if (packageName !== null && update.lockKey === "volta") {
+      validUpdate =
+        observed(evidence, "voltaPackage") === true &&
+        generic("volta", "volta", ["install", `${packageName}@latest`]);
+    } else if (packageName !== null && update.lockKey.startsWith("npm-global:")) {
+      const shim = observed(evidence, "npmShim");
+      const fromShim =
+        typeof shim === "object" &&
+        shim !== null &&
+        "exists" in shim &&
+        shim.exists === true &&
+        "directory" in shim &&
+        typeof shim.directory === "string"
+          ? shim.directory
+          : null;
+      const prefix =
+        npmGlobalPrefixFromCommandPath(context.realCommandPath, packageName) ?? fromShim;
+      validUpdate =
+        prefix !== null &&
+        generic("npm", `npm-global:${normalizeCommandPath(prefix)}`, [
+          "install",
+          "-g",
+          "--prefix",
+          prefix,
+          `--allow-scripts=${packageName}`,
+          `${packageName}@latest`,
+        ]);
+    } else if (update.lockKey === "homebrew" && ownership !== null) {
+      const brew = observedString(evidence, "homebrewExecutable");
+      const prefix = observedString(evidence, "homebrewPrefix");
+      const args =
+        ownership.kind === "cask"
+          ? ["upgrade", "--cask", ownership.name]
+          : ["upgrade", ownership.name];
+      validUpdate =
+        brew !== null &&
+        prefix !== null &&
+        normalizeCommandPath(prefix) === normalizeCommandPath(ownership.prefix) &&
+        update.executable === brew &&
+        sameArgs(args) &&
+        update.env === "none" &&
+        update.command === ["brew", ...args].join(" ");
+      if (brew !== null)
+        expectedLookup = {
+          kind: "homebrew",
+          executable: brew,
+          name: ownership.name,
+          ownershipKind: ownership.kind,
+        };
+    } else if (update.lockKey === "mise" && definition.mise !== undefined) {
+      const mise = miseExecutable(evidence);
+      const which = observedString(evidence, "miseWhich");
+      const isShim = isMiseExecutablePath(context.realCommandPath);
+      const binary = isShim ? which : context.realCommandPath;
+      const installs = listing(evidence);
+      const realPaths = observed(evidence, "miseInstallPaths");
+      const under = (target: string, directory: string) =>
+        normalizeCommandPath(target).startsWith(
+          `${normalizeCommandPath(directory).replace(/\/+$/, "")}/`,
+        );
+      const install = installs.find(
+        (candidate, index) =>
+          candidate.active === true &&
+          candidate.requested_version === "latest" &&
+          binary !== null &&
+          Array.isArray(realPaths) &&
+          typeof realPaths[index] === "string" &&
+          under(binary, realPaths[index]),
+      );
+      const toolDir = install?.install_path
+        .replaceAll("\\", "/")
+        .replace(/\/+$/, "")
+        .replace(/\/[^/]+$/, "");
+      const realToolDir = observedString(evidence, "miseToolPath");
+      const moving = isShim
+        ? normalizeCommandPath(context.resolvedCommandPath)
+            .split("/")
+            .at(-1)
+            ?.replace(/\.(?:exe|cmd|bat|ps1)$/, "") === definition.mise.tool
+        : toolDir !== undefined &&
+          [toolDir, realToolDir].some(
+            (dir) => dir !== null && under(context.resolvedCommandPath, `${dir}/latest`),
+          );
+      validUpdate =
+        mise !== null &&
+        which !== null &&
+        binary !== null &&
+        normalizeCommandPath(which) === normalizeCommandPath(binary) &&
+        install !== undefined &&
+        moving &&
+        definition.mise.upgrade !== false &&
+        update.executable === mise &&
+        sameArgs(["upgrade", definition.mise.tool]) &&
+        update.env === "context" &&
+        update.command === `mise upgrade ${definition.mise.tool}`;
+      if (mise !== null)
+        expectedLookup = { kind: "mise", executable: mise, tool: definition.mise.tool };
+    }
+  }
+  if (capabilities.manualCommand !== undefined) {
+    validUpdate &&=
+      update === null &&
+      capabilities.manualCommand === "choco upgrade claude-code" &&
+      context !== null &&
+      owner.provider === "claudeAgent" &&
+      context.platform === "win32" &&
+      paths.some((entry) => isChocolateyClaudeCommandPath(entry, context.env));
+    expectedLookup = { kind: "chocolatey" };
+  }
+  if (
+    !validUpdate ||
+    !sameNativeLookup(lookup, expectedLookup) ||
+    (capabilities.installPath !== undefined &&
+      capabilities.installPath !== context?.realCommandPath &&
+      capabilities.installPath !== observedString(evidence, "miseWhich")) ||
+    (lookup?.kind === "mise" || lookup?.kind === "homebrew" || lookup?.kind === "chocolatey") !==
+      (capabilities.latestVersion === null)
+  )
+    return yield* new NativeMaintenancePolicy.NativeMaintenancePolicyError({ stage: "response" });
+  const nativeEnv =
+    typeof native?.env === "function"
+      ? context !== null && update?.env === "native"
+        ? native.env(context)
+        : undefined
+      : native?.env;
+  const hydratedUpdate =
+    update === null
+      ? null
+      : {
+          command: update.command,
+          executable: update.executable,
+          args: update.args,
+          lockKey: update.lockKey,
+          ...(update.env === "context" && context !== null ? { env: context.env } : {}),
+          ...(update.env === "native" && nativeEnv ? { env: nativeEnv } : {}),
+        };
+  const hydrated: ProviderMaintenanceCapabilities = {
+    provider: owner.provider,
+    packageName: capabilities.packageName,
+    update: hydratedUpdate,
+    ...(capabilities.installPath === undefined ? {} : { installPath: capabilities.installPath }),
+    ...(capabilities.manualCommand === undefined
+      ? {}
+      : { manualCommand: capabilities.manualCommand }),
+    ...(capabilities.latestVersion === undefined
+      ? {}
+      : { latestVersion: capabilities.latestVersion }),
+  };
+  if (lookup === undefined || context === null) return hydrated;
+  let latest: Effect.Effect<string | null, never, ProviderMaintenanceResolverServices>;
+  if (lookup.kind === "mise") {
+    latest = runProbe(lookup.executable, ["latest", lookup.tool], context.env).pipe(
+      Effect.map((value) => {
+        const version = nonEmptyString(value);
+        return version && /^\S+$/.test(version) ? version : null;
+      }),
+    );
+    const hash = NodeCrypto.createHash("sha256");
+    for (const [name, value] of Object.entries(context.env).toSorted(([a], [b]) =>
+      a < b ? -1 : 1,
+    ))
+      hash.update(`${name}\0${value ?? ""}\0`);
+    return {
+      ...hydrated,
+      lookupLatestVersion: latest.pipe(Effect.provideContext(services)),
+      latestVersionCacheKey: ["mise", lookup.executable, lookup.tool, hash.digest("hex")].join(
+        "\0",
+      ),
+    };
+  }
+  if (lookup.kind === "homebrew") {
+    latest = runProbe(lookup.executable, ["info", "--json=v2", lookup.name], context.env).pipe(
+      Effect.map((info) =>
+        info
+          ? parseHomebrewLatestVersion(info, {
+              kind: lookup.ownershipKind,
+              name: lookup.name,
+              prefix: ownership?.prefix ?? "",
+            })
+          : null,
+      ),
+    );
+  } else if (lookup.kind === "pnpm") {
+    latest = resolvePnpmGlobalLatestVersion(lookup.packageName, context.env);
+  } else {
+    latest = runProbe(
+      "choco",
+      ["search", CHOCOLATEY_CLAUDE_PACKAGE_ID, "--exact", "--limit-output"],
+      context.env,
+    ).pipe(
+      Effect.map((output) =>
+        output ? parseChocolateyLatestVersion(output, CHOCOLATEY_CLAUDE_PACKAGE_ID) : null,
+      ),
+    );
+  }
+  return { ...hydrated, lookupLatestVersion: latest.pipe(Effect.provideContext(services)) };
 });
 
 export function makePackageManagedProviderMaintenanceResolver(

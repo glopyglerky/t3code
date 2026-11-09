@@ -57,6 +57,7 @@
         // CI qualifies native storage adapters before production storage selects them.
         "../../native/t3-code-ls/tools/check-native-database.mjs",
         "../../native/t3-code-ls/tools/check-native-outbox-worker.mjs",
+        "../../native/t3-code-ls/tools/check-maintenance-adapter.mjs",
         // graphqlgen reads its config.
         "graphql.config.ts",
       ],

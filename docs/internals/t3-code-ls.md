@@ -126,6 +126,32 @@ durable child deletions followed by project deletion, so a native project-plan
 failure preserves partial progress for retry. Claiming one transaction for the
 whole cascade would change upstream behavior and hide lost cleanup work.
 
+`T3_CODE_LS_MAINTENANCE_EXECUTABLE` selects Lust for the shared package-managed,
+mise, and Homebrew ownership resolvers. The native process requests typed
+observations in upstream order, then returns an update action or a manual-only
+result. One process handles the whole resolution. The host validates each
+observation against the original input and previous evidence, performs bounded
+filesystem and package-manager probes, and validates the final action before
+the existing update runner can use it. A selected native failure fails the
+operation; it never invokes the TypeScript resolver as a fallback.
+
+Mise upgrades require the configured tool's active `latest` install and a
+launcher that follows its shim or latest link. A fixed binary, another tool's
+listing, or an ambiguous wrapper cannot become a native-update fallback. Version
+lookups remain lazy, with the existing installer channels and environment-specific
+cache keys. The native process receives no provider environment values except
+the Chocolatey installation root needed for ownership classification. Environment
+selectors return the original host-held update environment.
+
+This ports common ownership decisions and command rendering. Driver-specific
+path predicates, filesystem path operations, semver facts, version parsing,
+advisory policy, caching, and update execution remain host implementations.
+The actual update runner is exercised with controlled update processes; no real
+provider installation is changed by qualification. Native resource limits fail
+closed even when upstream would accept a larger input. In particular, an
+over-deep or over-wide mise listing, or one containing unsupported Unicode,
+cannot be treated as missing ownership evidence and enable a different updater.
+
 Source basis: [Lustr's implementation contract](https://github.com/glopyglerky/lustr/blob/a09efac9ab746de66d208978d5ad46b3df728a77/README.md),
 [release target allowlist](https://github.com/glopyglerky/lustr/blob/a09efac9ab746de66d208978d5ad46b3df728a77/src/resolve/cfg.rs),
 and [C/zig release driver](https://github.com/glopyglerky/lustr/blob/a09efac9ab746de66d208978d5ad46b3df728a77/src/cc.rs).
@@ -441,10 +467,10 @@ For nightly `v0.1.8-nightly.20261108.4380` at immutable commit
 [merged upstream #21524](https://github.com/pingdotgg/t3code/pull/21524):
 `mise`-installed provider upgrades must use the verified owning `mise` tool;
 pinned versions, fixed installations and ambiguous wrappers must remain manual.
-This provider-maintenance resolver and its tests are upstream TypeScript, not
-Lust-compiled application code. Next implement the same ownership and upgrade
-policy as a pinned-Lust executable with comparisons against the immutable
-upstream function and an injected production maintenance service boundary.
+The shared ownership resolver now has a pinned-Lustr implementation compared
+against the immutable upstream function and selected in production maintenance
+services. Provider-specific installation logic, targeted-version actions,
+advisories, and actual update execution still require their own ports.
 Full server, all provider sessions, Connect authorization and control plane,
 trusted Iroh remote-client metadata, Iroh blobs/docs/gossip, UI, desktop,
 iOS and Android remain unqualified until their actual app/platform gates run.

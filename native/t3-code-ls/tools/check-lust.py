@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build pinned Lust and verify application decisions, outbox, recovery, and provider processes.
+"""Build pinned Lust and verify application decisions, maintenance, outbox, and provider processes.
 
 Usage: python3 tools/check-lust.py --source /absolute/path/to/lust-lang
 
@@ -82,6 +82,10 @@ def source_hashes() -> dict[str, str]:
               REPO / "apps/server/src/orchestration-v2/ProjectCommands.ts",
               REPO / "apps/server/src/orchestration-v2/ProjectStore.ts",
               REPO / "apps/server/src/orchestration-v2/EffectOutbox.ts",
+              REPO / "packages/provider-core/src/server/NativeMaintenancePolicy.ts",
+              REPO / "packages/provider-core/src/server/maintenanceResolver.ts",
+              REPO / "packages/provider-core/src/server/collectStreamText.ts",
+              REPO / "packages/shared/src/semver.ts",
               REPO / "apps/server/src/project/ProjectService.ts",
               REPO / "packages/contracts/src/applicationEvent.ts",
               REPO / "packages/contracts/src/baseSchemas.ts",
@@ -111,6 +115,9 @@ def source_hashes() -> dict[str, str]:
                  "packages/contracts/src/keybindings.ts",
                  "packages/contracts/src/guestShare.ts",
                  "packages/provider-core/src/server/subagentProjection.ts",
+                 "packages/provider-core/src/server/maintenanceResolver.ts",
+                 "packages/provider-core/src/server/collectStreamText.ts",
+                 "packages/shared/src/semver.ts",
                  "packages/contracts/src/orchestrationV2.ts",
                  "packages/effect-codex-app-server/src/protocol.ts",
                  "packages/effect-codex-app-server/test/fixtures/codex-app-server-mock-peer.ts"):
@@ -155,7 +162,7 @@ def main() -> int:
     source = args.source.resolve()
     receipt = {"schema": 1, "status": "failed", "steps": [],
                "generated_at": datetime.now(timezone.utc).isoformat(),
-               "scope": "Lust application decisions, durable outbox policy, recovery wire, JSON codec, and Unix provider process runtime; "
+               "scope": "Lust application decisions, provider maintenance policy, durable outbox policy, recovery wire, JSON codec, and Unix provider process runtime; "
                         "full application, UI, mobile, and Iroh qualification excluded"}
     try:
         pin = json.loads(PIN_FILE.read_text())
@@ -239,6 +246,7 @@ def main() -> int:
                                         ("guest-share", "check-guest-share-runtime.mjs"),
                                         ("project", "check-project-runtime.mjs"),
                                         ("project-store", "check-project-persistence.mjs"),
+                                        ("maintenance", "check-maintenance.mjs"),
                                         ("outbox", "check-outbox.mjs")):
                 name = f"t3-code-ls-{component}"
                 executable = work / name
@@ -259,6 +267,12 @@ def main() -> int:
                                    cwd=ROOT, env=env, receipt=receipt,
                                    name="verify Lust outbox protocol and resource bounds")
                     receipt["outbox_protocol"] = protocol.stdout.strip()
+                    print(protocol.stdout, end="")
+                if component == "maintenance":
+                    protocol = run(["node", "tools/check-maintenance-runtime.mjs", str(executable)],
+                                   cwd=ROOT, env=env, receipt=receipt,
+                                   name="verify Lust maintenance protocol and resource bounds")
+                    receipt["maintenance_protocol"] = protocol.stdout.strip()
                     print(protocol.stdout, end="")
                 if component == "policy":
                     dispatch = run(["node", "tools/check-dispatch.mjs", str(executable)],
