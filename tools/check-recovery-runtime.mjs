@@ -240,6 +240,24 @@ for (const operation of ["orphan", "roots", "reconcile"]) {
     }
   }
 }
+for (const operation of ["roots", "reconcile"]) {
+  for (const model of [undefined, "requested-model", "provider-executed-model"]) {
+    const state = projection();
+    if (model !== undefined) state.providerTurns[0].model = model;
+    state.turnItems.push(
+      item("item:secret", "secret_request", "root:one", {
+        label: "Service API key",
+        reason: "Authenticate the configured service",
+        url: "https://example.test/settings/api-keys?source=t3#new",
+        secretStatus: "pending",
+      }),
+    );
+    compare(
+      `${operation} preserves optional executed model and secret setup URL`,
+      request(operation, { projection: state }),
+    );
+  }
+}
 for (const result of [undefined, null, "", "Replacement result\n🦀"]) {
   const state = projection();
   state.subagents[0].runId = "run:native";

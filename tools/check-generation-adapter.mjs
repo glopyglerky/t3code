@@ -26,6 +26,7 @@ import * as ServerSettings from "../apps/server/src/serverSettings.ts";
 import * as ProviderInstanceRegistry from "../apps/server/src/provider/ProviderInstanceRegistry.ts";
 import * as SourceControlProviderRegistry from "../apps/server/src/sourceControl/SourceControlProviderRegistry.ts";
 import * as TextGeneration from "../apps/server/src/textGeneration/TextGeneration.ts";
+import * as TextGenerators from "../apps/server/src/textGeneration/TextGenerators.ts";
 import { makeCodexTextGeneration } from "../apps/server/src/textGeneration/CodexTextGeneration.ts";
 import { makeProcessProbe } from "../apps/server/src/testUtils/processProbe.ts";
 
@@ -725,6 +726,7 @@ try {
     "the application TextGeneration service routes to the selected native implementation",
     async () => {
       const f = await fixture({ output: JSON.stringify({ transcription: "Routed fixture" }) });
+      let textGeneratorLookups = 0;
       NodeAssert.deepEqual(
         value(
           await run(f, (provider) =>
@@ -753,6 +755,14 @@ try {
                     Layer.mock(SourceControlProviderRegistry.SourceControlProviderRegistry)({
                       resolveLink: () => Effect.die("Unexpected source-control lookup"),
                     }),
+                    Layer.mock(TextGenerators.TextGenerators)({
+                      runner: (selectedInstanceId) => {
+                        NodeAssert.equal(selectedInstanceId, instanceId);
+                        textGeneratorLookups++;
+                        return Effect.succeed(undefined);
+                      },
+                      listModels: () => Effect.die("Unexpected text-generator model lookup"),
+                    }),
                     ServerSettings.layerTest({}),
                   ),
                 ),
@@ -767,6 +777,7 @@ try {
         ),
         { transcription: "Routed fixture" },
       );
+      NodeAssert.equal(textGeneratorLookups, 1);
       await closed(f);
     },
   );
@@ -775,6 +786,7 @@ try {
     "apps/server/src/textGeneration/NativeCodexTextGeneration.ts",
     "apps/server/src/textGeneration/CodexTextGeneration.ts",
     "apps/server/src/textGeneration/TextGeneration.ts",
+    "apps/server/src/textGeneration/TextGenerators.ts",
     "tools/check-generation-adapter.mjs",
   ];
   const sourceHashes = Object.fromEntries(

@@ -205,6 +205,17 @@ function seedEvents(threadId) {
       { nodeId: rootNodeId },
     ),
     event(
+      "turn-item.updated",
+      {
+        ...item("secret_request", 5),
+        label: "Service API key",
+        reason: "Authenticate the configured service",
+        url: "https://example.test/settings/api-keys?source=t3#new",
+        secretStatus: "pending",
+      },
+      { nodeId: rootNodeId },
+    ),
+    event(
       "provider-turn.updated",
       {
         id: providerTurnId,
@@ -216,6 +227,7 @@ function seedEvents(threadId) {
         status: "running",
         startedAt: started,
         completedAt: null,
+        model: "provider-executed-model",
       },
       { nodeId: rootNodeId },
     ),
@@ -319,7 +331,12 @@ function assertRecovered(state) {
     NodeAssert.equal(projection.subagents[0].status, "cancelled");
     NodeAssert.equal(projection.subagents[0].result, "existing result é");
     NodeAssert.equal(projection.providerTurns[0].status, "cancelled");
+    NodeAssert.equal(projection.providerTurns[0].model, "provider-executed-model");
     NodeAssert.ok(projection.turnItems.every((item) => item.status === "cancelled"));
+    NodeAssert.equal(
+      projection.turnItems.find((item) => item.type === "secret_request").url,
+      "https://example.test/settings/api-keys?source=t3#new",
+    );
     NodeAssert.equal(
       projection.turnItems.find((item) => item.type === "reasoning").streaming,
       false,

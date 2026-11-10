@@ -1,11 +1,624 @@
 {
   "schema_version": 1,
   "recovery_commit": "d29a94f3a175eac1f26c548023fedd8695cedfaf",
-  "integrated_upstream_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+  "integrated_upstream_commit": "822671581383a357c5dc8d3ea9984b408c3e03c6",
   "source_history": [
-    "521ac7c218b3faa74281fb72fc36ce74a0951fb3"
+    "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+    "822671581383a357c5dc8d3ea9984b408c3e03c6"
   ],
-  "upstream_removals": [],
+  "upstream_removals": [
+    {
+      "path": "apps/marketing/src/pages/download.astro",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "c6630fa8a258f079729553f85bcb1ba592d4544b",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "c6630fa8a258f079729553f85bcb1ba592d4544b",
+      "reason": "Upstream moved the download page into the locale-aware route tree.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "apps/marketing/src/pages/[...locale]/download.astro"
+      ]
+    },
+    {
+      "path": "apps/marketing/src/pages/index.astro",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "519eb48b2ca8152a7d1db4db980a4597e3fbfcb6",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "519eb48b2ca8152a7d1db4db980a4597e3fbfcb6",
+      "reason": "Upstream moved the home page into the locale-aware route tree.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "apps/marketing/src/pages/[...locale]/index.astro"
+      ]
+    },
+    {
+      "path": "apps/mobile/deps/react-native-enriched-markdown-1.2.0-t3.16-29ddd424.tgz",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "06ac560ff2eba452ab4d6ecf0f7aaa6bea012fe3",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "06ac560ff2eba452ab4d6ecf0f7aaa6bea012fe3",
+      "reason": "Upstream replaced the t3.16 Enriched Markdown archive with its updated t3.18 archive and locked the new dependency identity.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "apps/mobile/deps/react-native-enriched-markdown-1.2.0-t3.18-497fbe63.tgz"
+      ]
+    },
+    {
+      "path": "apps/mobile/src/components/FilePreview.ios.tsx",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "db62d2928fd4c6d14785f6be3bcbd99e07c31603",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "db62d2928fd4c6d14785f6be3bcbd99e07c31603",
+      "reason": "Upstream consolidated preview components under components/ui, keeping iOS as the default implementation and Android as an explicit override; the preview session and its tests moved with those components.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "apps/mobile/src/components/ui/FilePreviewModal.tsx"
+      ]
+    },
+    {
+      "path": "apps/mobile/src/components/FilePreview.tsx",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "26d2aa50248abb9cde17ce722eb153b4b92ce240",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "26d2aa50248abb9cde17ce722eb153b4b92ce240",
+      "reason": "Upstream consolidated preview components under components/ui, keeping iOS as the default implementation and Android as an explicit override; the preview session and its tests moved with those components.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "apps/mobile/src/components/ui/FilePreviewModal.android.tsx"
+      ]
+    },
+    {
+      "path": "apps/mobile/src/components/FilePreviewGallery.tsx",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "cd42342c7c0c4f73184a60bc3aba097dbd28de09",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "cd42342c7c0c4f73184a60bc3aba097dbd28de09",
+      "reason": "Upstream consolidated preview components under components/ui, keeping iOS as the default implementation and Android as an explicit override; the preview session and its tests moved with those components.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "apps/mobile/src/components/ui/FilePreviewGallery.tsx"
+      ]
+    },
+    {
+      "path": "apps/mobile/src/components/FilePreviewModal.test.tsx",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "3989180f62824e0f1d69213a77720c10cf6afa32",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "3989180f62824e0f1d69213a77720c10cf6afa32",
+      "reason": "Upstream consolidated preview components under components/ui, keeping iOS as the default implementation and Android as an explicit override; the preview session and its tests moved with those components.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "apps/mobile/src/components/ui/FilePreviewSession.test.tsx"
+      ]
+    },
+    {
+      "path": "apps/mobile/src/components/FilePreviewModal.tsx",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "4d6c97464dd6750322b8a14505a1e50118e20eac",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "4d6c97464dd6750322b8a14505a1e50118e20eac",
+      "reason": "Upstream consolidated preview components under components/ui, keeping iOS as the default implementation and Android as an explicit override; the preview session and its tests moved with those components.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "apps/mobile/src/components/ui/FilePreviewSession.tsx"
+      ]
+    },
+    {
+      "path": "apps/mobile/src/components/FilePreviewModal.types.ts",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "83ee7207b8e473e5ef8f1d3b7c8af62568f3ecd8",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "83ee7207b8e473e5ef8f1d3b7c8af62568f3ecd8",
+      "reason": "Upstream consolidated preview components under components/ui, keeping iOS as the default implementation and Android as an explicit override; the preview session and its tests moved with those components.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "apps/mobile/src/components/ui/FilePreviewModal.types.ts"
+      ]
+    },
+    {
+      "path": "apps/mobile/src/components/MediaImagePreview.tsx",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "2a7b226574e733dc05e641d1aad875c014cbd84d",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "2a7b226574e733dc05e641d1aad875c014cbd84d",
+      "reason": "Upstream inlined the Android image preview implementation into the consolidated Android file preview component.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "apps/mobile/src/components/ui/FilePreviewModal.android.tsx"
+      ]
+    },
+    {
+      "path": "apps/mobile/src/components/VideoPreviewModal.ios.tsx",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "233cb063c42edca04ecfbecdc9535b29227e251c",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "233cb063c42edca04ecfbecdc9535b29227e251c",
+      "reason": "Upstream consolidated preview components under components/ui, keeping iOS as the default implementation and Android as an explicit override; the preview session and its tests moved with those components.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "apps/mobile/src/components/ui/VideoPreviewModal.tsx"
+      ]
+    },
+    {
+      "path": "apps/mobile/src/components/VideoPreviewModal.tsx",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "2f9d0063ca9eb6a51258ce5ae166dbe30f9da297",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "2f9d0063ca9eb6a51258ce5ae166dbe30f9da297",
+      "reason": "Upstream consolidated preview components under components/ui, keeping iOS as the default implementation and Android as an explicit override; the preview session and its tests moved with those components.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "apps/mobile/src/components/ui/VideoPreviewModal.android.tsx"
+      ]
+    },
+    {
+      "path": "apps/mobile/src/components/ui/AndroidAnchoredMenu.tsx",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "369fcf19ef55a32a8b0ea982392e36faa44c7105",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "369fcf19ef55a32a8b0ea982392e36faa44c7105",
+      "reason": "Upstream made the Android-only component an explicit .android module and updated its consumers.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "apps/mobile/src/components/ui/AndroidAnchoredMenu.android.tsx"
+      ]
+    },
+    {
+      "path": "apps/mobile/src/components/ui/AndroidScreenHeader.tsx",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "b7ab699b11b579d2e4c6caab399ad28ccf94f953",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "b7ab699b11b579d2e4c6caab399ad28ccf94f953",
+      "reason": "Upstream made the Android-only component an explicit .android module and updated its consumers.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "apps/mobile/src/components/ui/AndroidScreenHeader.android.tsx"
+      ]
+    },
+    {
+      "path": "apps/mobile/src/components/ui/AppSymbol.ios.tsx",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "47b7e5be75bc3b09af4ce7796fadf8b4ea88f11b",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "47b7e5be75bc3b09af4ce7796fadf8b4ea88f11b",
+      "reason": "Upstream moved the iOS implementation to the default .tsx module and retained Android behavior in its .android override.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "apps/mobile/src/components/ui/AppSymbol.tsx",
+        "apps/mobile/src/components/ui/AppSymbol.android.tsx"
+      ]
+    },
+    {
+      "path": "apps/mobile/src/components/ui/FrostedCutout.ios.tsx",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "66f098c6e22e2e0d358900a4acdd8be4ddd4b662",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "66f098c6e22e2e0d358900a4acdd8be4ddd4b662",
+      "reason": "Upstream moved the iOS implementation to the default .tsx module and retained Android behavior in its .android override.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "apps/mobile/src/components/ui/FrostedCutout.tsx",
+        "apps/mobile/src/components/ui/FrostedCutout.android.tsx"
+      ]
+    },
+    {
+      "path": "apps/mobile/src/components/ui/NativePresentation.ios.tsx",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "b93578dde602a6c7902e081d67ac9c5d0cc3bc7b",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "b93578dde602a6c7902e081d67ac9c5d0cc3bc7b",
+      "reason": "Upstream moved the iOS implementation to the default .tsx module and retained Android behavior in its .android override.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "apps/mobile/src/components/ui/NativePresentation.tsx",
+        "apps/mobile/src/components/ui/NativePresentation.android.tsx"
+      ]
+    },
+    {
+      "path": "apps/mobile/src/components/ui/SegmentedControl.ios.tsx",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "15883d300da418112ee0ca047351f9327f3cfb5e",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "15883d300da418112ee0ca047351f9327f3cfb5e",
+      "reason": "Upstream moved the iOS implementation to the default .tsx module and retained Android behavior in its .android override.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "apps/mobile/src/components/ui/SegmentedControl.tsx",
+        "apps/mobile/src/components/ui/SegmentedControl.android.tsx"
+      ]
+    },
+    {
+      "path": "apps/mobile/src/features/layout/workspace/WorkspaceDock.tsx",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "f6a9966f67ad7900b441a698f552e4ed46971b6e",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "f6a9966f67ad7900b441a698f552e4ed46971b6e",
+      "reason": "Upstream removed the custom dock during consolidation onto the shared toolbar and menu primitives. Workspace tab controls remain in the shared section toolbar.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "apps/mobile/src/features/layout/workspace/WorkspaceToolbar.tsx",
+        "apps/mobile/src/features/layout/workspace/WorkspaceSectionToolbar.tsx"
+      ]
+    },
+    {
+      "path": "apps/mobile/src/features/layout/workspace/WorkspaceSearchField.tsx",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "c5667fd7308e21fea7b1890a8ea7410abe116c92",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "c5667fd7308e21fea7b1890a8ea7410abe116c92",
+      "reason": "Upstream removed the workspace-specific search wrapper when feature screens switched to the common search primitive.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "apps/mobile/src/components/ui/SearchField.tsx",
+        "apps/mobile/src/features/layout/workspace/WorkspaceToolbar.tsx"
+      ]
+    },
+    {
+      "path": "apps/mobile/src/features/layout/workspace/WorkspaceToolbar.ios.tsx",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "0734c1e877482ff0858d1f22856067b2573520eb",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "0734c1e877482ff0858d1f22856067b2573520eb",
+      "reason": "Upstream consolidated the iOS workspace toolbar into the default toolbar module using the shared UI primitives.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "apps/mobile/src/features/layout/workspace/WorkspaceToolbar.tsx"
+      ]
+    },
+    {
+      "path": "apps/mobile/src/features/threads/CustomSnoozeSheet.ios.tsx",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "65537d287cc817adaa0f3aa0cdb0c8d6c9e0a37b",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "65537d287cc817adaa0f3aa0cdb0c8d6c9e0a37b",
+      "reason": "Upstream consolidated the iOS snooze sheet into the default module using common UI primitives.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "apps/mobile/src/features/threads/CustomSnoozeSheet.tsx"
+      ]
+    },
+    {
+      "path": "apps/mobile/src/features/threads/CustomSnoozeSheet.shared.tsx",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "84407ea4eb258c7c8685a78493ba393c240da550",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "84407ea4eb258c7c8685a78493ba393c240da550",
+      "reason": "Upstream removed the obsolete shared snooze fallback after consolidating the default iOS sheet; the Android sheet remains an explicit override.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "apps/mobile/src/features/threads/CustomSnoozeSheet.tsx",
+        "apps/mobile/src/features/threads/CustomSnoozeSheet.android.tsx"
+      ]
+    },
+    {
+      "path": "apps/mobile/src/features/threads/thread-feed-live-follow.test.ts",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "728b24419b91dfb27821980266d3bcc7ae91af37",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "728b24419b91dfb27821980266d3bcc7ae91af37",
+      "reason": "Upstream deleted tests for the removed live-follow workaround and added scroll-position coverage alongside the Legend List upgrade.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "apps/mobile/src/features/threads/thread-feed-scroll-position.test.ts"
+      ]
+    },
+    {
+      "path": "apps/mobile/src/features/threads/thread-feed-live-follow.ts",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "11865e648e2b956786c56afd261b8f77d7322483",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "11865e648e2b956786c56afd261b8f77d7322483",
+      "reason": "Upstream upgraded Legend List to 3.7.2 and removed the custom live-follow workaround. ThreadFeed now uses the updated list behavior and scroll-position helpers.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "apps/mobile/src/features/threads/ThreadFeed.tsx",
+        "apps/mobile/src/features/threads/thread-feed-scroll-position.ts"
+      ]
+    },
+    {
+      "path": "apps/web/src/components/chat/modelPickerSearch.test.ts",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "c942814b05b347d1f54b2ad5c8bad8fb6acc5520",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "c942814b05b347d1f54b2ad5c8bad8fb6acc5520",
+      "reason": "Upstream moved model-picker search into client-runtime so clients share the search implementation and its tests.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "packages/client-runtime/src/modelSearch.test.ts"
+      ]
+    },
+    {
+      "path": "apps/web/src/components/chat/modelPickerSearch.ts",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "c9d05bbaad616435033b7725aa89626d14951e54",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "c9d05bbaad616435033b7725aa89626d14951e54",
+      "reason": "Upstream moved model-picker search into client-runtime so clients share the search implementation and its tests.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "packages/client-runtime/src/modelSearch.ts"
+      ]
+    },
+    {
+      "path": "apps/web/src/components/diffs/codeViewSearch.test.ts",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "ee377043900c5d03056c895d310246cde27a0208",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "ee377043900c5d03056c895d310246cde27a0208",
+      "reason": "Upstream switched to the built-in find implementation in @pierre/diffs 1.7 and replaced the old search unit tests with browser integration coverage.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "apps/web/src/components/diffs/codeViewSearch.browser.test.ts"
+      ]
+    },
+    {
+      "path": "apps/web/src/components/files/fileEditorVirtualization.test.ts",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "6152ac94f0d717c3dfb0695b44ca48d3be089312",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "6152ac94f0d717c3dfb0695b44ca48d3be089312",
+      "reason": "Upstream removed tests coupled to the previous @pierre/diffs internal virtualization implementation during its 1.7 upgrade. There is no direct replacement test file.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Follow the reviewed upstream removal; no replacement file is asserted.",
+      "replacement_paths": []
+    },
+    {
+      "path": "apps/web/src/components/onboarding/WelcomeWizard.import.browser.test.tsx",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "c55691d9ca5cc9504f5a0bfa455b7eb13719abcd",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "c55691d9ca5cc9504f5a0bfa455b7eb13719abcd",
+      "reason": "Upstream replaced the three-step welcome wizard with one Welcome page and moved import browser coverage to the new page.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "apps/web/src/components/onboarding/WelcomePage.import.browser.test.tsx"
+      ]
+    },
+    {
+      "path": "apps/web/src/components/onboarding/WelcomeWizard.tsx",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "2eb6bcd6739576aa8b0e0b465fe9c34417c1d40f",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "2eb6bcd6739576aa8b0e0b465fe9c34417c1d40f",
+      "reason": "Upstream replaced the three-step welcome wizard with one Welcome page.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "apps/web/src/components/onboarding/WelcomePage.tsx"
+      ]
+    },
+    {
+      "path": "apps/web/src/onboarding/targetEnvironment.logic.test.ts",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "3a882ff92fb6deea1fe5ba9ebd304dfdba224f02",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "3a882ff92fb6deea1fe5ba9ebd304dfdba224f02",
+      "reason": "Upstream removed the target-environment helper tests with the multi-step wizard. The new Welcome page has its own logic and browser tests.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "apps/web/src/onboarding/welcomePage.logic.test.ts",
+        "apps/web/src/components/onboarding/WelcomePage.import.browser.test.tsx"
+      ]
+    },
+    {
+      "path": "apps/web/src/onboarding/targetEnvironment.logic.ts",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "a217018dbb6002aa936a2357ccb381067f5a676e",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "a217018dbb6002aa936a2357ccb381067f5a676e",
+      "reason": "Upstream removed the wizard-specific environment-selection helper. The Welcome page is scoped by its environmentId and implements the new onboarding flow.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "apps/web/src/components/onboarding/WelcomePage.tsx"
+      ]
+    },
+    {
+      "path": "packages/provider-pi/src/server/thinkingCapabilities.ts",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "139c698e8e85837e3b127f63088ca92f863bf6d4",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "139c698e8e85837e3b127f63088ca92f863bf6d4",
+      "reason": "Upstream renamed and expanded the Pi provider capability module to cover model capabilities beyond thinking support.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "packages/provider-pi/src/server/modelCapabilities.ts"
+      ]
+    },
+    {
+      "path": "patches/@clerk__expo-native-components@0.4.0.patch",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "d40b77ec86b7a53fb01e0f0e364dca072c002b72",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "d40b77ec86b7a53fb01e0f0e364dca072c002b72",
+      "reason": "Upstream upgraded the dependency and replaced the old version-specific patch with the patch for the locked new version.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "patches/@clerk__expo-native-components@0.4.4.patch"
+      ]
+    },
+    {
+      "path": "patches/@expo__fingerprint@0.21.5.patch",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "8045438709c65cf45309089c1cc81bbe4c7f6066",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "8045438709c65cf45309089c1cc81bbe4c7f6066",
+      "reason": "Upstream dropped this version-specific patch during its Expo SDK 58 dependency update and removed its patchedDependencies entry. The updated dependencies are imported with the upstream lockfile; no replacement patch is declared.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Follow the reviewed upstream removal; no replacement file is asserted.",
+      "replacement_paths": []
+    },
+    {
+      "path": "patches/@expo__metro-config@58.0.14.patch",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "9490a3db95f2905c02565c2d3b20525dd091081a",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "9490a3db95f2905c02565c2d3b20525dd091081a",
+      "reason": "Upstream dropped this version-specific patch during its Expo SDK 58 dependency update and removed its patchedDependencies entry. The updated dependencies are imported with the upstream lockfile; no replacement patch is declared.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Follow the reviewed upstream removal; no replacement file is asserted.",
+      "replacement_paths": []
+    },
+    {
+      "path": "patches/@expo__ui@58.0.20.patch",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "859ee062b9fdfbb967664a9532e6c9229c2f3e2a",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "859ee062b9fdfbb967664a9532e6c9229c2f3e2a",
+      "reason": "Upstream dropped this version-specific patch during its Expo SDK 58 dependency update and removed its patchedDependencies entry. The updated dependencies are imported with the upstream lockfile; no replacement patch is declared.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Follow the reviewed upstream removal; no replacement file is asserted.",
+      "replacement_paths": []
+    },
+    {
+      "path": "patches/@legendapp__list@3.3.5.patch",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "42572476c6c9afe9e45dea5e81e029e4d70c05f2",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "42572476c6c9afe9e45dea5e81e029e4d70c05f2",
+      "reason": "Upstream upgraded the dependency and replaced the old version-specific patch with the patch for the locked new version.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "patches/@legendapp__list@3.7.2.patch"
+      ]
+    },
+    {
+      "path": "patches/@pierre%2Fdiffs@1.6.1.patch",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "c19440839908eeb2c3b08e1993af786a5e839d45",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "c19440839908eeb2c3b08e1993af786a5e839d45",
+      "reason": "Upstream upgraded the dependency and replaced the old version-specific patch with the patch for the locked new version.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "patches/@pierre__diffs@1.7.0-beta.3.patch"
+      ]
+    },
+    {
+      "path": "patches/expo-audio@58.0.9.patch",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "c241902a1c7006e1df9eb2f7cf85e49737fbe3e5",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "c241902a1c7006e1df9eb2f7cf85e49737fbe3e5",
+      "reason": "Upstream upgraded the dependency and replaced the old version-specific patch with the patch for the locked new version.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "patches/expo-audio@58.0.11.patch"
+      ]
+    },
+    {
+      "path": "patches/expo-modules-core@58.0.22.patch",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "af01af2df0b986cab1dce7b870a9e998509f9e37",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "af01af2df0b986cab1dce7b870a9e998509f9e37",
+      "reason": "Upstream upgraded the dependency and replaced the old version-specific patch with the patch for the locked new version.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "patches/expo-modules-core@58.0.30.patch"
+      ]
+    },
+    {
+      "path": "patches/expo-network@58.0.3.patch",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "65d9623333e1f2b62f5de8f927bf2edbf4f20f82",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "65d9623333e1f2b62f5de8f927bf2edbf4f20f82",
+      "reason": "Upstream upgraded the dependency and replaced the old version-specific patch with the patch for the locked new version.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "patches/expo-network@58.0.4.patch"
+      ]
+    },
+    {
+      "path": "patches/expo-sharing@58.0.19.patch",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "82aebb0751e0479ca3a0f88441f9982a859d7ba5",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "82aebb0751e0479ca3a0f88441f9982a859d7ba5",
+      "reason": "Upstream upgraded the dependency and replaced the old version-specific patch with the patch for the locked new version.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "patches/expo-sharing@58.0.22.patch"
+      ]
+    },
+    {
+      "path": "patches/expo-video@58.0.11.patch",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "bb7936e4285a5ee28388fc9036c6307c7b912baf",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "bb7936e4285a5ee28388fc9036c6307c7b912baf",
+      "reason": "Upstream upgraded the dependency and replaced the old version-specific patch with the patch for the locked new version.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "patches/expo-video@58.0.13.patch"
+      ]
+    },
+    {
+      "path": "patches/expo-widgets@58.0.20.patch",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "21252dcd848aa177faafb242b65ee56282fa70bb",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "21252dcd848aa177faafb242b65ee56282fa70bb",
+      "reason": "Upstream upgraded the dependency and replaced the old version-specific patch with the patch for the locked new version.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "patches/expo-widgets@58.0.27.patch"
+      ]
+    },
+    {
+      "path": "patches/react-native-enriched-markdown@1.2.0-t3.16.patch",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "2b5d8eecdd31b9eeb10d3b4b04f92d565eb29fcd",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "2b5d8eecdd31b9eeb10d3b4b04f92d565eb29fcd",
+      "reason": "Upstream dropped the t3.16 patch when moving to the updated t3.18 source archive. The replacement archive is the dependency source at the integrated revision.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "apps/mobile/deps/react-native-enriched-markdown-1.2.0-t3.18-497fbe63.tgz"
+      ]
+    },
+    {
+      "path": "patches/react-native-gesture-handler@3.3.0.patch",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "0b444fec0e8d8c15c664abd57e88df883a722ffa",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "0b444fec0e8d8c15c664abd57e88df883a722ffa",
+      "reason": "Upstream upgraded the dependency and replaced the old version-specific patch with the patch for the locked new version.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "patches/react-native-gesture-handler@3.5.0.patch"
+      ]
+    },
+    {
+      "path": "patches/react-native-keyboard-controller@1.22.8.patch",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "66cd20076e6c473cb8f1cb26b173e063f7b76c10",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "66cd20076e6c473cb8f1cb26b173e063f7b76c10",
+      "reason": "Upstream upgraded the dependency and replaced the old version-specific patch with the patch for the locked new version.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "patches/react-native-keyboard-controller@1.23.0.patch"
+      ]
+    },
+    {
+      "path": "patches/react-native-pdf-jsi@5.0.0.patch",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "fae81c54646ca54c832f62bf12e3021715cb06ab",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "fae81c54646ca54c832f62bf12e3021715cb06ab",
+      "reason": "Upstream upgraded the dependency and replaced the old version-specific patch with the patch for the locked new version.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
+      "replacement_paths": [
+        "patches/react-native-pdf-jsi@6.1.0.patch"
+      ]
+    },
+    {
+      "path": "scripts/legend-list-initial-reveal.test.ts",
+      "source_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "source_blob": "2032d2b4a0311ff48545ad095e7250f520cb80e2",
+      "removed_in": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+      "recovery_blob": "2032d2b4a0311ff48545ad095e7250f520cb80e2",
+      "reason": "Upstream deleted the test for its removed Legend List initial-reveal patch during the upgrade to 3.7.2. There is no direct replacement script.",
+      "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Follow the reviewed upstream removal; no replacement file is asserted.",
+      "replacement_paths": []
+    }
+  ],
   "supported_targets": [
     "linux-x64",
     "linux-arm64",
@@ -17,7 +630,7 @@
     "ios",
     "android"
   ],
-  "qualification": "No port is accepted by this recovery. Integrated describes recovered source wiring; fresh behavior and platform evidence is still required.",
+  "qualification": "Upstream 8226715 is integrated with retained production Rust adapters. No port is accepted for retirement by this integration; platform receipts remain required.",
   "compiler_policy": "The current full-Rust route is the pinned Lustr coordinator with rustc-derived BlueFe. Direct native Lust coverage requires its own exact compiler identity and behavior receipts. Application CI consumes qualified compiler artifacts.",
   "layout_policy": "Retain upstream paths. Current crates are preserved during recovery; domain_owner records where their responsibilities belong. Move source separately from behavior changes.",
   "intentional_divergences": [
@@ -29,7 +642,7 @@
       "id": "command-and-dispatch-policy",
       "state": "integrated",
       "domain_owner": "apps/server/src/orchestration-v2",
-      "reviewed_upstream_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "reviewed_upstream_commit": "822671581383a357c5dc8d3ea9984b408c3e03c6",
       "upstream_sources": [
         {
           "path": "apps/server/src/orchestration-v2/CommandPolicy.ts",
@@ -88,7 +701,7 @@
       "id": "project-commands",
       "state": "integrated",
       "domain_owner": "apps/server/src/project",
-      "reviewed_upstream_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "reviewed_upstream_commit": "822671581383a357c5dc8d3ea9984b408c3e03c6",
       "upstream_sources": [
         {
           "path": "apps/server/src/orchestration-v2/ProjectCommands.ts",
@@ -150,7 +763,7 @@
       "id": "guest-share-decisions",
       "state": "integrated",
       "domain_owner": "apps/server/src/guest",
-      "reviewed_upstream_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "reviewed_upstream_commit": "822671581383a357c5dc8d3ea9984b408c3e03c6",
       "upstream_sources": [
         {
           "path": "apps/server/src/orchestration-v2/GuestShareDecider.ts",
@@ -212,11 +825,11 @@
       "id": "provider-recovery",
       "state": "integrated",
       "domain_owner": "apps/server/src/orchestration-v2",
-      "reviewed_upstream_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "reviewed_upstream_commit": "822671581383a357c5dc8d3ea9984b408c3e03c6",
       "upstream_sources": [
         {
           "path": "packages/provider-core/src/server/subagentProjection.ts",
-          "blob": "dbd929192e04d4ecd815f1e7455aeb761d264144"
+          "blob": "62145567f665185fa83852a52faf199c6fc58084"
         },
         {
           "path": "apps/server/src/orchestration-v2/ProviderRuntimeRecoveryService.ts",
@@ -274,7 +887,7 @@
       "id": "provider-maintenance",
       "state": "integrated",
       "domain_owner": "packages/provider-core/src/server",
-      "reviewed_upstream_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "reviewed_upstream_commit": "822671581383a357c5dc8d3ea9984b408c3e03c6",
       "upstream_sources": [
         {
           "path": "packages/provider-core/src/server/maintenanceResolver.ts",
@@ -331,7 +944,7 @@
       "id": "codex-structured-generation",
       "state": "integrated",
       "domain_owner": "apps/server/src/textGeneration",
-      "reviewed_upstream_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "reviewed_upstream_commit": "822671581383a357c5dc8d3ea9984b408c3e03c6",
       "upstream_sources": [
         {
           "path": "apps/server/src/textGeneration/CodexTextGeneration.ts",
@@ -397,7 +1010,7 @@
       "id": "codex-process-runtime",
       "state": "integrated",
       "domain_owner": "apps/server/src/provider",
-      "reviewed_upstream_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "reviewed_upstream_commit": "822671581383a357c5dc8d3ea9984b408c3e03c6",
       "upstream_sources": [
         {
           "path": "apps/server/src/provider/CodexProvider.ts",
@@ -405,7 +1018,7 @@
         },
         {
           "path": "apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts",
-          "blob": "9eb80cf7a2143e40c41e3640e6a5fd5f48336eb7"
+          "blob": "997547cdb33091dd12dcbb51c717c5f1eb547989"
         }
       ],
       "rust_paths": [
@@ -465,7 +1078,7 @@
       "id": "redb-persistence",
       "state": "candidate",
       "domain_owner": "apps/server/src/persistence",
-      "reviewed_upstream_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "reviewed_upstream_commit": "822671581383a357c5dc8d3ea9984b408c3e03c6",
       "upstream_sources": [
         {
           "path": "apps/server/src/orchestration-v2/EventSink.ts",
@@ -521,11 +1134,11 @@
       "id": "iroh-transport",
       "state": "candidate",
       "domain_owner": "infra/relay",
-      "reviewed_upstream_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "reviewed_upstream_commit": "822671581383a357c5dc8d3ea9984b408c3e03c6",
       "upstream_sources": [
         {
           "path": "apps/server/src/ws.ts",
-          "blob": "cf2606c3a130592bd5c47f701d468d2fd0b82b7b"
+          "blob": "1c204481350d6b10880e2e18925836bb89b256ce"
         }
       ],
       "rust_paths": [
@@ -561,15 +1174,15 @@
       "id": "native-api-component",
       "state": "candidate",
       "domain_owner": "apps/server",
-      "reviewed_upstream_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "reviewed_upstream_commit": "822671581383a357c5dc8d3ea9984b408c3e03c6",
       "upstream_sources": [
         {
           "path": "packages/contracts/src/orchestrationV2.ts",
-          "blob": "eb0e9d43190dc28fe745a8636ce7c66b70ecd512"
+          "blob": "856cf89bafcb6cf40fbe7b28bb57563f25524e03"
         },
         {
           "path": "apps/server/src/ws.ts",
-          "blob": "cf2606c3a130592bd5c47f701d468d2fd0b82b7b"
+          "blob": "1c204481350d6b10880e2e18925836bb89b256ce"
         }
       ],
       "rust_paths": [

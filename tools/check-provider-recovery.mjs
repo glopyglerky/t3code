@@ -366,6 +366,39 @@ for (const status of terminalStatuses) {
   );
 }
 
+// New nightly contract fields must survive recovery's whole-record updates.
+// Missing model stays missing; a provider-reported model must not be rewritten.
+for (const model of [undefined, "requested-model", "provider-executed-model"]) {
+  for (const status of terminalStatuses) {
+    const result = add(
+      "recovery preserves provider-reported models and secret setup URLs",
+      fixture(
+        "roots",
+        projection({
+          nodes: [node("root:one", { kind: "root_turn" })],
+          turnItems: [
+            item("item:secret", "secret_request", {
+              label: "Service API key",
+              reason: "Authenticate the configured service",
+              url: "https://example.test/settings/api-keys?source=t3#new",
+              secretStatus: "pending",
+            }),
+          ],
+          providerTurns: [providerTurn(undefined, model === undefined ? {} : { model })],
+        }),
+        { status },
+      ),
+    );
+    const turn = result.events.find((event) => event.type === "provider-turn.updated").payload;
+    NodeAssert.equal(Object.hasOwn(turn, "model"), model !== undefined);
+    NodeAssert.equal(turn.model, model);
+    NodeAssert.equal(
+      result.events.find((event) => event.type === "turn-item.updated").payload.url,
+      "https://example.test/settings/api-keys?source=t3#new",
+    );
+  }
+}
+
 const nodeKinds = [
   "root_turn",
   "assistant_message",

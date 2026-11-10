@@ -279,21 +279,23 @@ async function capture(page: Page, directory: string, name: string): Promise<voi
 }
 
 async function completeInitialSetup(page: Page): Promise<void> {
-  // Fresh application state opens this wizard asynchronously after pairing. Wait for it
-  // before using Add project, which can otherwise open underneath the setup dialog.
-  const setup = page.getByRole("dialog", { name: "Set up T3 Code", exact: true });
-  await setup
-    .getByRole("heading", { name: "Connect your computers", exact: true })
-    .waitFor({ state: "visible" });
-  await setup.getByRole("button", { name: "Continue", exact: true }).click();
-  await setup
-    .getByRole("heading", { name: "Connect your agents", exact: true })
-    .waitFor({ state: "visible" });
-  // Agent sign-in and importing existing projects are optional. The replay provider is
-  // already supplied by source development mode, so this fixture needs neither operation.
-  await setup.getByRole("button", { name: "Continue", exact: true }).click();
-  await setup.getByRole("button", { name: "Do not import projects", exact: true }).click();
-  await setup.waitFor({ state: "hidden" });
+  // The integrated nightly opens a welcome page after pairing. Complete its normal
+  // persisted setup before creating the fixture project through the sidebar.
+  const heading = page.getByRole("heading", { name: "Welcome to T3 Code", exact: true });
+  await heading.waitFor({ state: "visible" });
+  const welcome = page.getByRole("main").filter({ has: heading });
+  // Source development mode supplies the free replay agent. Requiring its row and
+  // the enabled Start button also checks provider discovery without a real sign-in.
+  await welcome.getByText("Replay (dev)", { exact: true }).waitFor({ state: "visible" });
+  await welcome
+    .getByText(/^Looking for projects in your .* history…$/u)
+    .waitFor({ state: "hidden" });
+  const projectImport = welcome.getByRole("checkbox", {
+    name: /^Import (?:\d+ )?projects? and their threads\b/u,
+  });
+  if (await projectImport.isVisible()) await projectImport.uncheck();
+  await welcome.getByRole("button", { name: "Start", exact: true }).click();
+  await heading.waitFor({ state: "hidden" });
   await page.waitForURL((url) => url.pathname === "/");
 }
 

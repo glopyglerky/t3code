@@ -3,12 +3,12 @@
   "upstream": {
     "repository": "pingdotgg/t3code",
     "channel": "nightly",
-    "release_id": 438639042,
-    "tag": "v0.1.8-nightly.20261109.4392",
-    "published_at": "2026-11-09T01:00:20Z",
-    "release_url": "https://github.com/pingdotgg/t3code/releases/tag/v0.1.8-nightly.20261109.4392",
-    "commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
-    "root_tree": "ccf94b3b8b4e382d76cf50140810a0e796d3be75"
+    "release_id": 439894945,
+    "tag": "v0.1.9-nightly.20261110.4452",
+    "published_at": "2026-11-10T02:59:35Z",
+    "release_url": "https://github.com/pingdotgg/t3code/releases/tag/v0.1.9-nightly.20261110.4452",
+    "commit": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+    "root_tree": "c0f99b96e765f4e6ae483ce3a3e5bf84fd47b88b"
   },
   "qualification": {
     "status": "unqualified",
@@ -22,43 +22,43 @@
       "path_prefixes": [
         "apps/server/"
       ],
-      "entries": 1600,
-      "inventory_sha256": "d6991ddd0ae2fc5b254688fc349c02ff9991d7d600e53bd9e89eed18ae50778b"
+      "entries": 1606,
+      "inventory_sha256": "193fa52887f2f683cd8d8c91129e07a3e5a0eeec073c84ab0083ef6f638c3a6b"
     },
     "contracts": {
       "path_prefixes": [
         "packages/contracts/"
       ],
-      "entries": 110,
-      "inventory_sha256": "298584f222b7683d581855244cc035b767f3acf7604b09dfa26ba8160999fea3"
+      "entries": 112,
+      "inventory_sha256": "207d10a6e97466e64c73d7492c98e98b5aebbe5beb352a3c4b1985d2c106c5c9"
     },
     "client_runtime": {
       "path_prefixes": [
         "packages/client-runtime/"
       ],
-      "entries": 396,
-      "inventory_sha256": "a48e1f4f6d9a08d791dc622c9ba63a98fa68f07f1588088cd00ce2b7321d13b8"
+      "entries": 404,
+      "inventory_sha256": "5e4448cb7793dbb151ca38e09f84ed496e31f419c5c1c140700e57a3d87bc13f"
     },
     "web": {
       "path_prefixes": [
         "apps/web/"
       ],
-      "entries": 1917,
-      "inventory_sha256": "2b70cf5da894b02d25a9337b1d4a050f2bbb25b2cd963e2376fec19eabd0e87e"
+      "entries": 1953,
+      "inventory_sha256": "641faf48316c92bbd05457e217f39fd74b44dd1fed2bad44bc18464b67e8c26a"
     },
     "desktop": {
       "path_prefixes": [
         "apps/desktop/"
       ],
       "entries": 293,
-      "inventory_sha256": "5f2d34e114f8d270481bccf0b4aac4f86a7b4894133f8499ca10aae9851ca6fe"
+      "inventory_sha256": "406f89ee77b6f563bed2574804631524197b8a04a6a6b174be6f4bcb2d342971"
     },
     "mobile": {
       "path_prefixes": [
         "apps/mobile/"
       ],
-      "entries": 1700,
-      "inventory_sha256": "5915dbf0b3322b39f5bbe135c2eb00d8fd50d092c4b5911723749d22c06476df"
+      "entries": 1729,
+      "inventory_sha256": "2435ed195e7059e5bb7ebe70ab3c5d451791c3461cd37dde9ce2f8645d1f1580"
     },
     "connect": {
       "path_prefixes": [
@@ -73,7 +73,7 @@
         "packages/contracts/src/relay"
       ],
       "entries": 245,
-      "inventory_sha256": "54c33466c69b0ba2509e78723c66fa4b1be2ad94dab4f91892106bffb123b849"
+      "inventory_sha256": "f317c7dfb7038b22a6763fe6804201e55c334016fb40f759436c9c67cbcae920"
     },
     "providers": {
       "path_prefixes": [
@@ -82,14 +82,14 @@
         "packages/effect-codex-app-server/"
       ],
       "entries": 343,
-      "inventory_sha256": "69758ba5c49c15c1979ff88cb9674170cf88aa164435bb869ae19c47d1bed42a"
+      "inventory_sha256": "d2b20a833f7f996c65f1678337067addb1721cb11bb1e820e33d14cc8401a4e6"
     },
     "shared": {
       "path_prefixes": [
         "packages/shared/"
       ],
       "entries": 237,
-      "inventory_sha256": "f63b7806baadd17829dbe2be125666a4ba813ad201915802cf9bff19b596ac9e"
+      "inventory_sha256": "47c27d3971ca8cc05d08559edb48989752356a26f90ebc30cc8260365902a6ef"
     }
   },
   "detection": {
@@ -99,12 +99,14 @@
     "commit": "822671581383a357c5dc8d3ea9984b408c3e03c6",
     "published_at": "2026-11-10T02:59:35Z",
     "release_url": "https://github.com/pingdotgg/t3code/releases/tag/v0.1.9-nightly.20261110.4452",
-    "status": "detected-not-integrated"
+    "status": "integrated"
   },
   "integration": {
-    "commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+    "commit": "822671581383a357c5dc8d3ea9984b408c3e03c6",
     "recovered_from": "d29a94f3a175eac1f26c548023fedd8695cedfaf",
     "preserved_rust_base": "0be60f85268daece83e616b97f6fc421ec83ee6b",
-    "meaning": "The upstream field pins the restored implementation baseline. Detection does not advance integration; integration does not establish full application qualification."
+    "meaning": "The upstream field pins the integrated implementation. Source integration does not establish full Rust or cross-platform acceptance.",
+    "previous_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+    "report": "docs/porting/nightly-8226715.md"
   }
 }
