@@ -67,6 +67,40 @@ const toolInput = {
   nested: { id: "payload-id", completedAt: -7, values: [null, false, 1.25, "💬 é العربية"] },
 };
 
+function pullRequestFixtures(at) {
+  const approvals = [
+    {
+      awaitingApproval: ["https://example.test/actions/runs/42", "security-scan"],
+      approvalAnnounced: true,
+    },
+    { awaitingApproval: [], approvalAnnounced: false },
+    {},
+  ];
+  const watch = {
+    startedAt: at,
+    headSha: "fixture-head",
+    failedChecks: [],
+    passed: false,
+    passedChecks: [],
+    remarksThrough: at,
+    remarkIds: [],
+    conflicting: false,
+    wakes: 0,
+  };
+  return approvals.map((approval, index) => ({
+    host: "example.test",
+    repository: "fixture/project",
+    number: index + 1,
+    url: `https://example.test/fixture/project/pull/${index + 1}`,
+    source: "manual",
+    linkedAt: at,
+    snapshot: null,
+    stack: null,
+    watch: { ...watch, ...approval },
+    endedWatch: { ...watch, ...approvals[(index + 1) % approvals.length] },
+  }));
+}
+
 function seedEvents(threadId) {
   const rootNodeId = NodeId.make(`node:${threadId}:root`);
   const subagentId = NodeId.make(`node:${threadId}:subagent`);
@@ -151,6 +185,7 @@ function seedEvents(threadId) {
       activeProviderThreadId: null,
       lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
       forkedFrom: null,
+      pullRequests: pullRequestFixtures(DateTime.formatIso(started)),
       createdAt: started,
       updatedAt: started,
       archivedAt: null,
@@ -327,6 +362,11 @@ function assertRecovered(state) {
   NodeAssert.equal(state.receipts.length, threadIds.length);
   NodeAssert.ok(state.outbox.every((row) => row.status === "cancelled"));
   for (const projection of state.projections) {
+    NodeAssert.deepEqual(
+      projection.thread.pullRequests,
+      pullRequestFixtures(DateTime.formatIso(started)),
+      "recovery must retain active and ended approval holds, including explicit false and absent fields",
+    );
     NodeAssert.ok(projection.nodes.every((node) => node.status === "cancelled"));
     NodeAssert.equal(projection.subagents[0].status, "cancelled");
     NodeAssert.equal(projection.subagents[0].result, "existing result é");
@@ -391,7 +431,9 @@ async function success(selection, trigger, name) {
     selection,
     filename,
   );
-  scenarios.push(`${name}: durable commit, reopen, replay and idempotence`);
+  scenarios.push(
+    `${name}: durable commit, reopen, replay and idempotence preserve pull-request approval state`,
+  );
   return comparable(first);
 }
 
@@ -972,6 +1014,8 @@ process.stdin.on("end", () => {
     "packages/provider-core/src/server/IdAllocator.ts",
     "packages/provider-core/src/server/collectStreamText.ts",
     "packages/contracts/src/orchestrationV2.ts",
+    "packages/contracts/src/threadPullRequest.ts",
+    "packages/contracts/src/pullRequest.ts",
     "crates/core/src/provider_recovery.rs",
     "crates/core/src/provider_recovery_wire.rs",
     "crates/core/src/bin/t3-code-ls-recovery.rs",

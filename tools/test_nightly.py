@@ -159,6 +159,108 @@ class ImmutableSnapshots(unittest.TestCase):
             "acceptance_tests": [f"tools/check-{identifier}.mjs"],
         }
 
+    def default_branch_lock(self, commit):
+        return nightly.manifest(self.root, {
+            "repository": nightly.REPOSITORY, "channel": "default-branch", "branch": "main",
+            "source_url": f"https://github.com/{nightly.REPOSITORY}/commit/{commit}",
+        }, commit)
+
+    def test_default_branch_lock_has_immutable_source_without_release_identity(self):
+        lock = self.default_branch_lock(self.base)
+        output = self.root / "lock.json"
+        nightly.write_json(output, lock)
+        self.assertEqual(nightly.read_lock(output), lock)
+        for field, value in [
+            ("repository", "another/repository"), ("channel", "branch"),
+            ("branch", None), ("branch", ""), ("branch", "main\n"),
+            ("branch", "../main"), ("branch", "main..other"), ("branch", "main.lock"),
+            ("commit", "main"), ("root_tree", "HEAD^{tree}"),
+            ("source_url", f"https://github.com/{nightly.REPOSITORY}/commit/{'a' * 40}"),
+            ("source_url", f"http://github.com/{nightly.REPOSITORY}/commit/{self.base}"),
+            ("tag", self.metadata["tag"]), ("release_id", self.metadata["release_id"]),
+            ("published_at", self.metadata["published_at"]), ("release_url", None),
+        ]:
+            changed = copy.deepcopy(lock)
+            changed["upstream"][field] = value
+            nightly.write_json(output, changed)
+            with self.subTest(field=field, value=value), self.assertRaises(nightly.TrackingError):
+                nightly.read_lock(output)
+
+    def test_nightly_reports_ancestry_against_default_branch_integration(self):
+        (self.root / "apps/server/source.txt").write_text("integrated server changes\n")
+        (self.root / "packages/contracts/source.txt").write_text("integrated contracts\n")
+        integrated = self.commit("integrated default-branch snapshot")
+        lock = self.default_branch_lock(integrated)
+        (self.root / "apps/web/source.txt").write_text("newer upstream UI\n")
+        ahead = self.commit("newer nightly")
+        self.run_git("switch", "--detach", self.base)
+        (self.root / "apps/mobile/source.txt").write_text("separate history\n")
+        diverged = self.commit("divergent nightly")
+        port = self.port("policy", "apps/server/source.txt")
+        port["reviewed_upstream_commit"] = integrated
+        port["upstream_sources"][0]["blob"] = self.run_git("rev-parse", f"{integrated}:apps/server/source.txt")
+        (self.root / "port-map.json").write_text(json.dumps({
+            "schema_version": 1, "integrated_upstream_commit": integrated, "ports": [port],
+        }))
+        for head, relation, state, review in [
+            (integrated, "equal", "current", False),
+            (self.base, "behind", "already_integrated", False),
+            (ahead, "ahead", "update_available", True),
+            (diverged, "diverged", "diverged", True),
+        ]:
+            with self.subTest(relation=relation):
+                result = nightly.report(self.root, lock, nightly.manifest(self.root, self.metadata, head))
+                self.assertEqual(result["candidate_relation"], relation)
+                self.assertEqual(result["state"], state)
+                self.assertEqual(result["requires_review"], review)
+                self.assertEqual(result["revisions"], {
+                    "detected": head, "integrated": integrated, "qualified": None,
+                })
+                self.assertEqual(result["qualification"], lock["qualification"])
+                self.assertEqual(result["changed_file_count"] == 0, relation == "equal")
+                if relation == "behind":
+                    self.assertEqual(result["port_impact"]["affected_ports"], [])
+                    self.assertEqual(result["port_impact"]["unmapped_changes"], [])
+                    self.assertIn("Keep the integrated pin", result["next_step"])
+
+    def test_default_branch_check_resolves_only_detected_nightly_without_changing_pin(self):
+        (self.root / "apps/server/source.txt").write_text("ahead of published nightly\n")
+        integrated = self.commit("unreleased default-branch source")
+        lock = self.default_branch_lock(integrated)
+        output = self.root / "lock.json"
+        report_path = self.root / "report.json"
+        nightly.write_json(output, lock)
+        releases_url = f"{nightly.API}/releases?per_page=100"
+        tag = self.metadata["tag"]
+        tag_url = f"{nightly.API}/git/ref/tags/{tag}"
+        get, calls = api({
+            releases_url: ([release()], {}),
+            tag_url: ({"ref": f"refs/tags/{tag}", "object": {"type": "commit", "sha": self.base}}, {}),
+        })
+        with patch.object(nightly, "GitHub") as github, patch("sys.stdout"):
+            github.return_value.get.side_effect = get
+            status = nightly.main(["check", "--repo-root", str(self.root), "--lock", str(output),
+                                   "--output", str(report_path)])
+        self.assertEqual(status, 0)
+        self.assertEqual(calls, [releases_url, tag_url])
+        result = json.loads(report_path.read_text())
+        self.assertEqual(result["state"], "already_integrated")
+        self.assertFalse(result["requires_review"])
+        self.assertEqual(json.loads(output.read_text()), lock)
+        self.assertEqual(self.run_git("rev-parse", "HEAD"), integrated)
+
+    def test_shallow_history_cannot_be_reported_as_definitely_diverged(self):
+        (self.root / "apps/server/source.txt").write_text("new source\n")
+        head = self.commit("new upstream source")
+        with tempfile.TemporaryDirectory() as temporary:
+            shallow = Path(temporary) / "shallow"
+            subprocess.run(["git", "clone", "--quiet", "--depth=1", self.root.as_uri(), str(shallow)],
+                           check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            subprocess.run(["git", "-C", str(shallow), "fetch", "--quiet", "--depth=1", "origin", self.base],
+                           check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            with self.assertRaisesRegex(nightly.TrackingError, "shallow"):
+                nightly.report(shallow, self.default_branch_lock(head), self.lock)
+
     def test_mapped_original_change_still_alerts_after_fork_source_retirement(self):
         source = "apps/server/source.txt"
         (self.root / source).write_text("changed upstream behavior\n")

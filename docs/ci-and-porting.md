@@ -44,6 +44,12 @@ The queue is a work plan. It does not generate Rust implementations, merge chang
 
 Detected, integrated, and qualified revisions remain separate. Discovering a new default-branch commit changes neither the integrated pin nor qualification. CI receipts for this fork also do not replace the per-platform acceptance receipts required to retire original code. The source guard validates those receipts against their current inputs.
 
+## Default-branch snapshots and nightlies
+
+The integrated source can advance to an immutable default-branch commit before a nightly release contains it. Such a lock records `channel: "default-branch"`, the branch name, exact commit and tree, and a commit URL. Nightly tags and release identifiers belong to the separate `nightly_reference`, not that source identity.
+
+The nightly checker compares Git ancestry as well as trees. An equal revision is current; an ancestor nightly is already integrated and creates no reverse-import or removal work. A newer or divergent nightly requires review. Complete tree differences remain in the report, and missing shallow ancestry fails explicitly. Nightly source locks retain their moved-tag and publication rollback checks. None of these reports changes the source pin or qualification.
+
 ## Generate plans locally
 
 Run from the repository root. Reports must stay outside the source checkout.
@@ -61,4 +67,4 @@ For an already fetched upstream snapshot, replace `--fetch-default` with `--upst
 
 `ci_plan.py --offline` skips remote receipt lookup and plans full fork qualification. `--full` explicitly forces that scope even when reusable evidence exists. These commands write plans; the workflow executes the selected checks.
 
-The current integrated upstream pin is recorded in [upstream.lock.json](../upstream.lock.json). The [8226715 integration](porting/nightly-8226715.md) preserves this CI policy while importing the next pinned nightly. Application Rust still uses the pinned rustc-derived BlueFe package through Lustr's compatibility coordinator. Native Lust and platform retirement acceptance remain separately recorded in the [toolchain lock](../toolchain.lock.json) and [port map](../port-map.json).
+The current integrated upstream pin is recorded in [upstream.lock.json](../upstream.lock.json). The [934c7f8 integration](porting/default-934c7f8.md) advances the retained application beyond [nightly 8226715](porting/nightly-8226715.md) while preserving this CI policy. Application Rust still uses the pinned rustc-derived BlueFe package through Lustr's compatibility coordinator. Native Lust and platform retirement acceptance remain separately recorded in the [toolchain lock](../toolchain.lock.json) and [port map](../port-map.json).

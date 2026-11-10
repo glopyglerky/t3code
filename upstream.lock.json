@@ -2,13 +2,11 @@
   "schema_version": 1,
   "upstream": {
     "repository": "pingdotgg/t3code",
-    "channel": "nightly",
-    "release_id": 439894945,
-    "tag": "v0.1.9-nightly.20261110.4452",
-    "published_at": "2026-11-10T02:59:35Z",
-    "release_url": "https://github.com/pingdotgg/t3code/releases/tag/v0.1.9-nightly.20261110.4452",
-    "commit": "822671581383a357c5dc8d3ea9984b408c3e03c6",
-    "root_tree": "c0f99b96e765f4e6ae483ce3a3e5bf84fd47b88b"
+    "channel": "default-branch",
+    "branch": "main",
+    "source_url": "https://github.com/pingdotgg/t3code/commit/934c7f8d8e7a012aa55be9c0b17498979040fe02",
+    "commit": "934c7f8d8e7a012aa55be9c0b17498979040fe02",
+    "root_tree": "831a3991f833e701489bdc94709380d2535d0d1f"
   },
   "qualification": {
     "status": "unqualified",
@@ -23,14 +21,14 @@
         "apps/server/"
       ],
       "entries": 1606,
-      "inventory_sha256": "193fa52887f2f683cd8d8c91129e07a3e5a0eeec073c84ab0083ef6f638c3a6b"
+      "inventory_sha256": "9ab2479ea7af1a9605eca228463fc02d59ed18c53c8ff01c03a3ab0f2245f8be"
     },
     "contracts": {
       "path_prefixes": [
         "packages/contracts/"
       ],
       "entries": 112,
-      "inventory_sha256": "207d10a6e97466e64c73d7492c98e98b5aebbe5beb352a3c4b1985d2c106c5c9"
+      "inventory_sha256": "cd831d654e935d072ea8b33b02ddbecedae5101f34310e191002f4bfed2d5629"
     },
     "client_runtime": {
       "path_prefixes": [
@@ -44,7 +42,7 @@
         "apps/web/"
       ],
       "entries": 1953,
-      "inventory_sha256": "641faf48316c92bbd05457e217f39fd74b44dd1fed2bad44bc18464b67e8c26a"
+      "inventory_sha256": "a7b835df87f5c1b159b8afaed7f9ea511a8c0dfc909c5d70e024e3ce42fcd686"
     },
     "desktop": {
       "path_prefixes": [
@@ -58,7 +56,7 @@
         "apps/mobile/"
       ],
       "entries": 1729,
-      "inventory_sha256": "2435ed195e7059e5bb7ebe70ab3c5d451791c3461cd37dde9ce2f8645d1f1580"
+      "inventory_sha256": "63248985aa84b3ae87d6664225cc5e16b24beea7ee2f06209cf7503760ffbdb5"
     },
     "connect": {
       "path_prefixes": [
@@ -93,20 +91,30 @@
     }
   },
   "detection": {
-    "channel": "nightly",
-    "tag": "v0.1.9-nightly.20261110.4452",
-    "release_id": 439894945,
-    "commit": "822671581383a357c5dc8d3ea9984b408c3e03c6",
-    "published_at": "2026-11-10T02:59:35Z",
-    "release_url": "https://github.com/pingdotgg/t3code/releases/tag/v0.1.9-nightly.20261110.4452",
+    "repository": "pingdotgg/t3code",
+    "channel": "default-branch",
+    "branch": "main",
+    "source_url": "https://github.com/pingdotgg/t3code/commit/934c7f8d8e7a012aa55be9c0b17498979040fe02",
+    "commit": "934c7f8d8e7a012aa55be9c0b17498979040fe02",
     "status": "integrated"
   },
   "integration": {
-    "commit": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+    "commit": "934c7f8d8e7a012aa55be9c0b17498979040fe02",
     "recovered_from": "d29a94f3a175eac1f26c548023fedd8695cedfaf",
     "preserved_rust_base": "0be60f85268daece83e616b97f6fc421ec83ee6b",
     "meaning": "The upstream field pins the integrated implementation. Source integration does not establish full Rust or cross-platform acceptance.",
-    "previous_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
-    "report": "docs/porting/nightly-8226715.md"
+    "previous_commit": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+    "report": "docs/porting/default-934c7f8.md"
+  },
+  "nightly_reference": {
+    "repository": "pingdotgg/t3code",
+    "channel": "nightly",
+    "release_id": 439894945,
+    "tag": "v0.1.9-nightly.20261110.4452",
+    "published_at": "2026-11-10T02:59:35Z",
+    "release_url": "https://github.com/pingdotgg/t3code/releases/tag/v0.1.9-nightly.20261110.4452",
+    "commit": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+    "root_tree": "c0f99b96e765f4e6ae483ce3a3e5bf84fd47b88b",
+    "status": "contained-in-integrated-source"
   }
 }

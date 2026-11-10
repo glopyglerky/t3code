@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pin published T3 nightlies and report source changes without modifying the checkout."""
+"""Compare published T3 nightlies with immutable integrated source snapshots."""
 
 from __future__ import annotations
 
@@ -305,12 +305,25 @@ def read_lock(path: Path) -> dict:
     if not isinstance(value, dict) or value.get("schema_version") != 1:
         raise TrackingError("Unsupported upstream lock schema.")
     upstream = value.get("upstream")
-    if not isinstance(upstream, dict) or upstream.get("repository") != REPOSITORY or upstream.get("channel") != "nightly":
+    if (not isinstance(upstream, dict) or upstream.get("repository") != REPOSITORY
+            or upstream.get("channel") not in ("nightly", "default-branch")):
         raise TrackingError("Upstream lock identifies a different repository or channel.")
     require_sha(upstream.get("commit"))
     require_sha(upstream.get("root_tree"))
-    release_metadata({"id": upstream.get("release_id"), "tag_name": upstream.get("tag"),
-                      "published_at": upstream.get("published_at")})
+    if upstream["channel"] == "nightly":
+        release_metadata({"id": upstream.get("release_id"), "tag_name": upstream.get("tag"),
+                          "published_at": upstream.get("published_at")})
+    else:
+        branch = upstream.get("branch")
+        if (not isinstance(branch, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", branch)
+                or ".." in branch or branch.endswith(".")
+                or any(not part or part.startswith(".") or part.endswith(".lock") for part in branch.split("/"))):
+            raise TrackingError("Default-branch snapshot has an invalid branch name.")
+        expected_url = f"https://github.com/{REPOSITORY}/commit/{upstream['commit']}"
+        if upstream.get("source_url") != expected_url:
+            raise TrackingError("Default-branch snapshot must link to its immutable source commit.")
+        if any(field in upstream for field in ("tag", "release_id", "published_at", "release_url")):
+            raise TrackingError("Default-branch snapshot cannot claim a nightly release identity.")
     if not isinstance(value.get("qualification"), dict):
         raise TrackingError("Upstream lock has no qualification state.")
     return value
@@ -380,6 +393,26 @@ def port_impact(root: Path, baseline: str, changes: list[dict]) -> dict:
     return result
 
 
+def candidate_relation(root: Path, base: str, head: str) -> str:
+    require_sha(base)
+    require_sha(head)
+    if base == head:
+        return "equal"
+    try:
+        left, right = map(int, git(root, "rev-list", "--left-right", "--count", f"{base}...{head}").split())
+    except ValueError as error:
+        raise TrackingError("Git returned an invalid ancestry comparison.") from error
+    if left < 0 or right < 0 or left == right == 0:
+        raise TrackingError("Git returned an invalid ancestry comparison.")
+    if left == 0:
+        return "ahead"
+    if right == 0:
+        return "behind"
+    if git(root, "rev-parse", "--is-shallow-repository").strip() == b"true":
+        raise TrackingError("Cannot distinguish divergent history from missing shallow ancestry; fetch complete history.")
+    return "diverged"
+
+
 def report(root: Path, lock: dict, candidate: dict) -> dict:
     base = lock["upstream"]["commit"]
     head = candidate["upstream"]["commit"]
@@ -396,22 +429,33 @@ def report(root: Path, lock: dict, candidate: dict) -> dict:
         if old != new:
             changes.append({"path": path, "status": "added" if old is None else "removed" if new is None else "modified",
                             "surfaces": surfaces_for(path), "before": old, "after": new})
-    updated = lock["upstream"] != candidate["upstream"]
+    relation = candidate_relation(root, base, head)
+    requires_review = relation in ("ahead", "diverged")
+    next_steps = {
+        "equal": "The detected and integrated commits are equal. No source integration is needed; qualification remains separate.",
+        "behind": "The detected commit is already contained in the integrated source. Keep the integrated pin; the comparison does not request source removals or rollback.",
+        "ahead": "Review port_impact and the complete source diff, integrate unported implementation, and translate affected behavior. Run application and target acceptance gates before separately advancing integrated and qualified revisions.",
+        "diverged": "The detected and integrated histories diverged. Review their common history, port_impact and complete source differences before selecting an integration; do not replace the integrated pin automatically.",
+    }
     return {
         "schema_version": 1,
-        "state": "update_available" if updated else "current",
+        "state": {"equal": "current", "ahead": "update_available", "behind": "already_integrated",
+                  "diverged": "diverged"}[relation],
+        "candidate_relation": relation,
         "baseline": lock["upstream"],
         "candidate": candidate,
         "revisions": {"detected": head, "integrated": base,
                       "qualified": lock["qualification"].get("last_qualified_commit")},
         "qualification": lock["qualification"],
-        "port_impact": port_impact(root, base, changes),
-        "requires_review": updated,
+        # Keep the full comparison below, but never turn a contained release's
+        # reverse diff into new integration or source-removal work.
+        "port_impact": port_impact(root, base, changes if requires_review else []),
+        "requires_review": requires_review,
         "complete_tree_comparison": True,
         "changed_file_count": len(changes),
         "changed_surface_counts": {name: sum(name in item["surfaces"] for item in changes) for name in SCOPES},
         "changes": changes,
-        "next_step": "Review port_impact and the complete source diff, integrate unported implementation, and translate affected behavior. Run application and target acceptance gates before separately advancing integrated and qualified revisions. This command never merges, changes branches, edits the lock, or qualifies a port.",
+        "next_step": next_steps[relation] + " This command never merges, changes branches, edits the lock, or qualifies a port.",
     }
 
 
@@ -461,13 +505,17 @@ def main(argv: list[str] | None = None) -> int:
             lock = read_lock(args.lock)
             client = GitHub(os.environ.get("GITHUB_TOKEN"))
             metadata = latest_nightly(all_releases(client.get))
-            if published_time(metadata["published_at"]) < published_time(lock["upstream"]["published_at"]):
-                raise TrackingError("The newest published nightly predates the lock; investigate removed or changed releases.")
-            pinned_commit = resolve_tag(client.get, lock["upstream"]["tag"])
-            if pinned_commit != lock["upstream"]["commit"]:
-                raise TrackingError("The pinned nightly tag moved to another commit; investigate before updating.")
-            commit = pinned_commit if metadata["tag"] == lock["upstream"]["tag"] else resolve_tag(client.get, metadata["tag"])
-            ensure_commit(args.repo_root, pinned_commit, args.fetch)
+            baseline = lock["upstream"]
+            if baseline["channel"] == "nightly":
+                if published_time(metadata["published_at"]) < published_time(baseline["published_at"]):
+                    raise TrackingError("The newest published nightly predates the lock; investigate removed or changed releases.")
+                pinned_commit = resolve_tag(client.get, baseline["tag"])
+                if pinned_commit != baseline["commit"]:
+                    raise TrackingError("The pinned nightly tag moved to another commit; investigate before updating.")
+                commit = pinned_commit if metadata["tag"] == baseline["tag"] else resolve_tag(client.get, metadata["tag"])
+            else:
+                commit = resolve_tag(client.get, metadata["tag"])
+            ensure_commit(args.repo_root, baseline["commit"], args.fetch)
             ensure_commit(args.repo_root, commit, args.fetch)
             result = report(args.repo_root, lock, manifest(args.repo_root, metadata, commit))
         changed = write_json(args.output, result)
