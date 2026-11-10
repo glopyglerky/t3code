@@ -6,7 +6,6 @@ import {
   EventId,
   IsoDateTime,
   isKnownOrchestrationV2EventType,
-  NonNegativeInt,
   OrchestrationV2DomainEventJson,
   OrchestrationV2StoredEvent,
   ProjectId,
@@ -15,9 +14,6 @@ import {
   type OrchestrationV2DomainEvent,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
-import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
-import * as SqlClient from "effect/sql/SqlClient";
-import * as SqlSchema from "effect/sql/SqlSchema";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
@@ -26,6 +22,8 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import { replayAndBufferProjectedLiveEvents } from "../orchestration-v2/LiveStreamBudget.ts";
+import { EventRows, type ApplicationEventRow, type NewApplicationEventRow } from "./EventRows.ts";
+import * as SqliteEventRows from "./SqliteEventRows.ts";
 
 import {
   toPersistenceDecodeError,
@@ -147,36 +145,9 @@ const AppendProjectEventRequestSchema = Schema.Struct({
   metadataJson: EventMetadataFromJsonString,
 });
 
-const ProjectEventPersistedRowSchema = Schema.Struct({
-  sequence: NonNegativeInt,
-  eventId: EventId,
-  type: ProjectEventType,
-  aggregateKind: Schema.Literal("project"),
-  aggregateId: ProjectId,
-  occurredAt: IsoDateTime,
-  commandId: Schema.NullOr(CommandId),
-  causationEventId: Schema.NullOr(EventId),
-  correlationId: Schema.NullOr(CommandId),
-  payload: UnknownFromJsonString,
-  metadata: EventMetadataFromJsonString,
-});
+const encodeProjectRequest = Schema.encodeEffect(AppendProjectEventRequestSchema);
 
 const READ_PAGE_SIZE = 500;
-
-interface ApplicationEventRow {
-  readonly sequence: number;
-  readonly event_id: string;
-  readonly command_id: string | null;
-  readonly aggregate_kind: "project" | "thread";
-  readonly stream_id: string;
-  readonly event_type: string;
-  readonly occurred_at: string;
-  readonly payload_json: string;
-  readonly metadata_json: string;
-  readonly application_event_version: number;
-  readonly causation_event_id: string | null;
-  readonly correlation_id: string | null;
-}
 
 const decodeV2EventJson = Schema.decodeUnknownEffect(OrchestrationV2DomainEventJson);
 const encodeV2EventJson = Schema.encodeEffect(OrchestrationV2DomainEventJson);
@@ -290,106 +261,53 @@ function toPersistenceSqlOrDecodeError(sqlOperation: string, decodeOperation: st
 }
 
 const makeEventStore = Effect.gen(function* () {
-  const sql = yield* SqlClient.SqlClient;
+  const rows = yield* EventRows;
   const committedEvents = yield* PubSub.unbounded<ApplicationStoredEvent>();
   const promptHints = new Map<string, number>();
-  const restoredPayloadJson = sql`CASE
-    WHEN orchestration_events.event_type IN ('subagent.updated', 'turn-item.updated')
-      AND json_type(orchestration_events.payload_json, '$.promptSequence') = 'integer'
-    THEN json_set(
-      json_remove(orchestration_events.payload_json, '$.promptSequence'),
-      '$.prompt',
-      (SELECT json_extract(anchor.payload_json, '$.prompt')
-       FROM orchestration_events AS anchor
-       WHERE anchor.sequence = json_extract(orchestration_events.payload_json, '$.promptSequence'))
-    )
-    ELSE orchestration_events.payload_json
-  END`;
 
-  const appendProjectEventRow = SqlSchema.findOne({
-    Request: AppendProjectEventRequestSchema,
-    Result: ProjectEventPersistedRowSchema,
-    execute: (request) =>
-      sql`
-        INSERT INTO orchestration_events (
-          event_id,
-          aggregate_kind,
-          stream_id,
-          stream_version,
-          event_type,
-          occurred_at,
-          command_id,
-          causation_event_id,
-          correlation_id,
-          actor_kind,
-          payload_json,
-          metadata_json,
-          application_event_version
-        )
-        VALUES (
-          ${request.eventId},
-          'project',
-          ${request.streamId},
-          COALESCE(
-            (
-              SELECT stream_version + 1
-              FROM orchestration_events
-              WHERE aggregate_kind = 'project'
-                AND stream_id = ${request.streamId}
-              ORDER BY stream_version DESC
-              LIMIT 1
-            ),
-            0
-          ),
-          ${request.type},
-          ${request.occurredAt},
-          ${request.commandId},
-          ${request.causationEventId},
-          ${request.correlationId},
-          ${request.actorKind},
-          ${request.payloadJson},
-          ${request.metadataJson},
-          2
-        )
-        RETURNING
-          sequence,
-          event_id AS "eventId",
-          event_type AS "type",
-          aggregate_kind AS "aggregateKind",
-          stream_id AS "aggregateId",
-          occurred_at AS "occurredAt",
-          command_id AS "commandId",
-          causation_event_id AS "causationEventId",
-          correlation_id AS "correlationId",
-          payload_json AS "payload",
-          metadata_json AS "metadata"
-      `,
-  });
-
-  const appendProjectEvent: OrchestrationEventStore["Service"]["appendProjectEvent"] = (event) =>
-    appendProjectEventRow({
-      eventId: event.eventId,
-      streamId: event.aggregateId,
-      type: event.type,
-      causationEventId: event.causationEventId,
-      correlationId: event.correlationId,
-      actorKind: inferActorKind(event),
-      occurredAt: event.occurredAt,
-      commandId: event.commandId,
-      payloadJson:
-        event.type === "project.deleted" || !event.payload.projectIcon
-          ? event.payload
-          : { ...event.payload, projectIcon: encodeProjectIcon(event.payload.projectIcon) },
-      metadataJson: event.metadata,
-    }).pipe(
-      Effect.flatMap((row) => decodeProjectEvent(row)),
-      Effect.mapError(
-        toPersistenceSqlOrDecodeError(
-          "OrchestrationEventStore.appendProjectEvent:insert",
-          "OrchestrationEventStore.appendProjectEvent:decode",
-        ),
+  const appendProjectEvent: OrchestrationEventStore["Service"]["appendProjectEvent"] = Effect.fn(
+    "OrchestrationEventStore.appendProjectEvent",
+  )(
+    function* (event) {
+      const request = yield* encodeProjectRequest({
+        eventId: event.eventId,
+        streamId: event.aggregateId,
+        type: event.type,
+        causationEventId: event.causationEventId,
+        correlationId: event.correlationId,
+        actorKind: inferActorKind(event),
+        occurredAt: event.occurredAt,
+        commandId: event.commandId,
+        payloadJson:
+          event.type === "project.deleted" || !event.payload.projectIcon
+            ? event.payload
+            : { ...event.payload, projectIcon: encodeProjectIcon(event.payload.projectIcon) },
+        metadataJson: event.metadata,
+      });
+      const row: NewApplicationEventRow = {
+        event_id: request.eventId,
+        aggregate_kind: "project",
+        stream_id: request.streamId,
+        event_type: request.type,
+        occurred_at: request.occurredAt,
+        command_id: request.commandId,
+        causation_event_id: request.causationEventId,
+        correlation_id: request.correlationId,
+        actor_kind: request.actorKind,
+        payload_json: request.payloadJson,
+        metadata_json: request.metadataJson,
+        application_event_version: 2,
+      };
+      const inserted = yield* rows.append({ row });
+      return yield* rowToProjectEvent({ ...row, sequence: inserted.sequence });
+    },
+    Effect.mapError(
+      toPersistenceSqlOrDecodeError(
+        "OrchestrationEventStore.appendProjectEvent:insert",
+        "OrchestrationEventStore.appendProjectEvent:decode",
       ),
-    );
+    ),
+  );
 
   const readApplicationRows = (input: {
     readonly afterSequence: number;
@@ -400,47 +318,15 @@ const makeEventStore = Effect.gen(function* () {
     readonly onlyAgentEvents?: boolean;
     readonly limit: number;
   }) =>
-    sql<ApplicationEventRow>`
-      SELECT
-        sequence,
-        event_id,
-        command_id,
-        aggregate_kind,
-        stream_id,
-        event_type,
-        occurred_at,
-        ${restoredPayloadJson} AS payload_json,
-        metadata_json,
-        application_event_version,
-        causation_event_id,
-        correlation_id
-      FROM orchestration_events
-      ${
-        // Otherwise the sequence index wins and command lookups scan every V2 event.
-        input.commandId !== undefined
-          ? sql`INDEXED BY idx_orch_events_command_id`
-          : input.onlyAgentEvents === true
-            ? sql``
-            : sql`INDEXED BY idx_orchestration_events_application_high_water`
-      }
-      WHERE sequence > ${input.afterSequence}
-        AND sequence <= ${input.throughSequence ?? Number.MAX_SAFE_INTEGER}
-        AND (
-          ${
-            input.onlyAgentEvents === true
-              ? sql`application_event_version = 2 AND aggregate_kind = 'thread'`
-              : sql`aggregate_kind = 'project'
-                    OR (application_event_version = 2 AND aggregate_kind = 'thread')`
-          }
-        )
-        AND ${sql.and([
-          ...(input.threadId === undefined ? [] : [sql`stream_id = ${input.threadId}`]),
-          ...(input.commandId === undefined ? [] : [sql`command_id = ${input.commandId}`]),
-          ...(input.eventType === undefined ? [] : [sql`event_type = ${input.eventType}`]),
-        ])}
-      ORDER BY sequence ASC
-      LIMIT ${input.limit}
-    `.pipe(NodeSqliteClient.readOnly);
+    rows.read({
+      after_sequence: input.afterSequence,
+      ...(input.throughSequence === undefined ? {} : { through_sequence: input.throughSequence }),
+      ...(input.threadId === undefined ? {} : { thread_id: input.threadId }),
+      ...(input.commandId === undefined ? {} : { command_id: input.commandId }),
+      ...(input.eventType === undefined ? {} : { event_type: input.eventType }),
+      ...(input.onlyAgentEvents === undefined ? {} : { only_agent_events: input.onlyAgentEvents }),
+      limit: input.limit,
+    });
 
   const appendAgentEvents: OrchestrationEventStore["Service"]["appendAgentEvents"] = (input) =>
     Effect.forEach(
@@ -457,70 +343,29 @@ const makeEventStore = Effect.gen(function* () {
           const promptKey = subagent === undefined ? undefined : `${event.type}:${subagent.id}`;
           const hint = promptKey === undefined ? undefined : promptHints.get(promptKey);
           const payloadJson = yield* encodeJson(encoded.payload);
-          // Deduplicate repeated progress prompts via anchor rows; pruning keeps anchors that retained rows reference.
-          const storedPayload =
-            hint !== undefined && subagent !== undefined
-              ? sql`CASE WHEN EXISTS (
-                  SELECT 1 FROM orchestration_events
-                  WHERE sequence = ${hint}
-                    AND json_type(payload_json, '$.promptSequence') IS NULL
-                    AND json_extract(payload_json, '$.prompt') = ${subagent.prompt}
-                ) THEN json_set(${payloadJson}, '$.prompt', '', '$.promptSequence', CAST(${hint} AS INTEGER))
-                ELSE ${payloadJson} END`
-              : sql`${payloadJson}`;
-          const rows = yield* sql<{
-            readonly sequence: number;
-            readonly stores_full_prompt?: number;
-          }>`
-            INSERT INTO orchestration_events (
-              event_id,
-              aggregate_kind,
-              stream_id,
-              stream_version,
-              event_type,
-              occurred_at,
-              command_id,
-              causation_event_id,
-              correlation_id,
-              actor_kind,
-              payload_json,
-              metadata_json,
-              application_event_version
-            )
-            VALUES (
-              ${event.id},
-              'thread',
-              ${event.threadId},
-              COALESCE(
-                (
-                  SELECT MAX(stream_version) + 1
-                  FROM orchestration_events
-                  WHERE aggregate_kind = 'thread' AND stream_id = ${event.threadId}
-                ),
-                0
-              ),
-              ${event.type},
-              ${encoded.occurredAt},
-              ${input.commandId ?? null},
-              NULL,
-              ${input.commandId ?? null},
-              ${event.rawEventId === undefined ? "server" : "provider"},
-              ${storedPayload},
-              ${yield* encodeJson(metadataForV2Event(event))},
-              2
-            )
-            RETURNING sequence${
-              hint === undefined
-                ? sql``
-                : sql`, json_type(payload_json, '$.promptSequence') IS NULL AS stores_full_prompt`
-            }
-          `;
-          const row = rows[0];
-          if (promptKey !== undefined && row !== undefined) {
+          // The repository validates an anchor before storing a prompt reference.
+          const inserted = yield* rows.append({
+            row: {
+              event_id: event.id,
+              aggregate_kind: "thread",
+              stream_id: event.threadId,
+              event_type: event.type,
+              occurred_at: encoded.occurredAt,
+              command_id: input.commandId ?? null,
+              causation_event_id: null,
+              correlation_id: input.commandId ?? null,
+              actor_kind: event.rawEventId === undefined ? "server" : "provider",
+              payload_json: payloadJson,
+              metadata_json: yield* encodeJson(metadataForV2Event(event)),
+              application_event_version: 2,
+            },
+            ...(hint === undefined ? {} : { prompt_hint: hint }),
+          });
+          if (promptKey !== undefined) {
             promptHints.delete(promptKey);
             promptHints.set(
               promptKey,
-              hint === undefined || row.stores_full_prompt === 1 ? row.sequence : hint,
+              hint === undefined || inserted.stores_full_prompt ? inserted.sequence : hint,
             );
             if (promptHints.size > 4096) {
               const oldest = promptHints.keys().next().value;
@@ -528,7 +373,7 @@ const makeEventStore = Effect.gen(function* () {
             }
           }
           return yield* decodeV2StoredEvent({
-            sequence: rows[0]?.sequence,
+            sequence: inserted.sequence,
             commandId: input.commandId ?? null,
             event,
           });
@@ -593,98 +438,49 @@ const makeEventStore = Effect.gen(function* () {
   };
 
   const getAgentReplayStats: OrchestrationEventStore["Service"]["getAgentReplayStats"] = (input) =>
-    sql<{
-      readonly eventCount: number;
-      readonly rawPayloadBytes: number;
-      readonly hasCreateEvent: number;
-    }>`
-      SELECT
-        COUNT(*) AS "eventCount",
-        COALESCE(SUM(octet_length(payload_json)), 0) AS "rawPayloadBytes",
-        COALESCE(MAX(event_type = 'thread.created'), 0) AS "hasCreateEvent"
-      FROM (
-        SELECT ${restoredPayloadJson} AS payload_json, event_type
-        FROM orchestration_events
-        WHERE aggregate_kind = 'thread'
-          AND stream_id = ${input.threadId}
-          AND application_event_version = 2
-          AND sequence > ${input.afterSequence}
-          AND sequence <= ${input.throughSequence}
-        ORDER BY sequence ASC
-        LIMIT ${Math.max(0, Math.floor(input.maxEvents)) + 1}
-      )
-    `.pipe(
-      NodeSqliteClient.readOnly,
+    rows.stats({
+      kind: "agent",
+      after_sequence: input.afterSequence,
+      through_sequence: input.throughSequence,
+      thread_id: input.threadId,
+      max_events: Math.max(0, Math.floor(input.maxEvents)),
+    }).pipe(
       Effect.mapError(toPersistenceSqlError("OrchestrationEventStore.getAgentReplayStats:query")),
-      Effect.map((rows) => ({
-        eventCount: rows[0]?.eventCount ?? 0,
-        rawPayloadBytes: rows[0]?.rawPayloadBytes ?? 0,
-        hasCreateEvent: (rows[0]?.hasCreateEvent ?? 0) !== 0,
+      Effect.map((stats) => ({
+        eventCount: stats.event_count,
+        rawPayloadBytes: stats.raw_payload_bytes,
+        hasCreateEvent: stats.has_create_event,
       })),
     );
 
   const getReplayStats: OrchestrationEventStore["Service"]["getReplayStats"] = (input) =>
-    sql<{ readonly eventCount: number; readonly rawPayloadBytes: number }>`
-      SELECT
-        COUNT(*) AS "eventCount",
-        COALESCE(SUM(octet_length(${restoredPayloadJson})), 0) AS "rawPayloadBytes"
-      FROM orchestration_events INDEXED BY idx_orchestration_events_application_high_water
-      WHERE sequence > ${input.afterSequence}
-        AND sequence <= ${input.throughSequence}
-        AND (
-          aggregate_kind = 'project'
-          OR (application_event_version = 2 AND aggregate_kind = 'thread')
-        )
-    `.pipe(
-      NodeSqliteClient.readOnly,
+    rows.stats({
+      kind: "application",
+      after_sequence: input.afterSequence,
+      through_sequence: input.throughSequence,
+    }).pipe(
       Effect.mapError(toPersistenceSqlError("OrchestrationEventStore.getReplayStats:query")),
-      Effect.map((rows) => ({
-        eventCount: rows[0]?.eventCount ?? 0,
-        rawPayloadBytes: rows[0]?.rawPayloadBytes ?? 0,
+      Effect.map((stats) => ({
+        eventCount: stats.event_count,
+        rawPayloadBytes: stats.raw_payload_bytes,
       })),
     );
 
-  const latestAgentSequence: OrchestrationEventStore["Service"]["latestAgentSequence"] = (
-    threadId,
-  ) =>
-    sql<{ readonly sequence: number | null }>`
-      SELECT MAX(sequence) AS sequence
-      FROM orchestration_events
-      ${
-        threadId === undefined
-          ? // The planner can otherwise pick the covering stream index and scan every agent event.
-            sql`INDEXED BY idx_orchestration_events_application_sequence`
-          : sql`INDEXED BY idx_orchestration_events_agent_stream_sequence`
-      }
-      WHERE application_event_version = 2
-        AND aggregate_kind = 'thread'
-        ${threadId === undefined ? sql`` : sql`AND stream_id = ${threadId}`}
-    `.pipe(
-      NodeSqliteClient.readOnly,
-      Effect.map((rows) => rows[0]?.sequence ?? 0),
+  const latestAgentSequence: OrchestrationEventStore["Service"]["latestAgentSequence"] = (threadId) =>
+    rows.latest({
+      kind: "agent",
+      ...(threadId === undefined ? {} : { thread_id: threadId }),
+    }).pipe(
       Effect.mapError(toPersistenceSqlError("OrchestrationEventStore.latestAgentSequence:query")),
     );
 
-  // The OR planner otherwise scans every V2 event instead of seeking the final sequence.
-  const latestApplicationSequence = sql<{ readonly sequence: number | null }>`
-    SELECT MAX(sequence) AS sequence
-    FROM orchestration_events INDEXED BY idx_orchestration_events_application_high_water
-    WHERE aggregate_kind = 'project'
-      OR (application_event_version = 2 AND aggregate_kind = 'thread')
-  `.pipe(
-    NodeSqliteClient.readOnly,
-    Effect.map((rows) => rows[0]?.sequence ?? 0),
+  const latestApplicationSequence = rows.latest({ kind: "application" }).pipe(
     Effect.mapError(
       toPersistenceSqlError("OrchestrationEventStore.latestApplicationSequence:query"),
     ),
   );
 
-  const prunedThroughSequence = sql<{ readonly last_sequence: number }>`
-    SELECT last_sequence FROM orchestration_v2_projection_metadata
-    WHERE projection_name = ${EVENT_LOG_PRUNED_THROUGH}
-  `.pipe(
-    NodeSqliteClient.readOnly,
-    Effect.map((rows) => rows[0]?.last_sequence ?? 0),
+  const prunedThroughSequence = rows.prunedThrough.pipe(
     Effect.mapError(toPersistenceSqlError("OrchestrationEventStore.prunedThroughSequence:query")),
   );
 
@@ -772,4 +568,6 @@ const makeEventStore = Effect.gen(function* () {
   } satisfies OrchestrationEventStore["Service"];
 });
 
-export const layer = Layer.effect(OrchestrationEventStore, makeEventStore);
+export const layerFromEventRows = Layer.effect(OrchestrationEventStore, makeEventStore);
+
+export const layer = layerFromEventRows.pipe(Layer.provide(SqliteEventRows.layer));

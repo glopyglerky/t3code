@@ -30,16 +30,28 @@ export const RowPage = Schema.Struct({
 });
 export type RowPage = typeof RowPage.Type;
 
+const applicationOperations = [
+  "application_events_append",
+  "application_events_read",
+  "application_events_stats",
+  "application_events_latest",
+  "application_events_pruned_through",
+] as const;
+export type ApplicationOperation = (typeof applicationOperations)[number];
+const allowedOperations = new Set<string>(applicationOperations);
+
 export class RedbTransactionError extends Schema.TaggedError<RedbTransactionError>()(
   "RedbTransactionError",
   {
     reason: Schema.Literals([
-      "nested-transaction",
+      "initialization-in-transaction",
       "mixed-storage-transaction",
       "different-client",
       "different-fiber",
+      "different-scope",
       "closed-transaction",
       "transaction-id-exhausted",
+      "savepoint-id-exhausted",
     ]),
   },
 ) {
@@ -54,7 +66,7 @@ export interface RedbClientShape {
   readonly initialize: (
     schema: ApplicationSchema,
   ) => Effect.Effect<{ readonly initialized: boolean }, RedbClientError>;
-  /** Nested transactions and child-fiber use are rejected before their first request. */
+  /** Reserve the writer before the body runs. Same-fiber nesting uses native savepoints. */
   readonly withTransaction: <A, E, R>(
     effect: Effect.Effect<A, E, R>,
   ) => Effect.Effect<A, E | RedbClientError, R>;
@@ -67,6 +79,17 @@ export interface RedbClientShape {
     table: string,
     options: { readonly after?: string | null; readonly limit: number },
   ) => Effect.Effect<RowPage, RedbClientError>;
+  /** Typed domain operations share the current scope; callers cannot supply transaction IDs. */
+  readonly request: <A>(
+    operation: ApplicationOperation,
+    input: Readonly<Record<string, unknown>>,
+    response: Schema.Decoder<A>,
+  ) => Effect.Effect<A, RedbClientError>;
+  /** Build one bounded batch of event indexes before opening an application transaction. */
+  readonly prepareEvents: Effect.Effect<
+    { readonly prepared: boolean; readonly indexed_rows: number },
+    RedbClientError
+  >;
 }
 
 export class RedbClient extends Context.Service<RedbClient, RedbClientShape>()(
@@ -80,18 +103,49 @@ interface Transaction {
   readonly session: NativeDatabase.NativeDatabaseSession;
   active: boolean;
   failure: RedbClientError | undefined;
+  savepointSequence: number;
+  currentScope: TransactionScope | undefined;
 }
 
-const CurrentTransaction = Context.Reference<Transaction | undefined>(
+interface TransactionScope {
+  readonly transaction: Transaction;
+  active: boolean;
+  failure: RedbClientError | undefined;
+}
+
+const CurrentTransaction = Context.Reference<TransactionScope | undefined>(
   "t3/persistence/RedbClient/CurrentTransaction",
   { defaultValue: () => undefined },
 );
 const Begun = Schema.Struct({ transaction_id: Schema.String });
+const Saved = Schema.Struct({ savepoint_id: Schema.String });
+const Released = Schema.Struct({ released: Schema.Literal(true) });
 const Committed = Schema.Struct({ committed: Schema.Literal(true) });
 const RolledBack = Schema.Struct({ rolled_back: Schema.Literal(true) });
 const Initialized = Schema.Struct({ initialized: Schema.Boolean });
 const Written = Schema.Struct({ written: Schema.Literal(true) });
 const Deleted = Schema.Struct({ deleted: Schema.Boolean });
+const Prepared = Schema.Struct({
+  prepared: Schema.Boolean,
+  indexed_rows: Schema.Number.check(
+    Schema.isInt(),
+    Schema.isBetween({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+  ),
+});
+
+function terminal(error: RedbClientError): boolean {
+  switch (error._tag) {
+    case "NativeDatabaseOutcomeUnknown":
+    case "NativeDatabaseUnavailable":
+      return true;
+    case "NativeDatabaseRejected":
+      return error.kind !== "invalid_request" && error.kind !== "duplicate_record";
+    case "NativeDatabaseInputError":
+      return error.stage !== "request";
+    case "RedbTransactionError":
+      return false;
+  }
+}
 
 export const make = Effect.gen(function* () {
   const database = yield* NativeDatabase.NativeDatabase;
@@ -111,10 +165,102 @@ export const make = Effect.gen(function* () {
     }
   });
 
-  const withTransaction: RedbClientShape["withTransaction"] = Effect.fn("RedbClient.withTransaction")(
-    function* <A, E, R>(effect: Effect.Effect<A, E, R>) {
-      if ((yield* CurrentTransaction) !== undefined)
-        return yield* new RedbTransactionError({ reason: "nested-transaction" });
+  const authorize = Effect.fn("RedbClient.authorize")(function* (scope: TransactionScope) {
+    const transaction = scope.transaction;
+    if (transaction.client !== clientIdentity)
+      return yield* new RedbTransactionError({ reason: "different-client" });
+    if (!scope.active || !transaction.active)
+      return yield* new RedbTransactionError({ reason: "closed-transaction" });
+    const ownerId = yield* Effect.withFiber((fiber) => Effect.succeed(fiber.id));
+    if (transaction.ownerId !== ownerId)
+      return yield* new RedbTransactionError({ reason: "different-fiber" });
+    if (transaction.currentScope !== scope)
+      return yield* new RedbTransactionError({ reason: "different-scope" });
+    if (transaction.failure !== undefined) return yield* transaction.failure;
+    if (scope.failure !== undefined) return yield* scope.failure;
+  });
+
+  // A failed lifecycle acknowledgement leaves the savepoint stack uncertain.
+  // Discard the complete transaction even when an enclosing body catches the error.
+  const control = <A>(
+    transaction: Transaction,
+    input: Record<string, unknown>,
+    response: Schema.Decoder<A>,
+  ) =>
+    transaction.session
+      .request({ ...input, transaction_id: transaction.id }, response)
+      .pipe(
+        Effect.onExit((exit) => {
+          if (Exit.isSuccess(exit)) return Effect.void;
+          const failure = exit.cause.reasons.find((reason) => reason._tag === "Fail");
+          transaction.failure ??=
+            failure?.error ??
+            new NativeDatabase.NativeDatabaseOutcomeUnknown({
+              stage: "response",
+              cause: exit.cause,
+            });
+          return transaction.session.discard;
+        }),
+      );
+
+  const nested = <A, E, R>(
+    parent: TransactionScope,
+    effect: Effect.Effect<A, E, R>,
+  ): Effect.Effect<A, E | RedbClientError, R> =>
+    Effect.uninterruptibleMask((restore) =>
+      Effect.gen(function* () {
+        const transaction = parent.transaction;
+        if (transaction.savepointSequence >= Number.MAX_SAFE_INTEGER)
+          return yield* new RedbTransactionError({ reason: "savepoint-id-exhausted" });
+        const savepointId = `scope:${++transaction.savepointSequence}`;
+        const saved = yield* control(
+          transaction,
+          { operation: "application_savepoint", savepoint_id: savepointId },
+          Saved,
+        );
+        if (saved.savepoint_id !== savepointId) {
+          transaction.failure = new NativeDatabase.NativeDatabaseOutcomeUnknown({
+            stage: "response",
+          });
+          yield* transaction.session.discard;
+          return yield* transaction.failure;
+        }
+        const scope: TransactionScope = { transaction, active: true, failure: undefined };
+        transaction.currentScope = scope;
+        const exit = yield* Effect.exit(
+          restore(effect).pipe(Effect.provideService(CurrentTransaction, scope)),
+        );
+        scope.active = false;
+        transaction.currentScope = parent;
+        if (transaction.failure !== undefined) {
+          yield* transaction.session.discard;
+          return yield* transaction.failure;
+        }
+        if (Exit.isFailure(exit) || scope.failure !== undefined) {
+          yield* control(
+            transaction,
+            { operation: "application_rollback_to", savepoint_id: savepointId },
+            RolledBack,
+          );
+        }
+        // ROLLBACK TO retains its savepoint, just as SQLite does. RELEASE closes
+        // it on both paths without committing any part of the outer transaction.
+        yield* control(
+          transaction,
+          { operation: "application_release", savepoint_id: savepointId },
+          Released,
+        );
+        if (Exit.isFailure(exit)) return yield* Effect.failCause(exit.cause);
+        if (scope.failure !== undefined) return yield* scope.failure;
+        return exit.value;
+      }),
+    );
+
+  const root = <A, E, R>(
+    effect: Effect.Effect<A, E, R>,
+    mode: "read" | "write",
+  ): Effect.Effect<A, E | RedbClientError, R> =>
+    Effect.gen(function* () {
       yield* outsideSqlTransaction;
       return yield* database.withSession((session) =>
         Effect.uninterruptibleMask((restore) =>
@@ -123,7 +269,7 @@ export const make = Effect.gen(function* () {
               return yield* new RedbTransactionError({ reason: "transaction-id-exhausted" });
             const id = `application:${++transactionSequence}`;
             const begun = yield* restore(
-              session.request({ operation: "application_begin", transaction_id: id }, Begun),
+              session.request({ operation: "application_begin", transaction_id: id, mode }, Begun),
             );
             if (begun.transaction_id !== id) {
               yield* session.discard;
@@ -136,19 +282,30 @@ export const make = Effect.gen(function* () {
               session,
               active: true,
               failure: undefined,
+              savepointSequence: 0,
+              currentScope: undefined,
             };
+            const scope: TransactionScope = { transaction, active: true, failure: undefined };
+            transaction.currentScope = scope;
             const exit = yield* Effect.exit(
-              restore(effect).pipe(Effect.provideService(CurrentTransaction, transaction)),
+              restore(effect).pipe(Effect.provideService(CurrentTransaction, scope)),
             );
+            scope.active = false;
             transaction.active = false;
-            if (Exit.isFailure(exit) || transaction.failure !== undefined) {
-              // The helper aborts a transaction when a row operation fails. If rollback
-              // cannot acknowledge it, closing the helper drops its snapshot and staged writes.
+            transaction.currentScope = undefined;
+            if (
+              Exit.isFailure(exit) ||
+              transaction.failure !== undefined ||
+              scope.failure !== undefined
+            ) {
+              // Fatal native errors can already have removed the transaction.
+              // Closing the helper also drops any remaining writer reservation.
               yield* session
                 .request({ operation: "application_rollback", transaction_id: id }, RolledBack)
                 .pipe(Effect.catch(() => session.discard));
+              if (transaction.failure !== undefined) return yield* transaction.failure;
               if (Exit.isFailure(exit)) return yield* Effect.failCause(exit.cause);
-              return yield* transaction.failure!;
+              if (scope.failure !== undefined) return yield* scope.failure;
             }
             // The commit acknowledgement is the only success boundary. An uncertain
             // outcome propagates unchanged and never causes another commit or fallback.
@@ -160,70 +317,109 @@ export const make = Effect.gen(function* () {
           }),
         ),
       );
+    });
+
+  const withTransaction: RedbClientShape["withTransaction"] = Effect.fn("RedbClient.withTransaction")(
+    function* <A, E, R>(effect: Effect.Effect<A, E, R>) {
+      const scope = yield* CurrentTransaction;
+      if (scope === undefined) return yield* root(effect, "write");
+      yield* authorize(scope);
+      yield* outsideSqlTransaction;
+      return yield* nested(scope, effect);
     },
   );
 
   const inTransaction = <A>(
     run: (transaction: Transaction) => Effect.Effect<A, NativeDatabase.NativeDatabaseError>,
+    mode: "read" | "write",
   ): Effect.Effect<A, RedbClientError> =>
     Effect.gen(function* () {
-      const transaction = yield* CurrentTransaction;
-      if (transaction === undefined) return yield* withTransaction(inTransaction(run));
-      if (transaction.client !== clientIdentity)
-        return yield* new RedbTransactionError({ reason: "different-client" });
-      if (!transaction.active)
-        return yield* new RedbTransactionError({ reason: "closed-transaction" });
-      const ownerId = yield* Effect.withFiber((fiber) => Effect.succeed(fiber.id));
-      if (transaction.ownerId !== ownerId)
-        return yield* new RedbTransactionError({ reason: "different-fiber" });
-      if (transaction.failure !== undefined) return yield* transaction.failure;
+      const scope = yield* CurrentTransaction;
+      if (scope === undefined) return yield* root(inTransaction(run, mode), mode);
+      yield* authorize(scope);
+      const transaction = scope.transaction;
       return yield* outsideSqlTransaction.pipe(
         Effect.andThen(run(transaction)),
         Effect.catch((error) => {
-          // Catching an operation error in the body cannot commit earlier writes.
-          transaction.failure ??= error;
+          // Recoverable statement errors invalidate only this savepoint. The
+          // wrapper must still roll it back if the body catches the error.
+          scope.failure ??= error;
+          if (terminal(error)) transaction.failure ??= error;
           return Effect.fail(error);
         }),
       );
     });
 
-  const request = <A>(
+  const send = <A>(
+    transaction: Transaction,
     input: Record<string, unknown>,
     response: Schema.Decoder<A>,
-  ): Effect.Effect<A, RedbClientError> =>
-    inTransaction((transaction) =>
-      Schema.decodeUnknownEffect(Schema.Json)(input).pipe(
-        Effect.mapError((cause) =>
-          new NativeDatabase.NativeDatabaseInputError({ stage: "request", cause }),
-        ),
-        Effect.andThen(
-          transaction.session.request({ ...input, transaction_id: transaction.id }, response),
-        ),
+  ) =>
+    Schema.decodeUnknownEffect(Schema.Json)(input).pipe(
+      Effect.mapError((cause) =>
+        new NativeDatabase.NativeDatabaseInputError({ stage: "request", cause }),
+      ),
+      Effect.andThen(
+        transaction.session.request({ ...input, transaction_id: transaction.id }, response),
       ),
     );
 
+  const request = <A>(
+    input: Record<string, unknown>,
+    response: Schema.Decoder<A>,
+    mode: "read" | "write",
+  ): Effect.Effect<A, RedbClientError> =>
+    inTransaction((transaction) => send(transaction, input, response), mode);
+
+  const outsideTransaction = Effect.gen(function* () {
+    if ((yield* CurrentTransaction) !== undefined)
+      return yield* new RedbTransactionError({ reason: "initialization-in-transaction" });
+    yield* outsideSqlTransaction;
+  });
+
   return RedbClient.of({
     initialize: Effect.fn("RedbClient.initialize")(function* (schema) {
-      if ((yield* CurrentTransaction) !== undefined)
-        return yield* new RedbTransactionError({ reason: "nested-transaction" });
-      yield* outsideSqlTransaction;
+      yield* outsideTransaction;
       return yield* database.request({ operation: "application_init", schema }, Initialized);
+    }),
+    prepareEvents: Effect.gen(function* () {
+      yield* outsideTransaction;
+      return yield* database.request({ operation: "application_events_prepare" }, Prepared);
     }),
     withTransaction,
     get: Effect.fn("RedbClient.get")((table, key) =>
-      request({ operation: "application_get", table, key }, Schema.NullOr(Row)),
+      request({ operation: "application_get", table, key }, Schema.NullOr(Row), "read"),
     ),
     put: Effect.fn("RedbClient.put")((table, key, row) =>
-      request({ operation: "application_put", table, key, row }, Written).pipe(Effect.asVoid),
+      request({ operation: "application_put", table, key, row }, Written, "write").pipe(Effect.asVoid),
     ),
     delete: Effect.fn("RedbClient.delete")((table, key) =>
-      request({ operation: "application_delete", table, key }, Deleted).pipe(
+      request({ operation: "application_delete", table, key }, Deleted, "write").pipe(
         Effect.map((result) => result.deleted),
       ),
     ),
     scan: Effect.fn("RedbClient.scan")((table, options) =>
-      request({ operation: "application_scan", table, ...options }, RowPage),
+      request({ operation: "application_scan", table, ...options }, RowPage, "read"),
     ),
+    request: Effect.fn("RedbClient.request")(function* <A>(
+      operation: ApplicationOperation,
+      input: Readonly<Record<string, unknown>>,
+      response: Schema.Decoder<A>,
+    ) {
+      return yield* inTransaction(
+        (transaction) =>
+          Effect.gen(function* () {
+            if (
+              !allowedOperations.has(operation) ||
+              Object.hasOwn(input, "operation") ||
+              Object.hasOwn(input, "transaction_id")
+            )
+              return yield* new NativeDatabase.NativeDatabaseInputError({ stage: "request" });
+            return yield* send(transaction, { ...input, operation }, response);
+          }),
+        operation === "application_events_append" ? "write" : "read",
+      );
+    }),
   });
 });
 

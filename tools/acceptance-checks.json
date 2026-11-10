@@ -132,6 +132,13 @@
     "extra_arguments": [],
     "proof_argument": true
   },
+  "tools/check-redb-events.mjs": {
+    "package": "t3-code-ls-storage",
+    "executable": "t3-code-ls-db",
+    "extra_arguments": [],
+    "proof_argument": true,
+    "typecheck_project": "tools/redb-events-tsconfig.json"
+  },
   "tools/check-redb-transactions.mjs": {
     "package": "t3-code-ls-storage",
     "executable": "t3-code-ls-db",

@@ -1106,6 +1106,14 @@
         {
           "path": "apps/server/src/orchestration-v2/CommandReceiptStore.ts",
           "blob": "f39de342b552625bc51be4bae819e0cec468ce4c"
+        },
+        {
+          "path": "apps/server/src/persistence/OrchestrationEventStore.ts",
+          "blob": "e55d82713871bce675d605da926da0514879b422"
+        },
+        {
+          "path": "packages/shared/src/nodeSqliteClient.ts",
+          "blob": "4c2c2fe9677af924aa7532554f1b9f2343cc234d"
         }
       ],
       "rust_paths": [
@@ -1118,13 +1126,19 @@
         "apps/server/src/persistence/redb_transactions.rs",
         "apps/server/src/persistence/redb_transactions_tests.rs",
         "apps/server/src/persistence/redb_import.rs",
-        "apps/server/src/persistence/redb_import_tests.rs"
+        "apps/server/src/persistence/redb_import_tests.rs",
+        "apps/server/src/persistence/redb_event_rows.rs",
+        "apps/server/src/persistence/redb_event_rows_tests.rs"
       ],
       "adapter_paths": [
         "apps/server/src/orchestration-v2/NativeDatabase.ts",
         "apps/server/src/orchestration-v2/NativeEffectOutbox.ts",
         "apps/server/src/orchestration-v2/EventSink.ts",
-        "apps/server/src/persistence/RedbClient.ts"
+        "apps/server/src/persistence/RedbClient.ts",
+        "apps/server/src/persistence/OrchestrationEventStore.ts",
+        "apps/server/src/persistence/EventRows.ts",
+        "apps/server/src/persistence/SqliteEventRows.ts",
+        "apps/server/src/persistence/NativeEventRows.ts"
       ],
       "platform_routes": [
         {
@@ -1145,10 +1159,11 @@
         "tools/check-database.mjs",
         "tools/check-outbox.mjs",
         "tools/check-redb-transactions.mjs",
-        "tools/check-redb-import.mjs"
+        "tools/check-redb-import.mjs",
+        "tools/check-redb-events.mjs"
       ],
       "retired_paths": [],
-      "notes": "Candidate only. Packaged redb transactions, typed SQLite row hydration with atomic catalog publication, outbox recovery and standalone store durability have explicit qualification gates. The restored application keeps its complete SQLite transaction boundary until every repository, migration, replay, crash recovery and backup/restore path is accepted for authoritative cutover.",
+      "notes": "Candidate only. Reserved-writer transactions, nested savepoints, typed SQLite hydration, and the complete shared event-log service have native qualification gates. Event indexes preserve imported sequence high-water marks, ordered filtering and replay budgets. Production still selects the SQLite event-row adapter; EventSink, projections, receipts, positions, outbox ownership and other persistence domains must share the native application transaction before authoritative cutover.",
       "rust_crates": [
         "crates/core",
         "crates/storage"

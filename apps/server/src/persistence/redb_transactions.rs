@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-use crate::backend::Transaction;
+use crate::backend::{Transaction, TransactionCheckpoint};
 use crate::{Error, MAX_BATCH_BYTES, Result, Store, request_digest, store_key};
 
 const MAX_TABLES: usize = 4096;
@@ -18,6 +18,16 @@ const MAX_KEY_BYTES: usize = 64 * 1024;
 const MAX_SESSIONS: usize = 16;
 const MAX_PAGE_ROWS: u32 = 4096;
 const MAX_IDLE: Duration = Duration::from_secs(300);
+const MAX_SAVEPOINTS: usize = 64;
+const DEFAULT_LOCK_TIMEOUT_MS: u64 = 5000;
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplicationTransactionMode {
+    Read,
+    #[default]
+    Write,
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -185,14 +195,14 @@ pub(crate) fn encode_catalog(catalog: &ApplicationCatalog) -> Result<Vec<u8>> {
     bounded_encode(catalog)
 }
 
-fn decode_catalog(bytes: &[u8]) -> Result<ApplicationCatalog> {
+pub(crate) fn decode_catalog(bytes: &[u8]) -> Result<ApplicationCatalog> {
     let catalog: ApplicationCatalog =
         serde_json::from_slice(bytes).map_err(|_| Error::IncompatibleStore)?;
     validate_catalog(&catalog).map_err(|_| Error::IncompatibleStore)?;
     Ok(catalog)
 }
 
-fn row_prefix(generation: &str, table: &str) -> Result<Vec<u8>> {
+pub(crate) fn row_prefix(generation: &str, table: &str) -> Result<Vec<u8>> {
     if (generation != "native" && !digest(generation)) || !identifier(table) {
         return Err(invalid("invalid application row location"));
     }
@@ -213,7 +223,10 @@ pub(crate) fn encode_row(row: &ApplicationRow) -> Result<Vec<u8>> {
     bounded_encode(row)
 }
 
-fn table<'a>(catalog: &'a ApplicationCatalog, name: &str) -> Result<&'a ApplicationTable> {
+pub(crate) fn table<'a>(
+    catalog: &'a ApplicationCatalog,
+    name: &str,
+) -> Result<&'a ApplicationTable> {
     catalog
         .schema
         .tables
@@ -222,7 +235,7 @@ fn table<'a>(catalog: &'a ApplicationCatalog, name: &str) -> Result<&'a Applicat
         .ok_or_else(|| invalid("unknown application table"))
 }
 
-fn decode_row(
+pub(crate) fn decode_row(
     catalog: &ApplicationCatalog,
     table: &ApplicationTable,
     encoded_key: &[u8],
@@ -237,14 +250,24 @@ fn decode_row(
     Ok(value)
 }
 
-struct Session {
-    transaction: Transaction,
-    catalog: ApplicationCatalog,
+struct Savepoint {
+    id: String,
+    checkpoint: TransactionCheckpoint,
+    bytes: usize,
+    failed: bool,
+}
+
+pub(crate) struct Session {
+    pub(crate) transaction: Transaction,
+    pub(crate) catalog: ApplicationCatalog,
     touched: Instant,
+    savepoints: Vec<Savepoint>,
+    savepoint_bytes: usize,
 }
 
 /// A helper owns these sessions. Dropping the helper drops every uncommitted write.
-/// Any failed row operation discards its session; commit never retries an uncertain write.
+/// A failed nested scope can roll back to its savepoint. Fatal failures discard the
+/// whole session; commit never retries an uncertain write.
 pub struct ApplicationTransactions {
     store: Store,
     sessions: BTreeMap<String, Session>,
@@ -260,6 +283,19 @@ impl ApplicationTransactions {
 
     pub fn discard_all(&mut self) {
         self.sessions.clear();
+    }
+
+    pub fn has_active_writer(&mut self) -> bool {
+        self.expire();
+        self.sessions
+            .values()
+            .any(|session| session.transaction.owns_writer())
+    }
+
+    fn expire(&mut self) {
+        self.sessions.retain(|_, session| {
+            session.touched.elapsed() < MAX_IDLE && session.transaction.is_active()
+        });
     }
 
     pub async fn schema(&self) -> Result<Option<ApplicationSchema>> {
@@ -296,16 +332,39 @@ impl ApplicationTransactions {
     }
 
     pub async fn begin(&mut self, transaction_id: &str) -> Result<()> {
+        self.begin_mode(transaction_id, ApplicationTransactionMode::Write, None)
+            .await
+    }
+
+    pub async fn begin_mode(
+        &mut self,
+        transaction_id: &str,
+        mode: ApplicationTransactionMode,
+        lock_timeout_ms: Option<u64>,
+    ) -> Result<()> {
         validate_transaction_id(transaction_id)?;
-        self.sessions
-            .retain(|_, session| session.touched.elapsed() < MAX_IDLE);
+        let lock_timeout_ms = lock_timeout_ms.unwrap_or(DEFAULT_LOCK_TIMEOUT_MS);
+        if lock_timeout_ms == 0 || lock_timeout_ms > 30_000 {
+            return Err(invalid(
+                "writer acquisition timeout must be between 1 and 30000 milliseconds",
+            ));
+        }
+        self.expire();
         if self.sessions.contains_key(transaction_id) {
             return Err(invalid("application transaction already exists"));
         }
         if self.sessions.len() >= MAX_SESSIONS {
             return Err(invalid("too many application transactions"));
         }
-        let mut transaction = self.store.db.begin().await?;
+        let mut transaction = match mode {
+            ApplicationTransactionMode::Read => self.store.db.begin_read_only().await?,
+            ApplicationTransactionMode::Write => {
+                self.store
+                    .db
+                    .begin_reserved(Duration::from_millis(lock_timeout_ms), MAX_IDLE)
+                    .await?
+            }
+        };
         let bytes = transaction
             .get(&schema_key())
             .await?
@@ -316,12 +375,14 @@ impl ApplicationTransactions {
                 transaction,
                 catalog: decode_catalog(&bytes)?,
                 touched: Instant::now(),
+                savepoints: Vec::new(),
+                savepoint_bytes: 0,
             },
         );
         Ok(())
     }
 
-    fn take(&mut self, transaction_id: &str) -> Result<Session> {
+    fn take_control(&mut self, transaction_id: &str) -> Result<Session> {
         validate_transaction_id(transaction_id)?;
         let session = self
             .sessions
@@ -330,20 +391,50 @@ impl ApplicationTransactions {
         if session.touched.elapsed() >= MAX_IDLE {
             return Err(invalid("application transaction expired"));
         }
+        session.transaction.ensure_active()?;
         Ok(session)
     }
 
-    async fn finish<A>(
+    pub(crate) fn take(&mut self, transaction_id: &str) -> Result<Session> {
+        let session = self.take_control(transaction_id)?;
+        if session
+            .savepoints
+            .last()
+            .is_some_and(|savepoint| savepoint.failed)
+        {
+            self.sessions.insert(transaction_id.into(), session);
+            return Err(invalid("failed application savepoint must be rolled back"));
+        }
+        Ok(session)
+    }
+
+    pub(crate) async fn finish<A>(
         &mut self,
         transaction_id: &str,
         mut session: Session,
         result: Result<A>,
     ) -> Result<A> {
+        if let Err(error) = session.transaction.ensure_active() {
+            let _ = session.transaction.rollback().await;
+            return Err(error);
+        }
         match result {
             Ok(value) => {
                 session.touched = Instant::now();
                 self.sessions.insert(transaction_id.into(), session);
                 Ok(value)
+            }
+            Err(error @ (Error::Invalid(_) | Error::ResourceLimit(_) | Error::DuplicateRecord))
+                if !session.savepoints.is_empty() =>
+            {
+                session
+                    .savepoints
+                    .last_mut()
+                    .expect("savepoint exists")
+                    .failed = true;
+                session.touched = Instant::now();
+                self.sessions.insert(transaction_id.into(), session);
+                Err(error)
             }
             Err(error) => {
                 let _ = session.transaction.rollback().await;
@@ -387,7 +478,9 @@ impl ApplicationTransactions {
     ) -> Result<()> {
         let mut session = self.take(transaction_id)?;
         let result = async {
+            session.transaction.require_write()?;
             let table = table(&session.catalog, name)?;
+            require_unmanaged(&mut session.transaction, &session.catalog.generation, name).await?;
             validate_row(table, &key, &row)?;
             let encoded_key = row_key(&session.catalog.generation, name, &key)?;
             if let Some(bytes) = session.transaction.get(&encoded_key).await? {
@@ -413,7 +506,9 @@ impl ApplicationTransactions {
     ) -> Result<bool> {
         let mut session = self.take(transaction_id)?;
         let result = async {
+            session.transaction.require_write()?;
             let table = table(&session.catalog, name)?;
+            require_unmanaged(&mut session.transaction, &session.catalog.generation, name).await?;
             if key.len() != table.primary_key.len() {
                 return Err(invalid("application key does not match its schema"));
             }
@@ -484,12 +579,107 @@ impl ApplicationTransactions {
     }
 
     pub async fn commit(&mut self, transaction_id: &str) -> Result<()> {
-        self.take(transaction_id)?.transaction.commit().await
+        let session = self.take(transaction_id)?;
+        if !session.savepoints.is_empty() {
+            return self
+                .finish(
+                    transaction_id,
+                    session,
+                    Err(invalid(
+                        "application savepoints must be released before commit",
+                    )),
+                )
+                .await;
+        }
+        session.transaction.commit().await
     }
 
     pub async fn rollback(&mut self, transaction_id: &str) -> Result<()> {
-        self.take(transaction_id)?.transaction.rollback().await
+        self.take_control(transaction_id)?
+            .transaction
+            .rollback()
+            .await
     }
+
+    pub async fn savepoint(&mut self, transaction_id: &str, savepoint_id: &str) -> Result<()> {
+        let mut session = self.take(transaction_id)?;
+        let result = (|| {
+            validate_transaction_id(savepoint_id)?;
+            if session.savepoints.len() >= MAX_SAVEPOINTS
+                || session
+                    .savepoints
+                    .iter()
+                    .any(|savepoint| savepoint.id == savepoint_id)
+            {
+                return Err(invalid("invalid or excessive application savepoints"));
+            }
+            let bytes = session.transaction.checkpoint_bytes();
+            if session.savepoint_bytes.saturating_add(bytes) > MAX_BATCH_BYTES {
+                return Err(invalid("application savepoints exceed 16 MiB"));
+            }
+            session.savepoints.push(Savepoint {
+                id: savepoint_id.into(),
+                checkpoint: session.transaction.checkpoint(),
+                bytes,
+                failed: false,
+            });
+            session.savepoint_bytes += bytes;
+            Ok(())
+        })();
+        self.finish(transaction_id, session, result).await
+    }
+
+    pub async fn release(&mut self, transaction_id: &str, savepoint_id: &str) -> Result<()> {
+        let mut session = self.take(transaction_id)?;
+        let result = (|| {
+            if session
+                .savepoints
+                .last()
+                .is_none_or(|savepoint| savepoint.id != savepoint_id)
+            {
+                return Err(invalid(
+                    "application savepoints must be released in scope order",
+                ));
+            }
+            let released = session.savepoints.pop().expect("savepoint exists");
+            session.savepoint_bytes -= released.bytes;
+            Ok(())
+        })();
+        self.finish(transaction_id, session, result).await
+    }
+
+    pub async fn rollback_to(&mut self, transaction_id: &str, savepoint_id: &str) -> Result<()> {
+        let mut session = self.take_control(transaction_id)?;
+        let result = (|| {
+            let Some(savepoint) = session.savepoints.last_mut() else {
+                return Err(invalid("application savepoint does not exist"));
+            };
+            if savepoint.id != savepoint_id {
+                return Err(invalid(
+                    "application savepoints must roll back in scope order",
+                ));
+            }
+            session.transaction.restore(&savepoint.checkpoint);
+            savepoint.failed = false;
+            Ok(())
+        })();
+        self.finish(transaction_id, session, result).await
+    }
+}
+
+async fn require_unmanaged(
+    transaction: &mut Transaction,
+    generation: &str,
+    table: &str,
+) -> Result<()> {
+    let name: String = table.bytes().map(|byte| format!("{byte:02x}")).collect();
+    let key = store_key(&format!(
+        "application/generation/{generation}/managed/{name}"
+    ));
+    if transaction.get(&key).await?.is_some() {
+        return Err(invalid("application table requires its domain operation"));
+    }
+    Ok(())
 }
 
 fn validate_transaction_id(transaction_id: &str) -> Result<()> {

@@ -2874,6 +2874,7 @@ dependencies = [
  "getrandom 0.4.3",
  "redb",
  "regex",
+ "same-file",
  "serde",
  "serde_json",
  "sha2",

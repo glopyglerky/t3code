@@ -6,6 +6,8 @@ mod backend;
 pub mod application;
 #[path = "../../../apps/server/src/persistence/redb_import.rs"]
 pub mod application_import;
+#[path = "../../../apps/server/src/persistence/redb_event_rows.rs"]
+pub mod application_events;
 
 pub mod outbox;
 pub mod project_service;
@@ -123,14 +125,35 @@ pub struct PendingEffect {
     pub payload: Value,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResourceLimit {
+    ScanBytes,
+    ReadBytes,
+    MutationBytes,
+    ObservationBudget,
+}
+
+impl fmt::Display for ResourceLimit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::ScanBytes => "database scan exceeds 16 MiB",
+            Self::ReadBytes => "database read exceeds 16 MiB",
+            Self::MutationBytes => "transaction mutations exceed 16 MiB",
+            Self::ObservationBudget => "transaction observations exceed read limits",
+        })
+    }
+}
+
 #[derive(Debug)]
 pub enum Error {
     Invalid(String),
+    ResourceLimit(ResourceLimit),
     IncompatibleStore,
     StaleRevision { expected: u64, actual: u64 },
     CommandConflict,
     DuplicateRecord,
     TransactionConflict,
+    WriterBusy,
     UnknownCommit,
     Database(String),
 }
@@ -139,6 +162,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Invalid(message) => write!(f, "Invalid database request: {message}"),
+            Self::ResourceLimit(limit) => write!(f, "Invalid database request: {limit}"),
             Self::IncompatibleStore => {
                 write!(f, "The database is not a supported t3 code ls store")
             }
@@ -149,6 +173,7 @@ impl fmt::Display for Error {
             Self::CommandConflict => write!(f, "The command ID belongs to another request"),
             Self::DuplicateRecord => write!(f, "An immutable event or effect ID already exists"),
             Self::TransactionConflict => write!(f, "The transaction conflicted and did not commit"),
+            Self::WriterBusy => write!(f, "The database writer was busy; no transaction body ran"),
             Self::UnknownCommit => write!(
                 f,
                 "Commit outcome is unknown; resolve the original operation before retrying"

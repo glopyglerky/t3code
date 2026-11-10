@@ -440,3 +440,60 @@ async fn acknowledged_batch_survives_process_kill_and_reopens() {
     );
     assert_eq!(lines[1]["result"], acknowledgement["result"]["receipt"]);
 }
+
+#[tokio::test]
+async fn concurrent_helpers_reopen_after_crash_without_reading_unrecovered_state() {
+    let executable = env!("CARGO_BIN_EXE_t3-code-ls-db");
+    for round in 0..32 {
+        let fixture = test_support::TestFixture::start().await;
+        let spawn = |mode| {
+            Command::new(executable)
+                .arg(mode)
+                .arg(fixture.path())
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap()
+        };
+        let mut initial = spawn("initialize-local");
+        writeln!(
+            initial.stdin.as_mut().unwrap(),
+            "{{\"operation\":\"snapshot\"}}"
+        )
+        .unwrap();
+        let mut line = String::new();
+        BufReader::new(initial.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&line).unwrap()["ok"], true);
+        initial.kill().unwrap();
+        initial.wait().unwrap();
+
+        let mut readers = [spawn("local"), spawn("local")];
+        for reader in &mut readers {
+            let mut input = reader.stdin.take().unwrap();
+            writeln!(input, "{{\"operation\":\"snapshot\"}}").unwrap();
+        }
+        // Reap both owned processes before asserting either result.
+        let outputs = readers.map(|reader| reader.wait_with_output().unwrap());
+        for output in outputs {
+            assert!(
+                output.status.success(),
+                "round {round}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(
+                response,
+                json!({"ok":true,"result":{"revision":0,"last_sequence":0,"projections":[]}}),
+                "round {round}"
+            );
+            assert!(
+                output.stderr.is_empty(),
+                "round {round}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+}

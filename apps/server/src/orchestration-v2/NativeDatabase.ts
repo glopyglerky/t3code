@@ -49,6 +49,7 @@ const RejectionKind = Schema.Literals([
   "command_conflict",
   "duplicate_record",
   "transaction_conflict",
+  "writer_busy",
   "database_error",
 ]);
 

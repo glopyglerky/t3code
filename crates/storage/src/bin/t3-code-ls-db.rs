@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use t3_code_ls_core::json as core_json;
-use t3_code_ls_storage::application::{ApplicationSchema, ApplicationTransactions};
+use t3_code_ls_storage::application::{
+    ApplicationSchema, ApplicationTransactionMode, ApplicationTransactions,
+};
+use t3_code_ls_storage::application_events::{EventAppendRow, EventLatest, EventRead, EventStats};
 use t3_code_ls_storage::outbox::{self, EnqueueEffect};
 use t3_code_ls_storage::project_service::{ProjectRequest, execute_project};
 use t3_code_ls_storage::sqlite_import::ImportLimits;
@@ -20,6 +23,21 @@ enum Request {
     },
     ApplicationBegin {
         transaction_id: String,
+        #[serde(default)]
+        mode: ApplicationTransactionMode,
+        lock_timeout_ms: Option<u64>,
+    },
+    ApplicationSavepoint {
+        transaction_id: String,
+        savepoint_id: String,
+    },
+    ApplicationRelease {
+        transaction_id: String,
+        savepoint_id: String,
+    },
+    ApplicationRollbackTo {
+        transaction_id: String,
+        savepoint_id: String,
     },
     ApplicationGet {
         transaction_id: String,
@@ -47,6 +65,38 @@ enum Request {
         transaction_id: String,
     },
     ApplicationRollback {
+        transaction_id: String,
+    },
+    ApplicationEventsPrepare {},
+    ApplicationEventsAppend {
+        transaction_id: String,
+        row: EventAppendRow,
+        prompt_hint: Option<u64>,
+    },
+    ApplicationEventsRead {
+        transaction_id: String,
+        after_sequence: u64,
+        through_sequence: Option<u64>,
+        thread_id: Option<String>,
+        command_id: Option<String>,
+        event_type: Option<String>,
+        only_agent_events: Option<bool>,
+        limit: u32,
+    },
+    ApplicationEventsStats {
+        transaction_id: String,
+        kind: String,
+        after_sequence: u64,
+        through_sequence: u64,
+        thread_id: Option<String>,
+        max_events: Option<u64>,
+    },
+    ApplicationEventsLatest {
+        transaction_id: String,
+        kind: String,
+        thread_id: Option<String>,
+    },
+    ApplicationEventsPrunedThrough {
         transaction_id: String,
     },
     ImportSqliteApplication {
@@ -143,20 +193,104 @@ enum Request {
     },
 }
 
+impl Request {
+    fn is_unscoped_mutation(&self) -> bool {
+        match self {
+            Self::ApplicationInit { .. }
+            | Self::ApplicationEventsPrepare { .. }
+            | Self::ImportSqliteApplication { .. }
+            | Self::Commit { .. }
+            | Self::CommitOutbox { .. }
+            | Self::OutboxEnqueue { .. }
+            | Self::OutboxClaim { .. }
+            | Self::OutboxClaimOnce { .. }
+            | Self::OutboxSucceed { .. }
+            | Self::OutboxRetry { .. }
+            | Self::OutboxFail { .. }
+            | Self::OutboxCancel { .. }
+            | Self::OutboxReconcile { .. }
+            | Self::OutboxPrune { .. }
+            | Self::Project { .. }
+            | Self::ArchiveSqlite { .. } => true,
+            Self::ApplicationSchema { .. }
+            | Self::ApplicationBegin { .. }
+            | Self::ApplicationSavepoint { .. }
+            | Self::ApplicationRelease { .. }
+            | Self::ApplicationRollbackTo { .. }
+            | Self::ApplicationGet { .. }
+            | Self::ApplicationScan { .. }
+            | Self::ApplicationPut { .. }
+            | Self::ApplicationDelete { .. }
+            | Self::ApplicationCommit { .. }
+            | Self::ApplicationRollback { .. }
+            | Self::ApplicationEventsAppend { .. }
+            | Self::ApplicationEventsRead { .. }
+            | Self::ApplicationEventsStats { .. }
+            | Self::ApplicationEventsLatest { .. }
+            | Self::ApplicationEventsPrunedThrough { .. }
+            | Self::ApplicationImport { .. }
+            | Self::Snapshot { .. }
+            | Self::Receipt { .. }
+            | Self::OutboxReceipt { .. }
+            | Self::OutboxGet { .. }
+            | Self::OutboxList { .. }
+            | Self::OutboxNextClaimableAt { .. }
+            | Self::Events { .. }
+            | Self::PendingEffects { .. }
+            | Self::SqliteArchive { .. }
+            | Self::RestoreSqliteExport { .. } => false,
+        }
+    }
+}
+
 async fn evaluate(
     store: &Store,
     transactions: &mut ApplicationTransactions,
     planner: Option<&Path>,
     request: Request,
 ) -> Result<Value, Error> {
+    if request.is_unscoped_mutation() && transactions.has_active_writer() {
+        return Err(Error::WriterBusy);
+    }
     match request {
         Request::ApplicationSchema {} => serde_json::to_value(transactions.schema().await?),
         Request::ApplicationInit { schema } => {
             Ok(json!({"initialized": transactions.initialize(schema).await?}))
         }
-        Request::ApplicationBegin { transaction_id } => {
-            transactions.begin(&transaction_id).await?;
+        Request::ApplicationBegin {
+            transaction_id,
+            mode,
+            lock_timeout_ms,
+        } => {
+            transactions
+                .begin_mode(&transaction_id, mode, lock_timeout_ms)
+                .await?;
             Ok(json!({"transaction_id": transaction_id}))
+        }
+        Request::ApplicationSavepoint {
+            transaction_id,
+            savepoint_id,
+        } => {
+            transactions
+                .savepoint(&transaction_id, &savepoint_id)
+                .await?;
+            Ok(json!({"savepoint_id": savepoint_id}))
+        }
+        Request::ApplicationRelease {
+            transaction_id,
+            savepoint_id,
+        } => {
+            transactions.release(&transaction_id, &savepoint_id).await?;
+            Ok(json!({"released": true}))
+        }
+        Request::ApplicationRollbackTo {
+            transaction_id,
+            savepoint_id,
+        } => {
+            transactions
+                .rollback_to(&transaction_id, &savepoint_id)
+                .await?;
+            Ok(json!({"rolled_back": true}))
         }
         Request::ApplicationGet {
             transaction_id,
@@ -194,6 +328,76 @@ async fn evaluate(
         Request::ApplicationRollback { transaction_id } => {
             transactions.rollback(&transaction_id).await?;
             Ok(json!({"rolled_back": true}))
+        }
+        Request::ApplicationEventsPrepare {} => {
+            serde_json::to_value(store.prepare_application_events().await?)
+        }
+        Request::ApplicationEventsAppend {
+            transaction_id,
+            row,
+            prompt_hint,
+        } => serde_json::to_value(
+            transactions
+                .events_append(&transaction_id, row, prompt_hint)
+                .await?,
+        ),
+        Request::ApplicationEventsRead {
+            transaction_id,
+            after_sequence,
+            through_sequence,
+            thread_id,
+            command_id,
+            event_type,
+            only_agent_events,
+            limit,
+        } => serde_json::to_value(
+            transactions
+                .events_read(
+                    &transaction_id,
+                    EventRead {
+                        after_sequence,
+                        through_sequence,
+                        thread_id,
+                        command_id,
+                        event_type,
+                        only_agent_events,
+                        limit,
+                    },
+                )
+                .await?,
+        ),
+        Request::ApplicationEventsStats {
+            transaction_id,
+            kind,
+            after_sequence,
+            through_sequence,
+            thread_id,
+            max_events,
+        } => serde_json::to_value(
+            transactions
+                .events_stats(
+                    &transaction_id,
+                    EventStats {
+                        kind,
+                        after_sequence,
+                        through_sequence,
+                        thread_id,
+                        max_events,
+                    },
+                )
+                .await?,
+        ),
+        Request::ApplicationEventsLatest {
+            transaction_id,
+            kind,
+            thread_id,
+        } => serde_json::to_value(
+            transactions
+                .events_latest(&transaction_id, EventLatest { kind, thread_id })
+                .await?,
+        ),
+        Request::ApplicationEventsPrunedThrough { transaction_id } => {
+            serde_json::to_value(transactions.events_pruned_through(&transaction_id).await?)
         }
         Request::ImportSqliteApplication { path } => serde_json::to_value(
             store
@@ -394,12 +598,13 @@ fn decode_frame(frame: &[u8]) -> Result<Request, Error> {
 
 fn error_response(error: &Error) -> Value {
     let kind = match error {
-        Error::Invalid(_) => "invalid_request",
+        Error::Invalid(_) | Error::ResourceLimit(_) => "invalid_request",
         Error::IncompatibleStore => "incompatible_store",
         Error::StaleRevision { .. } => "stale_revision",
         Error::CommandConflict => "command_conflict",
         Error::DuplicateRecord => "duplicate_record",
         Error::TransactionConflict => "transaction_conflict",
+        Error::WriterBusy => "writer_busy",
         Error::UnknownCommit => "unknown_commit",
         Error::Database(_) => "database_error",
     };

@@ -1,18 +1,24 @@
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
-use std::path::Path;
-use std::sync::Arc;
+use std::io;
+use std::ops::Bound;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, TryLockError, mpsc};
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
 use redb::{
-    ConcurrencyMode, Database, Durability, ReadTransaction, ReadableDatabase, ReadableTable,
-    TableDefinition, TableHandle,
+    BackendError, ConcurrencyMode, Database, Durability, ReadOnlyDatabase, ReadTransaction,
+    ReadableDatabase, ReadableTable, StorageBackend, TableDefinition, TableHandle,
+    WriteTransaction,
 };
 use sha2::{Digest, Sha256};
+use tokio::sync::oneshot;
 
-use crate::{Error, MAX_BATCH_BYTES, MAX_BATCH_RECORDS, Result};
+use crate::{Error, MAX_BATCH_BYTES, MAX_BATCH_RECORDS, ResourceLimit, Result};
 
 const TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("t3_code_ls_v2");
 type Pair = (Vec<u8>, Vec<u8>);
@@ -28,7 +34,265 @@ fn worker_error(_: tokio::task::JoinError) -> Error {
 
 #[derive(Clone)]
 pub(crate) struct Backend {
-    database: Arc<Database>,
+    handles: Arc<DatabaseHandles>,
+}
+
+struct DatabaseHandles {
+    path: PathBuf,
+    identity: Option<same_file::Handle>,
+    reader: Option<ReadOnlyDatabase>,
+    writer: Mutex<Option<Arc<Database>>>,
+    opening: Mutex<()>,
+}
+
+impl DatabaseHandles {
+    fn verify_identity(&self) -> Result<()> {
+        if let Some(expected) = &self.identity {
+            let actual = same_file::Handle::from_path(&self.path).map_err(storage_error)?;
+            if actual != *expected {
+                return Err(Error::IncompatibleStore);
+            }
+        }
+        Ok(())
+    }
+
+    fn begin_read(&self) -> Result<ReadTransaction> {
+        self.verify_identity()?;
+        if let Some(writer) = self.writer.lock().map_err(storage_error)?.clone() {
+            return writer.begin_read().map_err(storage_error);
+        }
+        self.reader
+            .as_ref()
+            .ok_or(Error::IncompatibleStore)?
+            .begin_read()
+            .map_err(storage_error)
+    }
+
+    fn try_writer(&self) -> Result<Arc<Database>> {
+        self.verify_identity()?;
+        if let Some(writer) = self.writer.lock().map_err(storage_error)?.clone() {
+            return Ok(writer);
+        }
+        let _opening = match self.opening.try_lock() {
+            Ok(guard) => guard,
+            Err(TryLockError::WouldBlock) => return Err(Error::WriterBusy),
+            Err(error) => return Err(storage_error(error)),
+        };
+        if let Some(writer) = self.writer.lock().map_err(storage_error)?.clone() {
+            return Ok(writer);
+        }
+        let expected = self.identity.as_ref().ok_or(Error::IncompatibleStore)?;
+        let writer = Arc::new(checked_open(&self.path, expected)?);
+        self.verify_identity()?;
+        validate_tables(&writer.begin_read().map_err(storage_error)?)?;
+        *self.writer.lock().map_err(storage_error)? = Some(writer.clone());
+        Ok(writer)
+    }
+
+    fn wait_for_writer(&self) -> Result<Arc<Database>> {
+        loop {
+            match self.try_writer() {
+                Err(Error::WriterBusy) => std::thread::sleep(Duration::from_millis(5)),
+                result => return result,
+            }
+        }
+    }
+}
+
+fn builder() -> redb::Builder {
+    let mut builder = Database::builder();
+    builder
+        .set_concurrency_mode(ConcurrencyMode::MultiWriter)
+        .set_check_integrity_on_open(true)
+        .set_cache_size(32 * 1024 * 1024);
+    builder
+}
+
+fn validate_tables(transaction: &ReadTransaction) -> Result<()> {
+    let names = transaction
+        .list_tables()
+        .map_err(storage_error)?
+        .map(|table| table.name().to_owned())
+        .collect::<Vec<_>>();
+    if names != [TABLE.name()]
+        || transaction
+            .list_multimap_tables()
+            .map_err(storage_error)?
+            .next()
+            .is_some()
+    {
+        return Err(Error::IncompatibleStore);
+    }
+    transaction
+        .open_table(TABLE)
+        .map_err(|_| Error::IncompatibleStore)?;
+    Ok(())
+}
+
+#[derive(Debug)]
+struct OpenLocks {
+    opening: AtomicBool,
+    writer_acquired: AtomicBool,
+    busy: AtomicBool,
+    mutated: AtomicBool,
+}
+
+/// redb takes the writer lock while opening a writable multi-process handle.
+/// Only the initial writer acquisition is nonblocking. Once owned, redb's
+/// header, recovery and consistency locks retain their normal wait behavior.
+#[derive(Debug)]
+struct NonblockingOpen {
+    file: redb::backends::FileBackend,
+    locks: Arc<OpenLocks>,
+}
+
+impl NonblockingOpen {
+    fn lock(
+        &self,
+        start: Bound<u64>,
+        end: Bound<u64>,
+        shared: bool,
+    ) -> std::result::Result<(), BackendError> {
+        if !self.locks.opening.load(Ordering::Acquire)
+            || self.locks.writer_acquired.load(Ordering::Acquire)
+        {
+            return if shared {
+                self.file.lock_shared_range(start, end)
+            } else {
+                self.file.lock_range(start, end)
+            };
+        }
+        let acquired = if shared {
+            self.file.try_lock_shared_range(start, end)?
+        } else {
+            self.file.try_lock_range(start, end)?
+        };
+        if acquired {
+            // In pinned redb 4.5 MultiWriter open, mode locks use try_lock_*,
+            // then the first blocking exclusive acquisition is the writer lock.
+            // Keep this phase separate from `opening`, which also prevents the
+            // custom-backend create entry point from initializing an empty file.
+            if !shared {
+                self.locks.writer_acquired.store(true, Ordering::Release);
+            }
+            Ok(())
+        } else {
+            self.locks.busy.store(true, Ordering::Release);
+            Err(BackendError::Io(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "database open lock is busy",
+            )))
+        }
+    }
+}
+
+impl StorageBackend for NonblockingOpen {
+    fn len(&self) -> io::Result<u64> {
+        let length = self.file.len()?;
+        // create_with_backend is redb's only writable custom-backend entry point.
+        // Refuse empty files under its own open lock so this remains an open,
+        // never implicit initialization of a missing or empty store.
+        if self.locks.opening.load(Ordering::Acquire) && length == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "database file is empty",
+            ));
+        }
+        Ok(length)
+    }
+    fn read(&self, offset: u64, out: &mut [u8]) -> io::Result<()> {
+        self.file.read(offset, out)
+    }
+    fn set_len(&self, length: u64) -> io::Result<()> {
+        self.locks.mutated.store(true, Ordering::Release);
+        self.file.set_len(length)
+    }
+    fn sync_data(&self) -> io::Result<()> {
+        self.file.sync_data()
+    }
+    fn write(&self, offset: u64, data: &[u8]) -> io::Result<()> {
+        self.locks.mutated.store(true, Ordering::Release);
+        self.file.write(offset, data)
+    }
+    fn close(&self) -> io::Result<()> {
+        self.file.close()
+    }
+    fn try_lock_range(
+        &self,
+        start: Bound<u64>,
+        end: Bound<u64>,
+    ) -> std::result::Result<bool, BackendError> {
+        self.file.try_lock_range(start, end)
+    }
+    fn try_lock_shared_range(
+        &self,
+        start: Bound<u64>,
+        end: Bound<u64>,
+    ) -> std::result::Result<bool, BackendError> {
+        self.file.try_lock_shared_range(start, end)
+    }
+    fn lock_range(
+        &self,
+        start: Bound<u64>,
+        end: Bound<u64>,
+    ) -> std::result::Result<(), BackendError> {
+        self.lock(start, end, false)
+    }
+    fn lock_shared_range(
+        &self,
+        start: Bound<u64>,
+        end: Bound<u64>,
+    ) -> std::result::Result<(), BackendError> {
+        self.lock(start, end, true)
+    }
+    fn unlock_range(
+        &self,
+        start: Bound<u64>,
+        end: Bound<u64>,
+    ) -> std::result::Result<(), BackendError> {
+        self.file.unlock_range(start, end)
+    }
+    fn query_lock_range(
+        &self,
+        start: Bound<u64>,
+        end: Bound<u64>,
+    ) -> std::result::Result<bool, BackendError> {
+        self.file.query_lock_range(start, end)
+    }
+}
+
+fn file_identity(file: &std::fs::File) -> Result<same_file::Handle> {
+    same_file::Handle::from_file(file.try_clone().map_err(storage_error)?).map_err(storage_error)
+}
+
+fn checked_open(path: &Path, identity: &same_file::Handle) -> Result<Database> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(storage_error)?;
+    if file_identity(&file)? != *identity {
+        return Err(Error::IncompatibleStore);
+    }
+    let file = redb::backends::FileBackend::new(file).map_err(storage_error)?;
+    let locks = Arc::new(OpenLocks {
+        opening: AtomicBool::new(true),
+        writer_acquired: AtomicBool::new(false),
+        busy: AtomicBool::new(false),
+        mutated: AtomicBool::new(false),
+    });
+    let result = builder().create_with_backend(NonblockingOpen {
+        file,
+        locks: locks.clone(),
+    });
+    locks.opening.store(false, Ordering::Release);
+    result.map_err(|error| {
+        if locks.busy.load(Ordering::Acquire) && !locks.mutated.load(Ordering::Acquire) {
+            Error::WriterBusy
+        } else {
+            storage_error(error)
+        }
+    })
 }
 
 impl Backend {
@@ -37,24 +301,69 @@ impl Backend {
         if path.as_os_str().is_empty() {
             return Err(Error::Invalid("database file path is empty".into()));
         }
-        let database = tokio::task::spawn_blocking(move || {
-            let mut builder = Database::builder();
-            builder
-                .set_concurrency_mode(ConcurrencyMode::MultiWriter)
-                .set_check_integrity_on_open(true)
-                .set_cache_size(32 * 1024 * 1024);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            std::env::current_dir().map_err(storage_error)?.join(path)
+        };
+        let handles = tokio::task::spawn_blocking(move || {
+            let identity;
             let database = if initialize {
                 let mut options = OpenOptions::new();
                 options.read(true).write(true).create(true).truncate(false);
                 #[cfg(unix)]
                 options.mode(0o600);
                 let file = options.open(&path).map_err(storage_error)?;
+                identity = file_identity(&file)?;
                 let file = redb::backends::FileBackend::new(file).map_err(storage_error)?;
-                builder.create_with_backend(file)
+                builder().create_with_backend(file).map_err(storage_error)?
             } else {
-                builder.open(&path)
-            }
-            .map_err(storage_error)?;
+                identity = same_file::Handle::from_path(&path).map_err(storage_error)?;
+                let started = Instant::now();
+                loop {
+                    match checked_open(&path, &identity) {
+                        Ok(database) => break database,
+                        Err(Error::WriterBusy) => {
+                            // A live writer prevents a checked writable open. Readers
+                            // still observe the last committed snapshot. A later writer
+                            // promotion must finish the integrity check before begin.
+                            let file = OpenOptions::new()
+                                .read(true)
+                                .open(&path)
+                                .map_err(storage_error)?;
+                            if file_identity(&file)? != identity {
+                                return Err(Error::IncompatibleStore);
+                            }
+                            let file =
+                                redb::backends::FileBackend::new(file).map_err(storage_error)?;
+                            let reader = match builder().open_read_only_with_backend(file) {
+                                Ok(reader) => reader,
+                                // A peer can own the writer while recovering a crashed
+                                // file, before redb publishes its consistency marker.
+                                // This read-only attempt wrote nothing. Rejoin checked
+                                // open instead of treating unready recovery as corruption.
+                                Err(redb::DatabaseError::RepairAborted) => {
+                                    if started.elapsed() >= Duration::from_secs(5) {
+                                        return Err(Error::WriterBusy);
+                                    }
+                                    std::thread::sleep(Duration::from_millis(5));
+                                    continue;
+                                }
+                                Err(error) => return Err(storage_error(error)),
+                            };
+                            validate_tables(&reader.begin_read().map_err(storage_error)?)?;
+                            return Ok(Arc::new(DatabaseHandles {
+                                path,
+                                identity: Some(identity),
+                                reader: Some(reader),
+                                writer: Mutex::new(None),
+                                opening: Mutex::new(()),
+                            }));
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+            };
             if initialize {
                 let mut transaction = database.begin_write().map_err(storage_error)?;
                 transaction
@@ -104,38 +413,26 @@ impl Backend {
                         .map_err(storage_error)?;
                 }
             } else {
-                let transaction = database.begin_read().map_err(storage_error)?;
-                let names = transaction
-                    .list_tables()
-                    .map_err(storage_error)?
-                    .map(|table| table.name().to_owned())
-                    .collect::<Vec<_>>();
-                if names != [TABLE.name()]
-                    || transaction
-                        .list_multimap_tables()
-                        .map_err(storage_error)?
-                        .next()
-                        .is_some()
-                {
-                    return Err(Error::IncompatibleStore);
-                }
-                transaction
-                    .open_table(TABLE)
-                    .map_err(|_| Error::IncompatibleStore)?;
+                validate_tables(&database.begin_read().map_err(storage_error)?)?;
             }
-            Ok::<_, Error>(Arc::new(database))
+            Ok::<_, Error>(Arc::new(DatabaseHandles {
+                path,
+                identity: Some(identity),
+                reader: None,
+                writer: Mutex::new(Some(Arc::new(database))),
+                opening: Mutex::new(()),
+            }))
         })
         .await
         .map_err(worker_error)??;
-        Ok(Self { database })
+        Ok(Self { handles })
     }
 
     pub(crate) async fn begin(&self) -> Result<Transaction> {
-        let database = self.database.clone();
-        let snapshot = tokio::task::spawn_blocking(move || database.begin_read())
+        let handles = self.handles.clone();
+        let snapshot = tokio::task::spawn_blocking(move || handles.begin_read())
             .await
-            .map_err(worker_error)?
-            .map_err(storage_error)?;
+            .map_err(worker_error)??;
         Ok(Transaction {
             backend: self.clone(),
             snapshot: Arc::new(snapshot),
@@ -146,6 +443,54 @@ impl Backend {
             observed_bytes: 0,
             observed_records: 0,
             ranges: Vec::new(),
+            reserved: None,
+            read_only: false,
+        })
+    }
+
+    pub(crate) async fn begin_read_only(&self) -> Result<Transaction> {
+        let mut transaction = self.begin().await?;
+        transaction.read_only = true;
+        Ok(transaction)
+    }
+
+    /// Acquire the database's cross-process writer before the caller starts work.
+    /// A blocking worker owns the redb writer until commit, cancellation, or expiry.
+    pub(crate) async fn begin_reserved(
+        &self,
+        lock_timeout: Duration,
+        idle_timeout: Duration,
+    ) -> Result<Transaction> {
+        let (commands, receive) = mpsc::sync_channel(1);
+        let (ready, snapshot) = oneshot::channel();
+        let state = Arc::new(Mutex::new(ReservationState {
+            touched: Instant::now(),
+            closed: false,
+            idle_timeout,
+        }));
+        let worker_state = state.clone();
+        let handles = self.handles.clone();
+        let worker = tokio::task::spawn_blocking(move || {
+            reserved_worker(handles, worker_state, receive, ready, lock_timeout);
+        });
+        let reserved = ReservedWriter {
+            commands: Some(commands),
+            worker: Some(worker),
+            state,
+        };
+        let snapshot = snapshot.await.map_err(worker_error_from_channel)??;
+        Ok(Transaction {
+            backend: self.clone(),
+            snapshot,
+            reads: BTreeMap::new(),
+            mutation_reads: BTreeMap::new(),
+            writes: BTreeMap::new(),
+            staged_bytes: 0,
+            observed_bytes: 0,
+            observed_records: 0,
+            ranges: Vec::new(),
+            reserved: Some(reserved),
+            read_only: false,
         })
     }
 
@@ -157,10 +502,21 @@ impl Backend {
     }
 
     pub(crate) async fn shutdown(self) -> Result<()> {
-        tokio::task::spawn_blocking(move || match Arc::try_unwrap(self.database) {
-            Ok(database) => database.close().map_err(storage_error),
-            Err(database) => {
-                drop(database);
+        tokio::task::spawn_blocking(move || match Arc::try_unwrap(self.handles) {
+            Ok(handles) => {
+                if let Some(writer) = handles.writer.into_inner().map_err(storage_error)? {
+                    match Arc::try_unwrap(writer) {
+                        Ok(writer) => writer.close().map_err(storage_error)?,
+                        Err(writer) => drop(writer),
+                    }
+                }
+                if let Some(reader) = handles.reader {
+                    reader.close().map_err(storage_error)?;
+                }
+                Ok(())
+            }
+            Err(handles) => {
+                drop(handles);
                 Ok(())
             }
         })
@@ -169,6 +525,7 @@ impl Backend {
     }
 }
 
+#[derive(Clone)]
 struct ObservedRange {
     start: Vec<u8>,
     end: Vec<u8>,
@@ -186,10 +543,85 @@ pub(crate) struct Transaction {
     observed_bytes: usize,
     observed_records: usize,
     ranges: Vec<ObservedRange>,
+    reserved: Option<ReservedWriter>,
+    read_only: bool,
+}
+
+/// Only staged state changes at savepoints. The reserved writer has not applied
+/// any mutation yet, so restoring this state cannot publish or undo a commit.
+#[derive(Clone)]
+pub(crate) struct TransactionCheckpoint {
+    reads: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    mutation_reads: BTreeMap<Vec<u8>, Option<(usize, [u8; 32])>>,
+    writes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    staged_bytes: usize,
+    observed_bytes: usize,
+    observed_records: usize,
+    ranges: Vec<ObservedRange>,
 }
 
 impl Transaction {
+    pub(crate) fn is_active(&self) -> bool {
+        self.reserved.as_ref().is_none_or(|reserved| {
+            !reserved
+                .worker
+                .as_ref()
+                .is_some_and(|worker| worker.is_finished())
+                && reserved.state.lock().is_ok_and(|state| {
+                    !state.closed && state.touched.elapsed() < state.idle_timeout
+                })
+        })
+    }
+
+    pub(crate) fn owns_writer(&self) -> bool {
+        self.reserved.is_some()
+    }
+
+    pub(crate) fn ensure_active(&self) -> Result<()> {
+        if let Some(reserved) = &self.reserved {
+            reserved.touch()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn checkpoint_bytes(&self) -> usize {
+        self.staged_bytes.saturating_add(self.observed_bytes)
+    }
+
+    pub(crate) fn checkpoint(&self) -> TransactionCheckpoint {
+        TransactionCheckpoint {
+            reads: self.reads.clone(),
+            mutation_reads: self.mutation_reads.clone(),
+            writes: self.writes.clone(),
+            staged_bytes: self.staged_bytes,
+            observed_bytes: self.observed_bytes,
+            observed_records: self.observed_records,
+            ranges: self.ranges.clone(),
+        }
+    }
+
+    pub(crate) fn restore(&mut self, checkpoint: &TransactionCheckpoint) {
+        self.reads.clone_from(&checkpoint.reads);
+        self.mutation_reads.clone_from(&checkpoint.mutation_reads);
+        self.writes.clone_from(&checkpoint.writes);
+        self.staged_bytes = checkpoint.staged_bytes;
+        self.observed_bytes = checkpoint.observed_bytes;
+        self.observed_records = checkpoint.observed_records;
+        self.ranges.clone_from(&checkpoint.ranges);
+    }
+
+    pub(crate) fn require_write(&self) -> Result<()> {
+        self.ensure_active()?;
+        if self.read_only {
+            return Err(Error::Invalid(
+                "application transaction is read-only".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) async fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        self.ensure_active()?;
         if let Some(value) = self.writes.get(key).or_else(|| self.reads.get(key)) {
             return Ok(value.clone());
         }
@@ -211,6 +643,7 @@ impl Transaction {
     }
 
     pub(crate) async fn put(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
+        self.require_write()?;
         if value.len() > MAX_BATCH_BYTES {
             return Err(Error::Invalid("stored value exceeds 16 MiB".into()));
         }
@@ -229,6 +662,7 @@ impl Transaction {
     }
 
     pub(crate) async fn delete(&mut self, key: Vec<u8>) -> Result<()> {
+        self.require_write()?;
         let staged_bytes = self.staged_size(&key, 0)?;
         self.observe_mutation(&key).await?;
         self.writes.insert(key, None);
@@ -247,7 +681,7 @@ impl Transaction {
             .saturating_add(key.len())
             .saturating_add(value_bytes);
         if total > MAX_BATCH_BYTES {
-            return Err(Error::Invalid("transaction mutations exceed 16 MiB".into()));
+            return Err(Error::ResourceLimit(ResourceLimit::MutationBytes));
         }
         Ok(total)
     }
@@ -256,9 +690,7 @@ impl Transaction {
         let total_bytes = self.observed_bytes.saturating_add(bytes);
         let total_records = self.observed_records.saturating_add(records);
         if total_bytes > MAX_BATCH_BYTES || total_records > MAX_BATCH_RECORDS {
-            return Err(Error::Invalid(
-                "transaction observations exceed read limits".into(),
-            ));
+            return Err(Error::ResourceLimit(ResourceLimit::ObservationBudget));
         }
         self.observed_bytes = total_bytes;
         self.observed_records = total_records;
@@ -289,6 +721,7 @@ impl Transaction {
 
     /// Fetch a previously size-checked set of values in one blocking operation.
     pub(crate) async fn get_many(&mut self, keys: &[Vec<u8>]) -> Result<Vec<Option<Vec<u8>>>> {
+        self.ensure_active()?;
         let missing: std::collections::BTreeSet<_> = keys
             .iter()
             .filter(|key| !self.writes.contains_key(*key) && !self.reads.contains_key(*key))
@@ -305,7 +738,7 @@ impl Transaction {
                     if let Some(value) = &value {
                         total = total.saturating_add(value.value().len());
                         if total > MAX_BATCH_BYTES {
-                            return Err(Error::Invalid("database read exceeds 16 MiB".into()));
+                            return Err(Error::ResourceLimit(ResourceLimit::ReadBytes));
                         }
                     }
                     loaded.push((key, value.map(|value| value.value().to_vec())));
@@ -332,7 +765,7 @@ impl Transaction {
                 .ok_or(Error::IncompatibleStore)?;
             total = total.saturating_add(value.as_ref().map_or(0, Vec::len));
             if total > MAX_BATCH_BYTES {
-                return Err(Error::Invalid("database read exceeds 16 MiB".into()));
+                return Err(Error::ResourceLimit(ResourceLimit::ReadBytes));
             }
             result.push(value.clone());
         }
@@ -345,6 +778,7 @@ impl Transaction {
         end: &[u8],
         limit: usize,
     ) -> Result<Vec<Pair>> {
+        self.ensure_active()?;
         if start >= end || limit == 0 {
             return Err(Error::Invalid("invalid database scan".into()));
         }
@@ -387,71 +821,300 @@ impl Transaction {
     }
 
     pub(crate) async fn commit(self) -> Result<()> {
+        self.ensure_active()?;
         if self.writes.is_empty() {
             return self.rollback().await;
         }
-        // The complete writer critical section stays on one blocking worker. No writer lock
-        // is retained across an async suspension, even while another process owns the file.
-        tokio::task::spawn_blocking(move || {
-            let Self {
-                backend,
-                snapshot,
-                reads,
-                mutation_reads,
-                writes,
-                staged_bytes: _,
-                observed_bytes: _,
-                observed_records: _,
-                ranges,
-            } = self;
+        let Self {
+            backend,
+            snapshot,
+            reads,
+            mutation_reads,
+            writes,
+            ranges,
+            reserved,
+            ..
+        } = self;
+        let staged = StagedCommit {
+            reads,
+            mutation_reads,
+            writes,
+            ranges,
+        };
+        if let Some(reserved) = reserved {
             drop(snapshot);
-            let mut transaction = backend.database.begin_write().map_err(storage_error)?;
+            return reserved.commit(staged).await;
+        }
+        // Component transactions retain their optimistic commit behavior. Application
+        // sessions use the writer acquired before their callback, on its owning worker.
+        tokio::task::spawn_blocking(move || {
+            drop(snapshot);
+            let database = backend.handles.wait_for_writer()?;
+            let mut transaction = database.begin_write().map_err(storage_error)?;
+            backend.handles.verify_identity()?;
             transaction
                 .set_durability(Durability::Immediate)
                 .map_err(storage_error)?;
-            {
-                let mut table = transaction.open_table(TABLE).map_err(storage_error)?;
-                for (key, observed) in reads {
-                    let current = table.get(key.as_slice()).map_err(storage_error)?;
-                    if current.as_ref().map(|value| value.value()) != observed.as_deref() {
-                        return Err(Error::TransactionConflict);
-                    }
-                }
-                for (key, observed) in mutation_reads {
-                    let current = table.get(key.as_slice()).map_err(storage_error)?;
-                    if current.as_ref().map(|value| fingerprint(value.value())) != observed {
-                        return Err(Error::TransactionConflict);
-                    }
-                }
-                for range in ranges {
-                    if scan_table(&table, &range.start, &range.end, range.limit)? != range.rows {
-                        return Err(Error::TransactionConflict);
-                    }
-                }
-                for (key, value) in writes {
-                    match value {
-                        Some(value) => {
-                            table
-                                .insert(key.as_slice(), value.as_slice())
-                                .map_err(storage_error)?;
-                        }
-                        None => {
-                            table.remove(key.as_slice()).map_err(storage_error)?;
-                        }
-                    }
-                }
-            }
-            transaction.commit().map_err(commit_error)
+            commit_staged(transaction, staged)
         })
         .await
         // A worker panic can happen after durable commit but before its result is returned.
         .map_err(|_| Error::UnknownCommit)?
     }
 
-    pub(crate) async fn rollback(self) -> Result<()> {
+    pub(crate) async fn rollback(mut self) -> Result<()> {
+        let reserved = self.reserved.take();
         tokio::task::spawn_blocking(move || drop(self))
             .await
-            .map_err(worker_error)
+            .map_err(worker_error)?;
+        if let Some(reserved) = reserved {
+            reserved.abort().await?;
+        }
+        Ok(())
+    }
+}
+
+struct StagedCommit {
+    reads: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    mutation_reads: BTreeMap<Vec<u8>, Option<(usize, [u8; 32])>>,
+    writes: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    ranges: Vec<ObservedRange>,
+}
+
+fn commit_staged(transaction: WriteTransaction, staged: StagedCommit) -> Result<()> {
+    {
+        let mut table = transaction.open_table(TABLE).map_err(storage_error)?;
+        for (key, observed) in staged.reads {
+            let current = table.get(key.as_slice()).map_err(storage_error)?;
+            if current.as_ref().map(|value| value.value()) != observed.as_deref() {
+                return Err(Error::TransactionConflict);
+            }
+        }
+        for (key, observed) in staged.mutation_reads {
+            let current = table.get(key.as_slice()).map_err(storage_error)?;
+            if current.as_ref().map(|value| fingerprint(value.value())) != observed {
+                return Err(Error::TransactionConflict);
+            }
+        }
+        for range in staged.ranges {
+            if scan_table(&table, &range.start, &range.end, range.limit)? != range.rows {
+                return Err(Error::TransactionConflict);
+            }
+        }
+        for (key, value) in staged.writes {
+            match value {
+                Some(value) => {
+                    table
+                        .insert(key.as_slice(), value.as_slice())
+                        .map_err(storage_error)?;
+                }
+                None => {
+                    table.remove(key.as_slice()).map_err(storage_error)?;
+                }
+            }
+        }
+    }
+    transaction.commit().map_err(commit_error)
+}
+
+struct ReservationState {
+    touched: Instant,
+    closed: bool,
+    idle_timeout: Duration,
+}
+
+enum ReservationCommand {
+    Commit(StagedCommit, oneshot::Sender<Result<()>>),
+    Abort(oneshot::Sender<Result<()>>),
+}
+
+struct ReservedWriter {
+    commands: Option<mpsc::SyncSender<ReservationCommand>>,
+    worker: Option<tokio::task::JoinHandle<()>>,
+    state: Arc<Mutex<ReservationState>>,
+}
+
+fn expired_writer() -> Error {
+    Error::Invalid("application writer reservation is no longer active".into())
+}
+
+fn worker_error_from_channel(_: oneshot::error::RecvError) -> Error {
+    Error::Database("database reservation worker failed".into())
+}
+
+impl ReservedWriter {
+    fn touch(&self) -> Result<()> {
+        let mut state = self.state.lock().map_err(storage_error)?;
+        if state.closed || state.touched.elapsed() >= state.idle_timeout {
+            state.closed = true;
+            return Err(expired_writer());
+        }
+        if self
+            .worker
+            .as_ref()
+            .is_some_and(|worker| worker.is_finished())
+        {
+            state.closed = true;
+            return Err(Error::Database("database reservation worker failed".into()));
+        }
+        state.touched = Instant::now();
+        Ok(())
+    }
+
+    async fn commit(mut self, staged: StagedCommit) -> Result<()> {
+        self.touch()?;
+        let (reply, receive) = oneshot::channel();
+        self.commands
+            .take()
+            .ok_or_else(expired_writer)?
+            .send(ReservationCommand::Commit(staged, reply))
+            .map_err(|_| expired_writer())?;
+        let result = receive.await.map_err(|_| Error::UnknownCommit)?;
+        if let Some(worker) = self.worker.take() {
+            worker.await.map_err(|_| Error::UnknownCommit)?;
+        }
+        result
+    }
+
+    async fn abort(mut self) -> Result<()> {
+        let (reply, receive) = oneshot::channel();
+        let sent = self
+            .commands
+            .take()
+            .is_some_and(|commands| commands.send(ReservationCommand::Abort(reply)).is_ok());
+        let result = if sent {
+            receive.await.map_err(worker_error_from_channel)?
+        } else {
+            Ok(())
+        };
+        if let Some(worker) = self.worker.take() {
+            worker.await.map_err(worker_error)?;
+        }
+        result
+    }
+}
+
+impl Drop for ReservedWriter {
+    fn drop(&mut self) {
+        // The worker observes disconnection and aborts. It never needs an async
+        // task to be scheduled to release a cancelled session's writer lock.
+        self.commands.take();
+    }
+}
+
+fn close_reservation(state: &Mutex<ReservationState>) {
+    if let Ok(mut state) = state.lock() {
+        state.closed = true;
+    }
+}
+
+fn reserved_worker(
+    handles: Arc<DatabaseHandles>,
+    state: Arc<Mutex<ReservationState>>,
+    commands: mpsc::Receiver<ReservationCommand>,
+    ready: oneshot::Sender<Result<Arc<ReadTransaction>>>,
+    lock_timeout: Duration,
+) {
+    let started = Instant::now();
+    let acquired = loop {
+        if ready.is_closed() {
+            close_reservation(&state);
+            return;
+        }
+        let acquired = handles.try_writer().and_then(|database| {
+            if ready.is_closed() {
+                return Err(expired_writer());
+            }
+            database
+                .try_begin_write()
+                .map(|transaction| (database, transaction))
+                .map_err(|error| match error {
+                    redb::TransactionError::WouldBlock => Error::WriterBusy,
+                    error => storage_error(error),
+                })
+        });
+        match acquired {
+            Ok(acquired) => break Ok(acquired),
+            Err(Error::WriterBusy) if started.elapsed() < lock_timeout => {
+                std::thread::sleep(
+                    Duration::from_millis(5)
+                        .min(lock_timeout - started.elapsed().min(lock_timeout)),
+                );
+            }
+            Err(error) => break Err(error),
+        }
+    };
+    let prepared = acquired.and_then(|(database, mut transaction)| {
+        transaction
+            .set_durability(Durability::Immediate)
+            .map_err(storage_error)?;
+        // The snapshot is taken after acquiring the writer, never before a peer's commit.
+        let snapshot = Arc::new(database.begin_read().map_err(storage_error)?);
+        Ok((transaction, snapshot))
+    });
+    let (transaction, snapshot) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            close_reservation(&state);
+            let _ = ready.send(Err(error));
+            return;
+        }
+    };
+    if let Ok(mut state) = state.lock() {
+        state.touched = Instant::now();
+    }
+    if ready.send(Ok(snapshot)).is_err() {
+        close_reservation(&state);
+        let _ = transaction.abort();
+        return;
+    }
+    loop {
+        let remaining = match state.lock() {
+            Ok(state) if !state.closed => {
+                state.idle_timeout.saturating_sub(state.touched.elapsed())
+            }
+            _ => Duration::ZERO,
+        };
+        if remaining.is_zero() {
+            close_reservation(&state);
+            let _ = transaction.abort();
+            return;
+        }
+        match commands.recv_timeout(remaining) {
+            Ok(ReservationCommand::Commit(staged, reply)) => {
+                let live = match state.lock() {
+                    Ok(mut state) => {
+                        let live = !state.closed && state.touched.elapsed() < state.idle_timeout;
+                        state.closed = true;
+                        live
+                    }
+                    Err(_) => false,
+                };
+                let result = if live {
+                    handles
+                        .verify_identity()
+                        .and_then(|()| commit_staged(transaction, staged))
+                } else {
+                    transaction
+                        .abort()
+                        .map_err(storage_error)
+                        .and(Err(expired_writer()))
+                };
+                let _ = reply.send(result);
+                return;
+            }
+            Ok(ReservationCommand::Abort(reply)) => {
+                close_reservation(&state);
+                let _ = reply.send(transaction.abort().map_err(storage_error));
+                return;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                close_reservation(&state);
+                let _ = transaction.abort();
+                return;
+            }
+        }
     }
 }
 
@@ -482,7 +1145,7 @@ fn scan_table(
             .saturating_add(key.value().len())
             .saturating_add(value.value().len());
         if bytes > MAX_BATCH_BYTES {
-            return Err(Error::Invalid("database scan exceeds 16 MiB".into()));
+            return Err(Error::ResourceLimit(ResourceLimit::ScanBytes));
         }
         rows.push((key.value().to_vec(), value.value().to_vec()));
     }
@@ -510,6 +1173,58 @@ mod tests {
         CommitBatch, ProjectionMutation, Store, request_digest, store_key,
         test_support::TestFixture,
     };
+
+    #[test]
+    fn checked_open_preserves_internal_lock_waits_after_writer_acquisition() {
+        let temporary = tempfile::NamedTempFile::new().unwrap();
+        let open_file = || {
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(temporary.path())
+                .unwrap()
+        };
+        let backend = NonblockingOpen {
+            file: redb::backends::FileBackend::new(open_file()).unwrap(),
+            locks: Arc::new(OpenLocks {
+                opening: AtomicBool::new(true),
+                writer_acquired: AtomicBool::new(false),
+                busy: AtomicBool::new(false),
+                mutated: AtomicBool::new(false),
+            }),
+        };
+        let peer = redb::backends::FileBackend::new(open_file()).unwrap();
+        let writer = (Bound::Included(2048), Bound::Included(2048));
+        let header = (Bound::Included(4096), Bound::Included(4096));
+        backend.lock_range(writer.0, writer.1).unwrap();
+        peer.lock_shared_range(header.0, header.1).unwrap();
+        let (send, receive) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result = backend.lock_range(header.0, header.1);
+            let acquired = result.is_ok();
+            send.send(result).unwrap();
+            if acquired {
+                backend.unlock_range(header.0, header.1).unwrap();
+            }
+            backend.unlock_range(writer.0, writer.1).unwrap();
+        });
+        let early = receive.recv_timeout(Duration::from_millis(20));
+        let waited = matches!(early, Err(mpsc::RecvTimeoutError::Timeout));
+        peer.unlock_range(header.0, header.1).unwrap();
+        let outcome = match early {
+            Ok(result) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                receive.recv_timeout(Duration::from_secs(1)).unwrap()
+            }
+            Err(error) => panic!("internal lock worker disconnected: {error}"),
+        };
+        worker.join().unwrap();
+        assert!(
+            waited,
+            "an internal header wait was rejected after writer acquisition: {outcome:?}"
+        );
+        outcome.unwrap();
+    }
 
     #[tokio::test]
     async fn stale_key_and_range_observations_cannot_commit() {
@@ -760,7 +1475,13 @@ mod tests {
         .await
         .unwrap();
         let backend = Backend {
-            database: Arc::new(database),
+            handles: Arc::new(DatabaseHandles {
+                path: PathBuf::new(),
+                identity: None,
+                reader: None,
+                writer: Mutex::new(Some(Arc::new(database))),
+                opening: Mutex::new(()),
+            }),
         };
         let mut transaction = backend.begin().await.unwrap();
         transaction

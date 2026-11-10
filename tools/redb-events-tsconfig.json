@@ -1,0 +1,13 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "lib": ["ESNext", "esnext.disposable"]
+  },
+  "files": [
+    "../apps/server/src/persistence/OrchestrationEventStore.ts",
+    "../apps/server/src/persistence/EventRows.ts",
+    "../apps/server/src/persistence/SqliteEventRows.ts",
+    "../apps/server/src/persistence/NativeEventRows.ts"
+  ]
+}

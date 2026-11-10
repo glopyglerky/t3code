@@ -1635,7 +1635,10 @@ async fn cancellation_reason_amplification_is_bounded_and_rolls_back_every_row()
             now: LATER.into(),
         })
         .await;
-    assert!(matches!(outcome, Err(Error::Invalid(_))));
+    assert!(matches!(
+        outcome,
+        Err(Error::ResourceLimit(crate::ResourceLimit::MutationBytes))
+    ));
     assert_eq!(
         store.outbox_list_by_command("command").await.unwrap(),
         before
@@ -1667,7 +1670,7 @@ async fn cancellation_reason_amplification_is_bounded_and_rolls_back_every_row()
     };
     assert!(matches!(
         store.commit_outbox(&batch, &outbox).await,
-        Err(Error::Invalid(_))
+        Err(Error::ResourceLimit(crate::ResourceLimit::MutationBytes))
     ));
     assert_eq!(
         store.outbox_list_by_command("command").await.unwrap(),
@@ -1737,7 +1740,9 @@ async fn combined_cancellations_share_the_transaction_read_budget() {
     };
     assert!(matches!(
         store.commit_outbox(&batch, &outbox).await,
-        Err(Error::Invalid(_))
+        Err(Error::ResourceLimit(
+            crate::ResourceLimit::ObservationBudget
+        ))
     ));
     assert_eq!(store.snapshot().await.unwrap(), before);
     assert!(store.events(0, 100).await.unwrap().is_empty());

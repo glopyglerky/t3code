@@ -52,12 +52,13 @@ impl RpcError {
 impl From<Error> for RpcError {
     fn from(error: Error) -> Self {
         let kind = match error {
-            Error::Invalid(_) => "invalid_request",
+            Error::Invalid(_) | Error::ResourceLimit(_) => "invalid_request",
             Error::IncompatibleStore => "incompatible_store",
             Error::StaleRevision { .. } => "stale_revision",
             Error::CommandConflict => "command_conflict",
             Error::DuplicateRecord => "duplicate_record",
             Error::TransactionConflict => "transaction_conflict",
+            Error::WriterBusy => "writer_busy",
             Error::UnknownCommit => "unknown_commit",
             Error::Database(_) => "database_error",
         };
