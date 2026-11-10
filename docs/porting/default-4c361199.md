@@ -49,6 +49,11 @@ protocol as UTF-16 code units, preserving JavaScript's truncation behavior even
 when a boundary leaves a lone surrogate. The host supplies JavaScript Unicode
 lowercasing as a primitive fact; Rust owns the classification and filename
 transformations. This avoids depending on the compiler's Unicode case tables.
+Attachment names and MIME values also use this private encoding in later guest
+decision and release requests. The adapter restores their strings before contract
+validation and retained-field checks. This fixes an existing boundary where a
+correctly truncated name could be copied and then rejected by the strict JSON
+parser in the next helper call. Rust's global JSON parser remains strict.
 
 The adapter checks the response schema, code-unit bounds, attachment count and
 original byte counts. Native failures become the existing public `rejected`

@@ -81,6 +81,18 @@ const decodeStripped = Schema.decodeUnknownEffect(
   { onExcessProperty: "error" },
 );
 const Utf16Unit = Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 0xffff }));
+const AttachmentNameUnits = Schema.Array(Utf16Unit).check(
+  Schema.isMinLength(1),
+  Schema.isMaxLength(255),
+);
+const AttachmentMimeUnits = Schema.Array(Utf16Unit).check(
+  Schema.isMinLength(1),
+  Schema.isMaxLength(100),
+);
+const decodeAttachmentText = Schema.decodeUnknownEffect(
+  Schema.Struct({ name: AttachmentNameUnits, mimeType: AttachmentMimeUnits }),
+  { onExcessProperty: "error" },
+);
 const decodeClassifiedUploads = Schema.decodeUnknownEffect(
   Schema.Union([
     Schema.Struct({
@@ -92,14 +104,8 @@ const decodeClassifiedUploads = Schema.decodeUnknownEffect(
       attachments: Schema.Array(
         Schema.Struct({
           type: Schema.Literals(["image", "file"]),
-          nameUnits: Schema.Array(Utf16Unit).check(
-            Schema.isMinLength(1),
-            Schema.isMaxLength(255),
-          ),
-          mimeTypeUnits: Schema.Array(Utf16Unit).check(
-            Schema.isMinLength(1),
-            Schema.isMaxLength(100),
-          ),
+          nameUnits: AttachmentNameUnits,
+          mimeTypeUnits: AttachmentMimeUnits,
           sizeBytes: Schema.Number.check(Schema.isFinite()),
         }),
       ).check(Schema.isMaxLength(GUEST_MESSAGE_MAX_ATTACHMENTS)),
@@ -152,9 +158,33 @@ function sameRetained(before: object, after: object, fields: ReadonlyArray<strin
   return canonical(withoutFields(before, fields)) === canonical(withoutFields(after, fields));
 }
 
+function wireAttachments(attachments: NonNullable<ThreadGuestMessage["attachments"]>) {
+  // Decisions inspect only IDs and sizes. Keep attachment text lossless through
+  // the same helper when JavaScript's filename slice leaves a lone surrogate.
+  return attachments.map((attachment) => ({
+    ...attachment,
+    name: utf16Units(attachment.name),
+    mimeType: utf16Units(attachment.mimeType),
+  }));
+}
+
+function wireGuestShare(share: ThreadGuestShare | null | undefined) {
+  if (share == null) return share;
+  return {
+    ...share,
+    messages: share.messages.map((message) => ({
+      ...message,
+      ...(message.attachments === undefined
+        ? {}
+        : { attachments: wireAttachments(message.attachments) }),
+    })),
+  };
+}
+
 function wireThread(thread: OrchestrationV2AppThread) {
   return {
     ...thread,
+    ...(thread.guestShare === undefined ? {} : { guestShare: wireGuestShare(thread.guestShare) }),
     archivedAt: thread.archivedAt === null ? null : DateTime.toEpochMillis(thread.archivedAt),
     settledAt: thread.settledAt === null ? null : DateTime.toEpochMillis(thread.settledAt),
     ...(thread.unsettledAt === undefined
@@ -166,6 +196,44 @@ function wireThread(thread: OrchestrationV2AppThread) {
     updatedAt: DateTime.toEpochMillis(thread.updatedAt),
   };
 }
+
+const restoreThreadAttachmentText = Effect.fn("NativeGuestShare.restoreThreadAttachmentText")(
+  function* (raw: unknown) {
+    if (!plainRecord(raw)) return yield* new NativeGuestShareError({ stage: "response" });
+    const share = raw.guestShare;
+    if (share === undefined || share === null) return raw;
+    if (!plainRecord(share) || !Array.isArray(share.messages))
+      return yield* new NativeGuestShareError({ stage: "response" });
+    const messages = yield* Effect.forEach(share.messages, (message: unknown) =>
+      Effect.gen(function* () {
+        if (!plainRecord(message))
+          return yield* new NativeGuestShareError({ stage: "response" });
+        if (message.attachments === undefined) return message;
+        if (!Array.isArray(message.attachments))
+          return yield* new NativeGuestShareError({ stage: "response" });
+        const attachments = yield* Effect.forEach(message.attachments, (attachment: unknown) =>
+          Effect.gen(function* () {
+            if (!plainRecord(attachment))
+              return yield* new NativeGuestShareError({ stage: "response" });
+            const text = yield* decodeAttachmentText({
+              name: attachment.name,
+              mimeType: attachment.mimeType,
+            }).pipe(
+              Effect.mapError((cause) => new NativeGuestShareError({ stage: "response", cause })),
+            );
+            return {
+              ...attachment,
+              name: String.fromCharCode(...text.name),
+              mimeType: String.fromCharCode(...text.mimeType),
+            };
+          }),
+        );
+        return { ...message, attachments };
+      }),
+    );
+    return { ...raw, guestShare: { ...share, messages } };
+  },
+);
 
 function parsedDates(shares: ReadonlyArray<ThreadGuestShare | null | undefined>, expiry?: string) {
   const values = new Set(shares.flatMap((share) => (share == null ? [] : [share.expiresAt])));
@@ -402,10 +470,11 @@ export const make = Effect.fn("NativeGuestShare.make")(function* () {
     now: DateTime.Utc,
     operation: Parameters<typeof shareTransition>[3],
   ) {
-    const decoded = yield* decodeThread(raw).pipe(
+    const restored = yield* restoreThreadAttachmentText(raw);
+    const decoded = yield* decodeThread(restored).pipe(
       Effect.mapError((cause) => new NativeGuestShareError({ stage: "response", cause })),
     );
-    const after = preserveJsonFields(raw, decoded);
+    const after = preserveJsonFields(restored, decoded);
     const expectedChanged = !unchangedTransition(before, operation);
     if (
       changed !== expectedChanged ||
@@ -467,7 +536,11 @@ export const make = Effect.fn("NativeGuestShare.make")(function* () {
       const response = yield* call({
         operation: "decide",
         thread: wireThread(input.thread),
-        command: input.command,
+        command:
+          input.command.type === "thread.guest-message.submit" &&
+          input.command.attachments !== undefined
+            ? { ...input.command, attachments: wireAttachments(input.command.attachments) }
+            : input.command,
         now: DateTime.toEpochMillis(input.now),
         parsedDates: parsedDates(
           [input.thread.guestShare],
@@ -556,8 +629,8 @@ export const make = Effect.fn("NativeGuestShare.make")(function* () {
       if (executable === undefined) return Upstream.releasedGuestAttachmentIds(before, after);
       const response = yield* call({
         operation: "release",
-        before,
-        after,
+        before: wireGuestShare(before),
+        after: wireGuestShare(after),
         parsedDates: parsedDates([before, after]),
       });
       if ("error" in response || response.changed !== undefined)

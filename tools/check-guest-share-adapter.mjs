@@ -78,6 +78,9 @@ const encodeEvent = Schema.encodeSync(OrchestrationV2DomainEventJson);
 const encodeProjection = Schema.encodeSync(OrchestrationV2ThreadProjectionJson);
 const PNG = Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13);
 const MIB = 1024 * 1024;
+const unicodeUploadName = "a".repeat(254) + "🦀";
+const storedUnicodeName = "a".repeat(254) + "\ud83e";
+const unicodeUploadMime = "application/x-\ud800";
 const utf16Units = (value) =>
   Array.from({ length: value.length }, (_, index) => value.charCodeAt(index));
 const adapter = {
@@ -388,7 +391,10 @@ async function lifecycle(selection, label) {
       yield* guestShares.submit(
         session.token,
         { shareId: session.shareId, text: "/model 💬 guest request" },
-        yield* uploads("screen.png"),
+        [
+          ...(yield* uploads(unicodeUploadName)),
+          ...(yield* uploads("mime-surrogate.txt", 1, unicodeUploadMime)),
+        ],
       );
       const submitted = yield* projection();
       NodeAssert.equal(submitted.thread.settledOverride, null);
@@ -396,6 +402,10 @@ async function lifecycle(selection, label) {
       NodeAssert.equal(DateTime.toEpochMillis(submitted.thread.unsettledAt), nowMillis);
       const message = submitted.thread.guestShare.messages[0];
       NodeAssert.equal(message.status, "pending");
+      NodeAssert.equal(message.attachments[0].name, storedUnicodeName);
+      NodeAssert.equal(message.attachments[0].name.length, 255);
+      NodeAssert.equal(message.attachments[0].name.charCodeAt(254), 0xd83e);
+      NodeAssert.equal(message.attachments[1].mimeType, unicodeUploadMime);
       yield* guestShares.attachment(session.token, message.attachments[0].id);
       const command = ownerSend("owner-send", message);
       yield* orchestrator.dispatch(command);
@@ -445,6 +455,8 @@ async function lifecycle(selection, label) {
         summary: {
           statuses: sent.thread.guestShare.messages.map((item) => item.status),
           text: sent.messages[0].text,
+          attachmentNames: sent.messages[0].attachments.map((attachment) => attachment.name),
+          attachmentMimeTypes: sent.messages[0].attachments.map((attachment) => attachment.mimeType),
           runs: sent.runs.length,
           events: (yield* snapshot()).events.map((row) => row.event.type),
           finalFrame: frames.at(-1).type,
@@ -475,7 +487,7 @@ async function lifecycle(selection, label) {
     filename,
   );
   scenarios.push(
-    `${label}: service lifecycle, concurrent redemption, once-only send, files, reopen and replay`,
+    `${label}: service lifecycle, concurrent redemption, once-only send, lone-surrogate attachment metadata, reopen and replay`,
   );
   return first.summary;
 }
@@ -659,8 +671,9 @@ const cleanup = Effect.gen(function* () {
   for (const action of ["dismiss", "close", "replace", "archive", "delete"]) {
     const id = ThreadId.make(`thread:cleanup:${action}`);
     const { orchestrator, guestShares, token, shareId } = yield* join(id);
-    yield* guestShares.submit(token, { shareId, text: action }, yield* uploads(`${action}.png`));
+    yield* guestShares.submit(token, { shareId, text: action }, yield* uploads(unicodeUploadName));
     const attachment = (yield* projection(id)).thread.guestShare.messages[0].attachments[0];
+    NodeAssert.equal(attachment.name, storedUnicodeName);
     const before = yield* storedFiles;
     NodeAssert.ok(before.some((entry) => entry.startsWith(attachment.id)));
     if (action === "replace") yield* guestShares.create({ threadId: id });
@@ -1079,6 +1092,8 @@ if (target && mode.kind === "invalid-json") {
     }
     if (mode.kind === "foreign-release") response.ok.attachmentIds.push(mode.attachmentId);
     if (mode.kind === "keep-attribution") response.ok.context = request.context;
+    if (mode.kind === "attachment-name-units") response.ok.guestShare.messages.at(-1).attachments[0].name = [65536];
+    if (mode.kind === "attachment-mime-units") response.ok.guestShare.messages.at(-1).attachments[0].mimeType = [1.25];
     if (mode.kind === "upload-count") response.ok.attachments.pop();
     if (mode.kind === "upload-order") response.ok.attachments.reverse();
     if (mode.kind === "upload-size") response.ok.attachments[0].sizeBytes += 1;
@@ -1483,7 +1498,7 @@ async function nativeFailureChecks() {
     "native replies cannot mutate retained extensions, discard pending records on cancel, cross share IDs, or retain forged attribution",
   );
 
-  for (const kind of ["invalid-json", "exit"]) {
+  for (const kind of ["invalid-json", "exit", "attachment-name-units", "attachment-mime-units"]) {
     await run(
       Effect.gen(function* () {
         yield* control.setMode();
