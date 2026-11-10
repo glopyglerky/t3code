@@ -23,3 +23,5 @@ pub mod project_persistence_wire;
 pub mod provider_process;
 pub mod provider_recovery;
 pub mod provider_recovery_wire;
+#[path = "../../../apps/server/src/provider/provider_update_verification.rs"]
+pub mod provider_update_verification;

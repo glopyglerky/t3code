@@ -6,6 +6,7 @@ use crate::maintenance::{
     NativeUpdate, Observation, ObservationValue, Observed, Owner, Request, SelectedUpdateAction,
     UpdateActionInput,
 };
+use crate::provider_update_verification::{self, ProviderSnapshot};
 use std::collections::HashSet;
 
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
@@ -461,6 +462,91 @@ fn encode_selected_action(value: &SelectedUpdateAction) -> Value {
     ])
 }
 
+fn verified_provider(value: &Value) -> Result<ProviderSnapshot> {
+    let mut allowed = vec![
+        "checkedAt",
+        "installed",
+        "status",
+        "authStatus",
+        "version",
+        "versionAdvisoryStatus",
+    ];
+    if value.get("installedVersion").is_some() {
+        allowed.push("installedVersion");
+    }
+    keys(value, &allowed)?;
+    Ok(ProviderSnapshot {
+        checked_at: text(field(value, "checkedAt")?)?,
+        installed: boolean(field(value, "installed")?)?,
+        status: text(field(value, "status")?)?,
+        auth_status: text(field(value, "authStatus")?)?,
+        version: optional_text(field(value, "version")?, MAX_TEXT_BYTES)?,
+        installed_version: value
+            .get("installedVersion")
+            .map(|version| optional_text(version, MAX_TEXT_BYTES))
+            .transpose()?,
+        version_advisory_status: optional_text(field(value, "versionAdvisoryStatus")?, MAX_TEXT_BYTES)?,
+    })
+}
+
+fn verify_update(value: &Value) -> Result<Value> {
+    let mode = field(value, "mode")?
+        .as_str()
+        .ok_or(Error::InvalidRequest)?;
+    let allowed = match mode {
+        "pre-update" => vec![
+            "version",
+            "operation",
+            "mode",
+            "priorCheckedAt",
+            "advisoryEnriched",
+            "verifiedProviders",
+        ],
+        "post-update" => vec![
+            "version",
+            "operation",
+            "mode",
+            "targetVersion",
+            "verifiedProviders",
+        ],
+        _ => return Err(Error::InvalidRequest),
+    };
+    keys(value, &allowed)?;
+    if field(value, "version")?.as_u64() != Some(1)
+        || field(value, "operation")?.as_str() != Some("verify-update")
+    {
+        return Err(Error::InvalidRequest);
+    }
+    let providers = field(value, "verifiedProviders")?
+        .as_array()
+        .ok_or(Error::InvalidRequest)?
+        .iter()
+        .map(verified_provider)
+        .collect::<Result<Vec<_>>>()?;
+    let mut response = vec![
+        ("kind", Value::String("verified".to_string())),
+        ("mode", Value::String(mode.to_string())),
+    ];
+    if mode == "pre-update" {
+        let prior = optional_text(field(value, "priorCheckedAt")?, MAX_TEXT_BYTES)?;
+        let enriched = boolean(field(value, "advisoryEnriched")?)?;
+        response.push((
+            "alreadyCurrent",
+            Value::Bool(provider_update_verification::already_current(
+                prior.as_deref(),
+                enriched,
+                &providers,
+            )),
+        ));
+    } else {
+        let target = optional_text(field(value, "targetVersion")?, MAX_TEXT_BYTES)?;
+        let verdict = provider_update_verification::verify_update(target.as_deref(), &providers);
+        response.push(("status", Value::String(verdict.status().to_string())));
+        response.push(("message", Value::String(verdict.message().to_string())));
+    }
+    Ok(object(response))
+}
+
 fn encode_response(result: Value) -> Result<String> {
     let response = object(vec![
         ("version", Value::Number("1".to_string())),
@@ -602,6 +688,14 @@ impl Session {
             self.completed = true;
             return Ok((response, true));
         }
+        if field(&value, "operation")?.as_str() == Some("verify-update") {
+            if self.base.is_some() {
+                return Err(Error::ObservationMismatch);
+            }
+            let response = encode_response(verify_update(&value)?)?;
+            self.completed = true;
+            return Ok((response, true));
+        }
         let request = decode_request(&value)?;
         let Value::Object(fields) = &value else {
             return Err(Error::InvalidRequest);
@@ -707,6 +801,74 @@ mod tests {
 
     fn frame(value: &Value) -> String {
         format!("{}\n", json::stringify(value))
+    }
+
+    fn verification_request(mode: &str) -> Value {
+        let mut fields = vec![
+            ("version", Value::Number("1".to_string())),
+            ("operation", Value::String("verify-update".to_string())),
+            ("mode", Value::String(mode.to_string())),
+            (
+                "verifiedProviders",
+                Value::Array(vec![object(vec![
+                    ("checkedAt", Value::String("new".to_string())),
+                    ("installed", Value::Bool(true)),
+                    ("status", Value::String("ready".to_string())),
+                    ("authStatus", Value::String("authenticated".to_string())),
+                    ("version", Value::String("1.2.3".to_string())),
+                    ("versionAdvisoryStatus", Value::String("current".to_string())),
+                ])]),
+            ),
+        ];
+        if mode == "pre-update" {
+            fields.push(("priorCheckedAt", Value::String("old".to_string())));
+            fields.push(("advisoryEnriched", Value::Bool(true)));
+        } else {
+            fields.push(("targetVersion", Value::String("1.2.3".to_string())));
+        }
+        object(fields)
+    }
+
+    #[test]
+    fn verification_is_terminal_and_cannot_be_followed_by_another_operation() {
+        for (mode, expected) in [
+            (
+                "pre-update",
+                "{\"version\":1,\"ok\":{\"kind\":\"verified\",\"mode\":\"pre-update\",\"alreadyCurrent\":true}}\n",
+            ),
+            (
+                "post-update",
+                "{\"version\":1,\"ok\":{\"kind\":\"verified\",\"mode\":\"post-update\",\"status\":\"succeeded\",\"message\":\"Provider updated.\"}}\n",
+            ),
+        ] {
+            let mut session = Session::new();
+            let input = frame(&verification_request(mode));
+            assert_eq!(session.respond(&input), Ok((expected.to_string(), true)));
+            assert_eq!(session.respond(&input), Err(Error::InvalidRequest));
+            assert_eq!(
+                session.respond(&frame(&selection_request())),
+                Err(Error::InvalidRequest)
+            );
+        }
+    }
+
+    #[test]
+    fn verification_decoding_preserves_an_explicitly_unknown_installation() {
+        let mut request = verification_request("post-update");
+        let Value::Array(mut providers) = request.get("verifiedProviders").unwrap().clone() else {
+            unreachable!();
+        };
+        let Value::Object(fields) = &mut providers[0] else {
+            unreachable!();
+        };
+        fields.push(("installedVersion".to_string(), Value::Null));
+        replace(&mut request, "verifiedProviders", Value::Array(providers));
+        let (response, completed) = Session::new().respond(&frame(&request)).unwrap();
+        assert!(completed);
+        assert_eq!(
+            response,
+            "{\"version\":1,\"ok\":{\"kind\":\"verified\",\"mode\":\"post-update\",\"status\":\"unchanged\",\"message\":\"Update command completed, but T3 Code could not verify the provider version.\"}}\n"
+        );
     }
 
     #[test]
@@ -873,6 +1035,12 @@ mod tests {
             session.respond(&frame(&selection_request())),
             Err(Error::ObservationMismatch)
         );
+        for mode in ["pre-update", "post-update"] {
+            assert_eq!(
+                session.respond(&frame(&verification_request(mode))),
+                Err(Error::ObservationMismatch)
+            );
+        }
 
         let mut request = json::parse(request).unwrap();
         replace(

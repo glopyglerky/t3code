@@ -19,6 +19,7 @@ import * as References from "effect/References";
 import * as Scheduler from "effect/Scheduler";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
+import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as HttpClient from "effect/http/HttpClient";
 import * as Maintenance from "../packages/provider-core/src/server/maintenanceResolver.ts";
@@ -51,6 +52,7 @@ let totalNativeProcesses = 0;
 let totalProbeCommands = 0;
 let totalUpdateCommands = 0;
 let totalUpdateActionComparisons = 0;
+let totalVerificationComparisons = 0;
 
 const oracleSource = upstreamSource("packages/provider-core/src/server/maintenanceResolver.ts");
 const oracleStart = "export function makeTargetedProviderUpdateAction(";
@@ -65,6 +67,59 @@ const updateActionOracle = new Function(
     .replaceAll("export function ", "function ") +
     "\nreturn { makeTargetedProviderUpdateAction, resolveLatestProviderUpdateAction };",
 )();
+
+const verificationOracleSource = upstreamSource("apps/server/src/provider/providerMaintenanceRunner.ts");
+function verificationSourceBetween(start, end) {
+  const first = verificationOracleSource.indexOf(start);
+  const last = verificationOracleSource.indexOf(end, first + start.length);
+  NodeAssert.ok(first >= 0 && last > first, `Missing upstream verification markers: ${start}`);
+  NodeAssert.equal(verificationOracleSource.indexOf(start, first + 1), -1);
+  NodeAssert.equal(verificationOracleSource.indexOf(end, last + 1), -1);
+  return verificationOracleSource.slice(first, last);
+}
+const preUpdateOracle = new Function("prior", "precheck",
+  NodeModule.stripTypeScriptTypes(verificationSourceBetween("const alreadyCurrent =", "if (alreadyCurrent)")) +
+  "\nreturn alreadyCurrent;",
+);
+const postUpdateOracle = new Function("verifiedProviders", "targetVersion",
+  NodeModule.stripTypeScriptTypes(
+    verificationSourceBetween("function isOutdatedProvider(", "function makeUpdateState(") +
+    verificationSourceBetween("const couldNotVerify =", "return yield* finish(\n              makeUpdateState({\n                status: couldNotVerify"),
+  ) + "\nreturn {" +
+  verificationSourceBetween("status: couldNotVerify || stillOutdated", "                startedAt,\n                finishedAt,\n                message: couldNotVerify") +
+  verificationSourceBetween("message: couldNotVerify", "                output: commandOutput(result),\n              }),\n            );\n          },") +
+  "};",
+);
+
+function originalVerification(input) {
+  const verifiedProviders = input.verifiedProviders.map(({ authStatus, versionAdvisoryStatus, ...provider }) => ({
+    ...provider,
+    auth: { status: authStatus },
+    ...(versionAdvisoryStatus === null ? {} : { versionAdvisory: { status: versionAdvisoryStatus } }),
+  }));
+  return input.mode === "pre-update"
+    ? { kind: "verified", mode: input.mode, alreadyCurrent: preUpdateOracle(
+      input.priorCheckedAt === null ? undefined : { checkedAt: input.priorCheckedAt },
+      { advisoryEnriched: input.advisoryEnriched, verifiedProviders },
+    ) }
+    : { kind: "verified", mode: input.mode, ...postUpdateOracle(verifiedProviders, input.targetVersion ?? undefined) };
+}
+
+async function compareVerifications(name, inputs) {
+  const f = await fixture(`verification-${name}`);
+  await run(Effect.gen(function* () {
+    for (const [index, input] of inputs.entries()) {
+      const before = structuredClone(input);
+      const actual = yield* NativeMaintenancePolicy.verifyUpdate(executable, input);
+      NodeAssert.deepEqual(actual, originalVerification(input), `${name} case ${index}: ${JSON.stringify(input)}`);
+      NodeAssert.deepEqual(input, before, "verification must not mutate captured inputs");
+      totalVerificationComparisons++;
+    }
+  }), f);
+  NodeAssert.equal(f.natives.length, inputs.length);
+  NodeAssert.equal(f.calls.length, 0);
+  NodeAssert.equal(f.updates.length, 0);
+}
 
 function originalUpdateAction(input) {
   const capabilities = { provider: driver, packageName: input.packageName, update: input.update };
@@ -189,7 +244,9 @@ function handle(result) {
 async function run(effect, f, selected = executable) {
   const environment = {
     ...f.env,
-    ...(selected === undefined ? {} : { T3_CODE_LS_MAINTENANCE_EXECUTABLE: selected }),
+    ...(f.useDefaultNativeSelection ? {} : selected === null
+      ? { T3_CODE_LS_IMPLEMENTATION: "upstream" }
+      : selected === undefined ? {} : { T3_CODE_LS_MAINTENANCE_EXECUTABLE: selected }),
   };
   return Effect.runPromise(
     Effect.gen(function* () {
@@ -203,7 +260,10 @@ async function run(effect, f, selected = executable) {
             NodeAssert.equal(command.options.extendEnv, false);
             NodeAssert.equal(command.options.shell, false);
             totalNativeProcesses++;
-            const child = yield* actual.spawn(command);
+            const replacement = f.policyOverrides?.get(f.natives.length + 1);
+            const child = yield* actual.spawn(replacement === undefined
+              ? command
+              : ChildProcess.make(replacement, command.args, command.options));
             f.natives.push(Number(child.pid));
             if (f.onNativeSpawn) yield* f.onNativeSpawn(child);
             return child;
@@ -257,7 +317,15 @@ function policyReply(expression, tail = "") {
   return `process.stdin.once('data', b => { const q=JSON.parse(b); process.stdout.write(JSON.stringify({version:1,ok:${expression}})+'\\n',()=>{${tail}process.exit(0)}); });`;
 }
 
-async function updateRunnerFixture(name, mode = "latest") {
+function runnerProvider(overrides = {}) {
+  return {
+    instanceId, driver, enabled: true, installed: true, version: "1.0.0", status: "ready",
+    auth: { status: "authenticated" }, checkedAt: "2026-11-08T12:00:00.000Z",
+    models: [], slashCommands: [], skills: [], ...overrides,
+  };
+}
+
+async function updateRunnerFixture(name, mode = "latest", options = {}) {
   const f = await fixture(name);
   const manager = await writeExecutable(NodePath.join(f.base, "bin", mode === "latest" ? "pnpm" : "npm"));
   const args = mode === "latest"
@@ -275,11 +343,8 @@ async function updateRunnerFixture(name, mode = "latest") {
   });
   const expectedArgs = args.map((arg) => arg === "@openai/codex@latest" ? "@openai/codex@2.0.0" : arg);
   const states = [];
-  let providers = [{
-    instanceId, driver, enabled: true, installed: true, version: "1.0.0", status: "ready",
-    auth: { status: "authenticated" }, checkedAt: "2026-11-08T12:00:00.000Z",
-    models: [], slashCommands: [], skills: [],
-  }];
+  let providers = options.initialProviders ?? [runnerProvider()];
+  const refreshes = [];
   const manifest = {
     version: 1,
     currentModels: {},
@@ -291,10 +356,15 @@ async function updateRunnerFixture(name, mode = "latest") {
   const registry = {
     getProviders: Effect.sync(() => providers),
     refresh: () => Effect.sync(() => providers),
-    refreshInstance: () => Effect.sync(() => providers),
+    refreshInstance: () => Effect.sync(() => {
+      refreshes.push("pre-update");
+      providers = options.preProviders ?? providers;
+      return providers;
+    }),
     reloadSecretsAndRefresh: () => Effect.sync(() => providers),
     refreshAfterUpdate: () => Effect.sync(() => {
-      providers = providers.map((provider) => ({ ...provider, version: "2.0.0" }));
+      refreshes.push("post-update");
+      providers = options.postProviders ?? providers.map((provider) => ({ ...provider, version: "2.0.0" }));
       return providers;
     }),
     refreshWorkspaceSnapshot: () => Effect.sync(() => providers),
@@ -332,7 +402,7 @@ async function updateRunnerFixture(name, mode = "latest") {
       provider: driver, instanceId, ...(mode === "target" ? { targetVersion: "2.0.0" } : {}),
     });
   });
-  return { f, capabilities, operation, states, manager, expectedArgs };
+  return { f, capabilities, operation, states, manager, expectedArgs, refreshes };
 }
 
 try {
@@ -401,6 +471,93 @@ try {
       ...packageVariants.map((variant) => ({ ...selectionBase, ...variant, mode: "latest" })),
     ]));
 
+  const verificationProvider = {
+    checkedAt: "2026-11-08T12:00:01.000Z", installed: true, status: "ready",
+    authStatus: "authenticated", version: "2.0.0", versionAdvisoryStatus: "current",
+  };
+  const preVariants = [
+    [], [verificationProvider], [verificationProvider, verificationProvider],
+    ...[
+      { checkedAt: "2026-11-08T12:00:00.000Z" }, { installed: false },
+      { status: "error" }, { versionAdvisoryStatus: null }, { versionAdvisoryStatus: "behind_latest" },
+      { versionAdvisoryStatus: "unknown" }, { status: "future" }, { authStatus: "unauthenticated" },
+      { version: null }, { installedVersion: null },
+    ].flatMap((change) => [[{ ...verificationProvider, ...change }],
+      [verificationProvider, { ...verificationProvider, ...change }],
+      [{ ...verificationProvider, ...change }, verificationProvider]]),
+  ];
+  await scenario("Rust pre-update verdicts match immutable upstream freshness and all-provider rules", () =>
+    compareVerifications("pre-update", [true, false].flatMap((advisoryEnriched) =>
+      [null, "2026-11-08T12:00:00.000Z", "2026-11-08T12:00:01.000Z"].flatMap((priorCheckedAt) =>
+        preVariants.map((verifiedProviders) => ({
+          mode: "pre-update", advisoryEnriched, priorCheckedAt, verifiedProviders,
+        }))))));
+
+  const postVariants = [
+    [], [verificationProvider], [verificationProvider, verificationProvider],
+    ...[
+      { installed: false }, { status: "error" }, { versionAdvisoryStatus: "behind_latest" },
+      { versionAdvisoryStatus: null }, { status: "future", authStatus: "unknown" },
+      { installed: false, versionAdvisoryStatus: "behind_latest" },
+      ...[null, "", "1.0.0", "2.0.0", "v2.0.0", "vv2.0.0", "V2.0.0", " 2.0.0", "2.0.0\n", "🚀", "v🚀"]
+        .flatMap((version) => [{ version }, { installedVersion: version }]),
+      ...[null, "", "1.0.0", "2.0.0"].flatMap((version) => ["authenticated", "unauthenticated", "unknown"]
+        .map((authStatus) => ({ status: "error", authStatus, version, installedVersion: "2.0.0" }))),
+    ].flatMap((change) => [[{ ...verificationProvider, ...change }],
+      [verificationProvider, { ...verificationProvider, ...change }]]),
+  ];
+  await scenario("Rust post-update verdicts match immutable upstream null, auth, prefix and priority rules", () =>
+    compareVerifications("post-update", [null, "2.0.0", "", "v2.0.0", "🚀"].flatMap((targetVersion) =>
+      postVariants.map((verifiedProviders) => ({ mode: "post-update", targetVersion, verifiedProviders })))));
+
+  const freshCurrent = runnerProvider({ version: "2.0.0", checkedAt: "2026-11-08T12:00:01.000Z" });
+  for (const [name, options, skips] of [
+    ["fresh current version", { preProviders: [freshCurrent] }, true],
+    ["unchanged checkedAt", { preProviders: [runnerProvider({ version: "2.0.0" })] }, false],
+    ["missing prior provider", { initialProviders: [], preProviders: [freshCurrent] }, false],
+    ["empty refresh", { preProviders: [], postProviders: [freshCurrent] }, false],
+    ["another provider instance", { preProviders: [{ ...freshCurrent, instanceId: "other" }], postProviders: [freshCurrent] }, false],
+    ["one stale duplicate", { preProviders: [freshCurrent, runnerProvider({ version: "2.0.0" })] }, false],
+  ]) {
+    await scenario(`the actual runner ${skips ? "skips" : "runs"} the update after ${name}`, async () => {
+      const { f, operation, states, refreshes } = await updateRunnerFixture(`precheck-${scenarios.length}`, "latest", options);
+      await run(operation, f);
+      NodeAssert.equal(states.at(-1).status, "succeeded");
+      NodeAssert.equal(states.at(-1).message, skips ? "Already up to date." : "Provider updated.");
+      NodeAssert.equal(f.updates.length, skips ? 0 : 1);
+      NodeAssert.equal(f.natives.length, skips ? 2 : 3);
+      NodeAssert.deepEqual(refreshes, skips ? ["pre-update"] : ["pre-update", "post-update"]);
+    });
+  }
+
+  const unverifiableMessage = "Update command completed, but T3 Code could not verify the provider version.";
+  const outdatedMessage = "Update command completed, but T3 Code still detects an outdated provider version.";
+  for (const [name, mode, postProviders, status, message] of [
+    ["empty refreshed set", "latest", [], "unchanged", unverifiableMessage],
+    ["removed installation", "latest", [runnerProvider({ installed: false })], "unchanged", unverifiableMessage],
+    ["still outdated", "latest", [runnerProvider()], "unchanged", outdatedMessage],
+    ["unverifiable before outdated", "latest", [runnerProvider(), runnerProvider({ installed: false })], "unchanged", unverifiableMessage],
+    ["transient missing version", "latest", [runnerProvider({ version: null })], "succeeded", "Provider updated."],
+    ["auth error with known version", "latest", [runnerProvider({ version: "2.0.0", status: "error", auth: { status: "unauthenticated" } })], "succeeded", "Provider updated."],
+    ["auth error without reported version", "target", [runnerProvider({ version: null, installedVersion: "2.0.0", status: "error", auth: { status: "unauthenticated" } })], "unchanged", unverifiableMessage],
+    ["explicitly unknown installed version", "target", [runnerProvider({ version: "2.0.0", installedVersion: null })], "unchanged", unverifiableMessage],
+    ["legacy installed version fallback", "target", [runnerProvider({ version: "2.0.0" })], "succeeded", "Provider updated."],
+    ["one lowercase prefix", "target", [runnerProvider({ installedVersion: "v2.0.0" })], "succeeded", "Provider updated."],
+    ["two lowercase prefixes", "target", [runnerProvider({ installedVersion: "vv2.0.0" })], "unchanged", unverifiableMessage],
+    ["uppercase prefix", "target", [runnerProvider({ installedVersion: "V2.0.0" })], "unchanged", unverifiableMessage],
+  ]) {
+    await scenario(`the actual runner preserves ${name} after exactly one controlled update`, async () => {
+      const { f, operation, states, refreshes } = await updateRunnerFixture(`postcheck-${scenarios.length}`, mode, { postProviders });
+      await run(operation, f);
+      NodeAssert.equal(states.at(-1).status, status);
+      NodeAssert.equal(states.at(-1).message, message);
+      NodeAssert.equal(states.at(-1).output, "Controlled update completed");
+      NodeAssert.equal(f.updates.length, 1);
+      NodeAssert.equal(f.natives.length, mode === "latest" ? 3 : 2);
+      NodeAssert.deepEqual(refreshes, mode === "latest" ? ["pre-update", "post-update"] : ["post-update"]);
+    });
+  }
+
   await scenario("the service retains the captured executable, environment and lock after Rust selection", async () => {
     const { f, capabilities } = await updateRunnerFixture("selection-host-fields");
     const before = structuredClone(capabilities);
@@ -420,7 +577,7 @@ try {
       await run(operation, f);
       NodeAssert.equal(states.at(-1).status, "succeeded");
       NodeAssert.deepEqual(f.updates, [[manager, ...expectedArgs]]);
-      NodeAssert.equal(f.natives.length, 1);
+      NodeAssert.equal(f.natives.length, mode === "latest" ? 3 : 2);
     });
   }
 
@@ -465,6 +622,135 @@ try {
     NodeAssert.equal(f.updates.length, 0);
     NodeAssert.equal(f.calls.length, 0);
   });
+
+  for (const mode of ["pre-update", "post-update"]) {
+    const input = mode === "pre-update"
+      ? { mode, priorCheckedAt: null, advisoryEnriched: true, verifiedProviders: [verificationProvider] }
+      : { mode, targetVersion: null, verifiedProviders: [verificationProvider] };
+    const expected = originalVerification(input);
+    await scenario(`a valid ${mode} response reaches the adapter's terminal response check`, async () => {
+      const f = await fixture(`verified-control-${mode}`);
+      const policy = await fakePolicy(`verified-control-${mode}`, policyReply(JSON.stringify(expected)));
+      NodeAssert.deepEqual(await run(NativeMaintenancePolicy.verifyUpdate(policy, input), f, policy), expected);
+      NodeAssert.equal(f.natives.length, 1);
+      NodeAssert.equal(f.calls.length, 0);
+    });
+    const faults = [
+      ["wrong operation response", "{kind:'selected',action:null}", "", "response"],
+      ["observation instead of verification", "{kind:'observe',request:{kind:'pnpmVersion'}}", "", "response"],
+      ["wrong verification mode", JSON.stringify(mode === "pre-update"
+        ? { kind: "verified", mode: "post-update", status: "succeeded", message: "Provider updated." }
+        : { kind: "verified", mode: "pre-update", alreadyCurrent: true }), "", "response"],
+      ["unknown verification field", JSON.stringify({ ...expected, extra: true }), "", "response"],
+      ["missing verification verdict", JSON.stringify({ kind: "verified", mode }), "", "response"],
+      ["nonzero exit", JSON.stringify(expected), "process.exit(7);", "process"],
+      ["stderr after verification", JSON.stringify(expected), "process.stderr.write('unexpected');", "response"],
+      ["trailing verification", JSON.stringify(expected), "process.stdout.write('trailing\\n');", "response"],
+      ...(mode === "pre-update"
+        ? [["nonboolean already-current", JSON.stringify({ ...expected, alreadyCurrent: "true" }), "", "response"]]
+        : [
+          ["forged verification message", JSON.stringify({ ...expected, message: "Forged result" }), "", "response"],
+          ["inconsistent verification status", JSON.stringify({ ...expected, message: unverifiableMessage }), "", "response"],
+          ["invalid verification status", JSON.stringify({ ...expected, status: "running" }), "", "response"],
+        ]),
+    ];
+    for (const [name, expression, tail, stage] of faults) {
+      await scenario(`${mode} rejects ${name} without a host observation`, async () => {
+        const f = await fixture(`verified-fault-${scenarios.length}`);
+        const policy = await fakePolicy(`verified-fault-${scenarios.length}`, policyReply(expression, tail));
+        await NodeAssert.rejects(() => run(NativeMaintenancePolicy.verifyUpdate(policy, input), f, policy),
+          new RegExp(`Lust maintenance resolution failed during ${stage}`));
+        NodeAssert.equal(f.natives.length, 1);
+        NodeAssert.equal(f.calls.length, 0);
+        NodeAssert.equal(f.updates.length, 0);
+      });
+    }
+  }
+
+  for (const [phase, mode, nativeCall, updateCount] of [
+    ["pre-update", "latest", 2, 0],
+    ["post-update", "latest", 3, 1],
+    ["post-update", "target", 2, 1],
+  ]) {
+    for (const [name, source, stage] of [
+      ["failed helper", "process.stdin.once('data',()=>process.exit(9));", "process"],
+      ["invalid helper verdict", policyReply("{kind:'verified',mode:'post-update',status:'running',message:'invalid'}"), "response"],
+    ]) {
+      await scenario(`a ${name} at ${mode} ${phase} records failure without retrying the updater`, async () => {
+        const { f, operation, states } = await updateRunnerFixture(`runner-verification-fault-${scenarios.length}`, mode);
+        const policy = await fakePolicy(`runner-verification-fault-${scenarios.length}`, source);
+        f.policyOverrides = new Map([[nativeCall, policy]]);
+        await run(operation, f);
+        NodeAssert.equal(states.at(-1).status, "failed");
+        NodeAssert.match(states.at(-1).message, new RegExp(`Lust maintenance resolution failed during ${stage}`));
+        NodeAssert.equal(states.at(-1).output, null);
+        NodeAssert.equal(f.natives.length, nativeCall);
+        NodeAssert.equal(f.updates.length, updateCount);
+        for (const pid of f.natives) NodeAssert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+      });
+    }
+    await scenario(`interrupting ${mode} ${phase} closes the helper without retrying the updater`, async () => {
+      const { f, operation } = await updateRunnerFixture(`runner-verification-interrupt-${scenarios.length}`, mode);
+      const policy = await fakePolicy(`runner-verification-interrupt-${scenarios.length}`, "process.stdin.resume();setInterval(()=>{},1000);");
+      f.policyOverrides = new Map([[nativeCall, policy]]);
+      await run(Effect.gen(function* () {
+        const started = yield* Deferred.make();
+        f.onNativeSpawn = (child) => f.natives.length === nativeCall
+          ? Deferred.succeed(started, Number(child.pid)) : Effect.void;
+        const fiber = yield* Effect.forkChild(operation);
+        const pid = yield* Deferred.await(started);
+        yield* Fiber.interrupt(fiber);
+        NodeAssert.equal(Exit.isFailure(yield* Fiber.await(fiber)), true);
+        NodeAssert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+      }), f);
+      NodeAssert.equal(f.natives.length, nativeCall);
+      NodeAssert.equal(f.updates.length, updateCount);
+    });
+  }
+
+  await scenario("explicit upstream execution retains pre-update and post-update behavior without a helper", async () => {
+    const pre = await updateRunnerFixture("upstream-pre-verification", "latest", { preProviders: [freshCurrent] });
+    await run(pre.operation, pre.f, null);
+    NodeAssert.equal(pre.states.at(-1).message, "Already up to date.");
+    NodeAssert.equal(pre.f.natives.length, 0);
+    NodeAssert.equal(pre.f.updates.length, 0);
+    const post = await updateRunnerFixture("upstream-post-verification", "target", {
+      postProviders: [runnerProvider({ version: "2.0.0", installedVersion: null })],
+    });
+    await run(post.operation, post.f, null);
+    NodeAssert.equal(post.states.at(-1).status, "unchanged");
+    NodeAssert.equal(post.states.at(-1).message, unverifiableMessage);
+    NodeAssert.equal(post.f.natives.length, 0);
+    NodeAssert.equal(post.f.updates.length, 1);
+  });
+
+  for (const [name, implementation, platform, message] of [
+    ["invalid implementation setting", "invalid", "linux", /T3_CODE_LS_IMPLEMENTATION must be upstream or native/],
+    ["forced native on an unqualified host", "native", "darwin", /native implementation is not qualified for this host/],
+  ]) {
+    await scenario(`cached capabilities with ${name} publish a failed state before starting any child`, async () => {
+      const { f, operation, states, refreshes } = await updateRunnerFixture(`runner-configuration-${scenarios.length}`);
+      f.env.T3_CODE_LS_IMPLEMENTATION = implementation;
+      f.platform = platform;
+      f.useDefaultNativeSelection = true;
+      await run(operation, f);
+      const activeStates = states.filter((state) => state.status !== "queued");
+      NodeAssert.deepEqual(activeStates.map((state) => state.status), ["running", "failed"]);
+      NodeAssert.equal(activeStates[0].message, "Checking for the latest version");
+      const failed = states.at(-1);
+      NodeAssert.match(failed.message, message);
+      NodeAssert.equal(failed.startedAt, activeStates[0].startedAt);
+      NodeAssert.equal(typeof failed.startedAt, "string");
+      NodeAssert.equal(typeof failed.finishedAt, "string");
+      NodeAssert.ok(Number.isFinite(Date.parse(failed.startedAt)));
+      NodeAssert.ok(Number.isFinite(Date.parse(failed.finishedAt)));
+      NodeAssert.equal(failed.output, null);
+      NodeAssert.equal(f.natives.length, 0);
+      NodeAssert.equal(f.updates.length, 0);
+      NodeAssert.equal(f.calls.length, 0);
+      NodeAssert.deepEqual(refreshes, []);
+    });
+  }
 
   await scenario(
     "the selected executable resolves the actual shared service through one isolated process",
@@ -765,7 +1051,7 @@ try {
             "Provider installation changed. Refresh and try again.",
           );
         else NodeAssert.deepEqual(f.updates[0], [f.mise, "upgrade", "codex"]);
-        NodeAssert.equal(f.natives.length, changed ? 2 : 4);
+        NodeAssert.equal(f.natives.length, changed ? 2 : 6);
       },
     );
   }
@@ -1077,8 +1363,10 @@ try {
       .digest("hex"),
     sourceHashes: hashes,
     upstreamOracleSha256: NodeCrypto.createHash("sha256").update(oracleSource).digest("hex"),
+    verificationOracleSha256: NodeCrypto.createHash("sha256").update(verificationOracleSource).digest("hex"),
     passed: scenarios.length,
     updateActionComparisons: totalUpdateActionComparisons,
+    verificationComparisons: totalVerificationComparisons,
     nativeProcesses: totalNativeProcesses,
     probeCommands: totalProbeCommands,
     controlledUpdateCommands: totalUpdateCommands,
@@ -1087,7 +1375,7 @@ try {
       "actual shared maintenance resolver and production update runner with a selected native policy",
       "isolated filesystem fixtures and controlled package-manager outputs; no real install, upgrade, provider turn or external request",
       "host owns filesystem/process access, callback predicates, semver facts, lazy lookups and cache hashing",
-      "native ownership and update-action decisions do not port the remaining provider drivers, server, storage or clients",
+      "native ownership, update-action and verification decisions do not port the remaining provider drivers, server, storage or clients",
     ],
   };
   if (proofPath) {

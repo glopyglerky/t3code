@@ -8,6 +8,8 @@ import {
   type ServerProviderUpdateState,
 } from "@t3tools/contracts";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import { selectNativeExecutable } from "@t3tools/shared/nativeExecutable";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -30,6 +32,7 @@ import { makeProviderMaintenanceCommandCoordinator } from "./providerMaintenance
 import {
   enrichProviderSnapshotWithVersionAdvisory,
   invalidateLatestProviderVersion,
+  NativeMaintenancePolicy,
   selectProviderUpdateAction,
   resolveLatestProviderVersion,
   type ProviderMaintenanceCommandAction,
@@ -283,6 +286,18 @@ function isStillInstalled(provider: ServerProvider): boolean {
   return provider.installed;
 }
 
+function verificationSnapshot(provider: ServerProvider): NativeMaintenancePolicy.VerificationSnapshot {
+  return {
+    checkedAt: provider.checkedAt,
+    installed: provider.installed,
+    status: provider.status,
+    authStatus: provider.auth.status,
+    version: provider.version,
+    ...(provider.installedVersion === undefined ? {} : { installedVersion: provider.installedVersion }),
+    versionAdvisoryStatus: provider.versionAdvisory?.status ?? null,
+  };
+}
+
 function makeUpdateState(input: {
   readonly status: ServerProviderUpdateState["status"];
   readonly startedAt: string | null;
@@ -438,6 +453,15 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
               ).pipe(Effect.asVoid);
             yield* setRunningMessage("Checking for the latest version");
 
+            const environment = yield* HostProcess.Environment;
+            const verificationExecutable = selectNativeExecutable(
+              "maintenance",
+              environment.T3_CODE_LS_MAINTENANCE_EXECUTABLE,
+              yield* HostProcess.Platform,
+              yield* HostProcess.Architecture,
+              environment.T3_CODE_LS_IMPLEMENTATION,
+            );
+
             // Recheck ownership after acquiring the cached lock in case the executable changed.
             const fresh = yield* providerRegistry.getProviderMaintenanceCapabilitiesForInstance(
               instanceId,
@@ -510,17 +534,30 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
                 instanceId,
                 "pre-update",
               );
-              const alreadyCurrent =
-                precheck.advisoryEnriched &&
-                prior !== undefined &&
-                precheck.verifiedProviders.length > 0 &&
-                precheck.verifiedProviders.every(
-                  (verified) =>
-                    verified.checkedAt !== prior.checkedAt &&
-                    verified.installed &&
-                    verified.status !== "error" &&
-                    verified.versionAdvisory?.status === "current",
-                );
+              let alreadyCurrent: boolean;
+              if (verificationExecutable !== undefined) {
+                const decision = yield* NativeMaintenancePolicy.verifyUpdate(verificationExecutable, {
+                  mode: "pre-update",
+                  priorCheckedAt: prior?.checkedAt ?? null,
+                  advisoryEnriched: precheck.advisoryEnriched,
+                  verifiedProviders: precheck.verifiedProviders.map(verificationSnapshot),
+                }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
+                if (decision.mode !== "pre-update")
+                  return yield* new NativeMaintenancePolicy.NativeMaintenancePolicyError({ stage: "response" });
+                alreadyCurrent = decision.alreadyCurrent;
+              } else {
+                alreadyCurrent =
+                  precheck.advisoryEnriched &&
+                  prior !== undefined &&
+                  precheck.verifiedProviders.length > 0 &&
+                  precheck.verifiedProviders.every(
+                    (verified) =>
+                      verified.checkedAt !== prior.checkedAt &&
+                      verified.installed &&
+                      verified.status !== "error" &&
+                      verified.versionAdvisory?.status === "current",
+                  );
+              }
               if (alreadyCurrent) {
                 return yield* finish(
                   makeUpdateState({
@@ -571,6 +608,24 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
               instanceId,
               "post-update",
             );
+            if (verificationExecutable !== undefined) {
+              const decision = yield* NativeMaintenancePolicy.verifyUpdate(verificationExecutable, {
+                mode: "post-update",
+                targetVersion: targetVersion ?? null,
+                verifiedProviders: verifiedProviders.map(verificationSnapshot),
+              }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
+              if (decision.mode !== "post-update")
+                return yield* new NativeMaintenancePolicy.NativeMaintenancePolicyError({ stage: "response" });
+              return yield* finish(
+                makeUpdateState({
+                  status: decision.status,
+                  startedAt,
+                  finishedAt,
+                  message: decision.message,
+                  output: commandOutput(result),
+                }),
+              );
+            }
             // Cursor about probes can fail transiently; missing versions alone do not imply failure.
             const couldNotVerify =
               verifiedProviders.length === 0 ||

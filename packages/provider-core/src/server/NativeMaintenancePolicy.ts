@@ -88,6 +88,21 @@ const Response = Schema.Struct({
       kind: Schema.Literal("selected"),
       action: Schema.NullOr(Schema.Struct({ command: Schema.String, args: Schema.Array(Schema.String) })),
     }),
+    Schema.Struct({
+      kind: Schema.Literal("verified"),
+      mode: Schema.Literal("pre-update"),
+      alreadyCurrent: Schema.Boolean,
+    }),
+    ...([
+      ["unchanged", "Update command completed, but T3 Code could not verify the provider version."],
+      ["unchanged", "Update command completed, but T3 Code still detects an outdated provider version."],
+      ["succeeded", "Provider updated."],
+    ] as const).map(([status, message]) => Schema.Struct({
+      kind: Schema.Literal("verified"),
+      mode: Schema.Literal("post-update"),
+      status: Schema.Literal(status),
+      message: Schema.Literal(message),
+    })),
   ]),
 });
 const decodeResponse = Schema.decodeUnknownEffect(Schema.fromJsonString(Response), {
@@ -139,6 +154,29 @@ export interface UpdateActionRequest {
   readonly versionValue: string | null;
 }
 
+export interface VerificationSnapshot {
+  readonly checkedAt: string;
+  readonly installed: boolean;
+  readonly status: string;
+  readonly authStatus: string;
+  readonly version: string | null;
+  readonly installedVersion?: string | null;
+  readonly versionAdvisoryStatus: string | null;
+}
+
+export type UpdateVerificationRequest =
+  | {
+      readonly mode: "pre-update";
+      readonly priorCheckedAt: string | null;
+      readonly advisoryEnriched: boolean;
+      readonly verifiedProviders: ReadonlyArray<VerificationSnapshot>;
+    }
+  | {
+      readonly mode: "post-update";
+      readonly targetVersion: string | null;
+      readonly verifiedProviders: ReadonlyArray<VerificationSnapshot>;
+    };
+
 function boundedJson(value: unknown): boolean {
   const pending = [{ value, depth: 0 }];
   let count = 0;
@@ -164,13 +202,15 @@ function boundedJson(value: unknown): boolean {
 
 const exchange = Effect.fn("NativeMaintenancePolicy.exchange")(function* <R>(
   executable: string,
-  input: Request | UpdateActionRequest,
+  input: Request | UpdateActionRequest | UpdateVerificationRequest,
   observe: (
     request: Observation,
     evidence: ReadonlyArray<Evidence>,
   ) => Effect.Effect<unknown, NativeMaintenancePolicyError, R>,
 ) {
   const selection = input.mode === "target" || input.mode === "latest";
+  const verification = input.mode === "pre-update" || input.mode === "post-update";
+  const terminalKind = selection ? "selected" : verification ? "verified" : "resolved";
   if (!NodePath.isAbsolute(executable) || executable.includes("\0"))
     return yield* new NativeMaintenancePolicyError({ stage: "configuration" });
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -282,7 +322,9 @@ const exchange = Effect.fn("NativeMaintenancePolicy.exchange")(function* <R>(
     for (let step = 0; step <= MAX_OBSERVATIONS; step++) {
       const request = selection
         ? { version: 1, operation: "select-update-action", ...input }
-        : { version: 1, operation: "resolve", ...input, observations: evidence };
+        : verification
+          ? { version: 1, operation: "verify-update", ...input }
+          : { version: 1, operation: "resolve", ...input, observations: evidence };
       if (!boundedJson(request))
         return yield* new NativeMaintenancePolicyError({ stage: "request" });
       const frame = `${yield* encodeRequest(request).pipe(
@@ -306,7 +348,7 @@ const exchange = Effect.fn("NativeMaintenancePolicy.exchange")(function* <R>(
       if (failure !== undefined || !boundedJson(response))
         return yield* failure ?? new NativeMaintenancePolicyError({ stage: "response" });
       if (response.ok.kind !== "observe") {
-        if (selection !== (response.ok.kind === "selected"))
+        if (response.ok.kind !== terminalKind)
           return yield* new NativeMaintenancePolicyError({ stage: "response" });
         const code = yield* child.exitCode.pipe(
           Effect.mapError((cause) => new NativeMaintenancePolicyError({ stage: "process", cause })),
@@ -317,7 +359,8 @@ const exchange = Effect.fn("NativeMaintenancePolicy.exchange")(function* <R>(
           return yield* failure ?? new NativeMaintenancePolicyError({ stage: "process" });
         return { result: response.ok, evidence };
       }
-      if (selection) return yield* new NativeMaintenancePolicyError({ stage: "response" });
+      if (selection || verification)
+        return yield* new NativeMaintenancePolicyError({ stage: "response" });
       if (ended) return yield* new NativeMaintenancePolicyError({ stage: "process" });
       const observation = response.ok.request;
       if (
@@ -360,5 +403,16 @@ export const selectUpdateAction = Effect.fn("NativeMaintenancePolicy.selectUpdat
     if (result.kind !== "selected")
       return yield* new NativeMaintenancePolicyError({ stage: "response" });
     return result.action;
+  },
+);
+
+export const verifyUpdate = Effect.fn("NativeMaintenancePolicy.verifyUpdate")(
+  function* (executable: string, input: UpdateVerificationRequest) {
+    const { result } = yield* exchange(executable, input, () =>
+      Effect.fail(new NativeMaintenancePolicyError({ stage: "response" })),
+    );
+    if (result.kind !== "verified" || result.mode !== input.mode)
+      return yield* new NativeMaintenancePolicyError({ stage: "response" });
+    return result;
   },
 );

@@ -37,7 +37,7 @@ function responses(output) {
       const response = JSON.parse(line);
       NodeAssert.deepEqual(Object.keys(response).sort(), ["ok", "version"]);
       NodeAssert.equal(response.version, 1);
-      NodeAssert.ok(["observe", "resolved"].includes(response.ok.kind));
+      NodeAssert.ok(["observe", "resolved", "verified"].includes(response.ok.kind));
       return response;
     });
 }
@@ -445,6 +445,193 @@ rejected("output command and args amplification", frame(amplified), {
   category: "output limit exceeded",
 });
 
+const providerSnapshot = {
+  checkedAt: "2026-11-10T00:00:01Z",
+  installed: true,
+  status: "ready",
+  authStatus: "authenticated",
+  version: "1.2.3",
+  versionAdvisoryStatus: "current",
+};
+const preUpdate = {
+  version: 1,
+  operation: "verify-update",
+  mode: "pre-update",
+  priorCheckedAt: "2026-11-10T00:00:00Z",
+  advisoryEnriched: true,
+  verifiedProviders: [providerSnapshot],
+};
+const postUpdate = {
+  version: 1,
+  operation: "verify-update",
+  mode: "post-update",
+  targetVersion: "1.2.3",
+  verifiedProviders: [providerSnapshot],
+};
+const beforeUpdate = (alreadyCurrent) => ({
+  version: 1,
+  ok: { kind: "verified", mode: "pre-update", alreadyCurrent },
+});
+const afterUpdate = (message = "Provider updated.") => ({
+  version: 1,
+  ok: {
+    kind: "verified",
+    mode: "post-update",
+    status: message === "Provider updated." ? "succeeded" : "unchanged",
+    message,
+  },
+});
+const unverifiable = afterUpdate(
+  "Update command completed, but T3 Code could not verify the provider version.",
+);
+const outdated = afterUpdate(
+  "Update command completed, but T3 Code still detects an outdated provider version.",
+);
+
+function verified(input, expected) {
+  const result = execute(typeof input === "string" ? input : frame(input));
+  NodeAssert.equal(result.status, 0, result.stderr);
+  NodeAssert.equal(result.stderr, "");
+  NodeAssert.deepEqual(responses(result.stdout), [expected]);
+  checks++;
+}
+
+verified(preUpdate, beforeUpdate(true));
+verified({ ...preUpdate, priorCheckedAt: null }, beforeUpdate(false));
+verified({ ...preUpdate, priorCheckedAt: "" }, beforeUpdate(true));
+verified({ ...preUpdate, advisoryEnriched: false }, beforeUpdate(false));
+verified({ ...preUpdate, verifiedProviders: [] }, beforeUpdate(false));
+verified(postUpdate, afterUpdate());
+verified({ ...postUpdate, verifiedProviders: [] }, unverifiable);
+verified({
+  ...postUpdate,
+  verifiedProviders: [{ ...providerSnapshot, installedVersion: null }],
+}, unverifiable);
+verified({
+  ...postUpdate,
+  verifiedProviders: [{ ...providerSnapshot, installedVersion: "" }],
+}, unverifiable);
+verified({
+  ...postUpdate,
+  targetVersion: "",
+  verifiedProviders: [{ ...providerSnapshot, installedVersion: "" }],
+}, afterUpdate());
+verified({
+  ...postUpdate,
+  targetVersion: null,
+  verifiedProviders: [{ ...providerSnapshot, version: null, installedVersion: null }],
+}, afterUpdate());
+verified({
+  ...postUpdate,
+  targetVersion: null,
+  verifiedProviders: [{ ...providerSnapshot, versionAdvisoryStatus: "behind_latest" }],
+}, outdated);
+verified({
+  ...postUpdate,
+  verifiedProviders: [{ ...providerSnapshot, installedVersion: "v1.2.3", versionAdvisoryStatus: "behind_latest" }],
+}, afterUpdate());
+verified({
+  ...postUpdate,
+  targetVersion: null,
+  verifiedProviders: [
+    { ...providerSnapshot, versionAdvisoryStatus: "behind_latest" },
+    { ...providerSnapshot, installed: false },
+  ],
+}, unverifiable);
+
+for (const input of [preUpdate, postUpdate]) {
+  for (const key of Object.keys(input)) {
+    const missing = copy(input);
+    delete missing[key];
+    rejected(`verification ${input.mode} missing ${key}`, frame(missing));
+    const duplicate = frame(input).replace(`"${key}":`, `"${key}":${JSON.stringify(input[key])},"${key}":`);
+    rejected(`verification ${input.mode} duplicate ${key}`, duplicate, { category: "duplicate object key" });
+  }
+  for (const [key, value] of [
+    ["version", 2],
+    ["operation", "verify-future"],
+    ["mode", "future-update"],
+    ["mode", null],
+    ["verifiedProviders", null],
+    ["verifiedProviders", {}],
+    ["verifiedProviders", [null]],
+    ["verifiedProviders", [false]],
+    ["observations", []],
+  ]) {
+    rejected(`verification ${input.mode} invalid ${key}`, frame({ ...input, [key]: value }));
+  }
+  for (const key of Object.keys(providerSnapshot)) {
+    const missing = copy(input);
+    delete missing.verifiedProviders[0][key];
+    rejected(`verification ${input.mode} missing provider ${key}`, frame(missing));
+    const duplicate = frame(input).replace('"verifiedProviders":[{', `"verifiedProviders":[{"${key}":${JSON.stringify(providerSnapshot[key])},`);
+    rejected(`verification ${input.mode} duplicate provider ${key}`, duplicate, { category: "duplicate object key" });
+  }
+  for (const [key, value] of [
+    ["checkedAt", null],
+    ["installed", 1],
+    ["status", null],
+    ["authStatus", false],
+    ["version", 1],
+    ["version", {}],
+    ["installedVersion", false],
+    ["installedVersion", []],
+    ["versionAdvisoryStatus", {}],
+    ["extra", true],
+  ]) {
+    rejected(`verification ${input.mode} invalid provider ${key}`, frame({
+      ...input,
+      verifiedProviders: [{ ...providerSnapshot, [key]: value }],
+    }));
+  }
+  rejected(`verification ${input.mode} duplicate optional installedVersion`, frame({
+    ...input,
+    verifiedProviders: [{ ...providerSnapshot, installedVersion: null }],
+  }).replace('"installedVersion":null', '"installedVersion":null,"installedVersion":"1.2.3"'), {
+    category: "duplicate object key",
+  });
+  rejected(`verification ${input.mode} missing LF`, frame(input).slice(0, -1));
+  rejected(`verification ${input.mode} repeated terminal request`, frame(input) + frame(input));
+  rejected(`verification ${input.mode} trailing resolver request`, frame(input) + valid);
+  rejected(`verification ${input.mode} cannot replace pending observations`, frame(pending) + frame(input), {
+    previous: [observedWrapper],
+    category: "observation does not match request",
+  });
+}
+for (const value of [false, 1, []]) {
+  rejected("verification invalid priorCheckedAt", frame({ ...preUpdate, priorCheckedAt: value }));
+  rejected("verification invalid targetVersion", frame({ ...postUpdate, targetVersion: value }));
+}
+rejected("verification null advisoryEnriched", frame({ ...preUpdate, advisoryEnriched: null }));
+rejected("verification accepts no post-update fields before update", frame({ ...preUpdate, targetVersion: null }));
+rejected("verification accepts no pre-update fields after update", frame({ ...postUpdate, priorCheckedAt: null }));
+
+for (const key of ["checkedAt", "status", "authStatus", "version", "installedVersion", "versionAdvisoryStatus"]) {
+  const overLimit = { ...providerSnapshot, [key]: "x".repeat(65_537) };
+  rejected(`verification provider ${key} byte bound`, frame({ ...postUpdate, verifiedProviders: [overLimit] }), {
+    category: "input limit exceeded",
+  });
+}
+verified({ ...preUpdate, priorCheckedAt: "x".repeat(65_536) }, beforeUpdate(true));
+rejected("verification prior timestamp byte bound", frame({ ...preUpdate, priorCheckedAt: "x".repeat(65_537) }), {
+  category: "input limit exceeded",
+});
+const maximumVersion = "💬".repeat(16_384);
+verified({
+  ...postUpdate,
+  targetVersion: maximumVersion,
+  verifiedProviders: [{ ...providerSnapshot, installedVersion: maximumVersion }],
+}, afterUpdate());
+rejected("verification target version UTF-8 byte bound", frame({ ...postUpdate, targetVersion: maximumVersion + "x" }), {
+  category: "input limit exceeded",
+});
+const verifyBody = frame(preUpdate).slice(0, -1);
+const verifyAtLimit = verifyBody + " ".repeat(maximumBytes - Buffer.byteLength(verifyBody) - 1) + "\n";
+verified(verifyAtLimit, beforeUpdate(true));
+rejected("verification frame byte bound", verifyAtLimit.slice(0, -1) + " \n", {
+  category: "input limit exceeded",
+});
+
 process.stdout.write(
   JSON.stringify({
     version: 1,
@@ -455,6 +642,7 @@ process.stdout.write(
       "strict framing, UTF-8, schemas, duplicate keys, and complete transcripts",
       "base request and prior observation immutability across a process session",
       "exact frame and value limits, bounded wrapper/listing inputs, and output amplification",
+      "pre/post-update verification schemas, terminal sequencing, byte bounds, and omitted/null installation versions",
     ],
     boundaries: [
       "no filesystem or provider commands are executed by the policy process",
