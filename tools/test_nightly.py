@@ -143,6 +143,90 @@ class ImmutableSnapshots(unittest.TestCase):
         self.run_git("commit", "--quiet", "-m", message)
         return self.run_git("rev-parse", "HEAD")
 
+    def write_port_map(self, *ports):
+        mapping = {"schema_version": 1, "integrated_upstream_commit": self.base, "ports": list(ports)}
+        (self.root / "port-map.json").write_text(json.dumps(mapping))
+        return mapping
+
+    def port(self, identifier, source):
+        return {
+            "id": identifier, "state": "integrated", "domain_owner": "apps/server",
+            "reviewed_upstream_commit": self.base,
+            "upstream_sources": [{"path": source, "blob": self.run_git("rev-parse", f"{self.base}:{source}")}],
+            "retired_paths": [], "rust_paths": [f"crates/core/src/{identifier}.rs"],
+            "rust_crates": ["crates/core"], "adapter_paths": [f"apps/server/{identifier}.ts"],
+            "platform_routes": [{"targets": ["linux-x64"], "implementation": "rust", "state": "integrated"}],
+            "acceptance_tests": [f"tools/check-{identifier}.mjs"],
+        }
+
+    def test_mapped_original_change_still_alerts_after_fork_source_retirement(self):
+        source = "apps/server/source.txt"
+        (self.root / source).write_text("changed upstream behavior\n")
+        head = self.commit("upstream changes translated source")
+        candidate = nightly.manifest(self.root, self.metadata, head)
+        port = self.port("policy", source)
+        port["state"] = "retired"
+        port["retired_paths"] = [{"path": source, "source_blob": port["upstream_sources"][0]["blob"]}]
+        self.write_port_map(port)
+        (self.root / source).unlink()
+        status = self.run_git("status", "--porcelain")
+        result = nightly.report(self.root, self.lock, candidate)
+        affected = result["port_impact"]["affected_ports"]
+        self.assertEqual(len(affected), 1)
+        self.assertEqual(affected[0]["id"], "policy")
+        self.assertEqual(affected[0]["changed_upstream_paths"], [source])
+        self.assertEqual(affected[0]["rust_paths"], port["rust_paths"])
+        self.assertEqual(affected[0]["acceptance_tests"], port["acceptance_tests"])
+        self.assertFalse(affected[0]["requires_shared_contract_review"])
+        self.assertEqual(self.run_git("status", "--porcelain"), status)
+        self.assertFalse((self.root / source).exists())
+
+    def test_shared_contract_change_reviews_all_ports_and_preserves_unmapped_additions(self):
+        contract = "packages/contracts/source.txt"
+        (self.root / contract).write_text("new public response\n")
+        addition = "apps/mobile/new-feature.txt"
+        (self.root / addition).write_text("retain this upstream implementation\n")
+        head = self.commit("contract and new client functionality")
+        candidate = nightly.manifest(self.root, self.metadata, head)
+        self.write_port_map(self.port("policy", "apps/server/source.txt"),
+                            self.port("generation", "packages/shared/source.txt"))
+        self.lock["qualification"] = {"status": "qualified", "last_qualified_commit": self.base,
+                                      "evidence": ["prior acceptance"]}
+        before = copy.deepcopy(self.lock)
+        result = nightly.report(self.root, self.lock, candidate)
+        impact = result["port_impact"]
+        self.assertEqual(impact["shared_contract_paths"], [contract])
+        self.assertEqual([port["id"] for port in impact["affected_ports"]], ["policy", "generation"])
+        self.assertTrue(all(port["requires_shared_contract_review"] for port in impact["affected_ports"]))
+        self.assertIn("mobile", impact["contract_consumer_review"])
+        self.assertIn("providers", impact["contract_consumer_review"])
+        self.assertIn({"path": addition, "status": "added"}, impact["unmapped_changes"])
+        self.assertEqual(result["revisions"], {"detected": head, "integrated": self.base, "qualified": self.base})
+        self.assertEqual(result["qualification"], before["qualification"])
+        self.assertEqual(self.lock, before)
+        self.assertEqual(candidate["qualification"]["status"], "unqualified")
+
+    def test_stale_map_or_port_review_cannot_report_no_translation_impact(self):
+        for changed in ("map", "port"):
+            mapping = self.write_port_map(self.port("policy", "apps/server/source.txt"))
+            if changed == "map":
+                mapping["integrated_upstream_commit"] = "a" * 40
+            else:
+                mapping["ports"][0]["reviewed_upstream_commit"] = "a" * 40
+            (self.root / "port-map.json").write_text(json.dumps(mapping))
+            with self.subTest(changed=changed), self.assertRaisesRegex(nightly.TrackingError, "baseline"):
+                nightly.report(self.root, self.lock, self.lock)
+
+    def test_missing_map_is_reported_as_unavailable_not_no_affected_ports(self):
+        (self.root / "apps/web/source.txt").write_text("new upstream UI\n")
+        head = self.commit("upstream client change")
+        candidate = nightly.manifest(self.root, self.metadata, head)
+        result = nightly.report(self.root, self.lock, candidate)
+        self.assertEqual(result["port_impact"]["status"], "unavailable")
+        self.assertIn("manual", result["port_impact"]["reason"])
+        self.assertEqual(result["port_impact"]["unmapped_changes"],
+                         [{"path": "apps/web/source.txt", "status": "modified"}])
+
     def test_reports_more_than_300_files_and_preserves_worktree(self):
         for index in range(341):
             (self.root / "apps/mobile" / f"file-{index}.txt").write_text(str(index))

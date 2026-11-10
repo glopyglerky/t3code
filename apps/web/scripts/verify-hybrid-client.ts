@@ -10,6 +10,13 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 import { stripVTControlCharacters } from "node:util";
+import {
+  ORCHESTRATION_PROTOCOL_HEADER,
+  ORCHESTRATION_PROTOCOL_VERSION_TEXT,
+  OrchestrationV2ThreadDetailSnapshot,
+} from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
+import * as Schema from "effect/Schema";
 import { chromium, type Browser, type Page } from "playwright";
 
 type Implementation = "upstream" | "native";
@@ -17,11 +24,15 @@ type DevReplayWindow = Window & {
   t3dev?: { replayScenarios: () => string[]; replay: (scenario: string) => Promise<string> };
 };
 type OwnedApplication = { pid: number; pairingUrl: string; stop: () => Promise<void> };
+type ReplayTurnIdentity = { runId: string; attemptId: string; providerTurnId: string };
 
 const repoRoot = NodeFS.realpathSync(NodeURL.fileURLToPath(new URL("../../../", import.meta.url)));
 const timeoutMs = 90_000;
 const startupTimeoutMs = 180_000;
 const replayMarker = "This turn is a replay.";
+const decodeSnapshot = Schema.decodeUnknownSync(
+  Schema.toCodecJson(OrchestrationV2ThreadDetailSnapshot),
+);
 const mode = process.argv[3] ?? "both";
 const proofArgument = process.argv[2];
 
@@ -252,18 +263,78 @@ async function startApplication(
 }
 
 async function capture(page: Page, directory: string, name: string): Promise<void> {
+  NodeFS.writeFileSync(
+    NodePath.join(directory, `${name}.aria.txt`),
+    redact(await page.locator("body").ariaSnapshot({ timeout: 15_000 })),
+  );
   await page.screenshot({
     path: NodePath.join(directory, `${name}.png`),
     fullPage: true,
     timeout: 15_000,
   });
-  NodeFS.writeFileSync(
-    NodePath.join(directory, `${name}.aria.txt`),
-    redact(await page.locator("body").ariaSnapshot()),
-  );
 }
 
-async function assertCompleted(page: Page, threadId: string): Promise<void> {
+async function completeInitialSetup(page: Page): Promise<void> {
+  // Fresh application state opens this wizard asynchronously after pairing. Wait for it
+  // before using Add project, which can otherwise open underneath the setup dialog.
+  const setup = page.getByRole("dialog", { name: "Set up T3 Code", exact: true });
+  await setup
+    .getByRole("heading", { name: "Connect your computers", exact: true })
+    .waitFor({ state: "visible" });
+  await setup.getByRole("button", { name: "Continue", exact: true }).click();
+  await setup
+    .getByRole("heading", { name: "Connect your agents", exact: true })
+    .waitFor({ state: "visible" });
+  // Agent sign-in and importing existing projects are optional. The replay provider is
+  // already supplied by source development mode, so this fixture needs neither operation.
+  await setup.getByRole("button", { name: "Continue", exact: true }).click();
+  await setup.getByRole("button", { name: "Do not import projects", exact: true }).click();
+  await setup.waitFor({ state: "hidden" });
+  await page.waitForURL((url) => url.pathname === "/");
+}
+
+async function readThreadSnapshot(
+  page: Page,
+  threadId: string,
+): Promise<OrchestrationV2ThreadDetailSnapshot> {
+  // Read the existing authenticated application contract with this browser session's cookies.
+  const response = await page.request.get(
+    new URL(`/api/orchestration/threads/${encodeURIComponent(threadId)}`, page.url()).href,
+    {
+      headers: { [ORCHESTRATION_PROTOCOL_HEADER]: ORCHESTRATION_PROTOCOL_VERSION_TEXT },
+      timeout: timeoutMs,
+    },
+  );
+  Assert.ok(response.ok(), `Thread snapshot failed with HTTP ${response.status()}`);
+  const snapshot = decodeSnapshot(await response.json());
+  Assert.equal(snapshot.projection.thread.id, threadId);
+  return snapshot;
+}
+
+function replayTurnIdentity(snapshot: OrchestrationV2ThreadDetailSnapshot): ReplayTurnIdentity {
+  Assert.equal(
+    snapshot.projection.runs.length,
+    1,
+    "The controlled fixture must have exactly one run",
+  );
+  const run = snapshot.projection.runs[0]!;
+  Assert.equal(run.providerInstanceId, "devReplay");
+  Assert.equal(run.modelSelection.model, "showcase");
+  Assert.ok(run.activeAttemptId, "The replay approval must belong to an active attempt");
+  const attempt = snapshot.projection.attempts.find((item) => item.id === run.activeAttemptId);
+  Assert.ok(attempt);
+  Assert.equal(attempt.runId, run.id);
+  Assert.equal(attempt.providerInstanceId, "devReplay");
+  Assert.ok(attempt.providerTurnId, "The replay approval must belong to a provider turn");
+  const providerTurn = snapshot.projection.providerTurns.find(
+    (item) => item.id === attempt.providerTurnId,
+  );
+  Assert.ok(providerTurn);
+  Assert.equal(providerTurn.runAttemptId, attempt.id);
+  return { runId: run.id, attemptId: attempt.id, providerTurnId: providerTurn.id };
+}
+
+async function assertCompleted(page: Page, threadId: string, identity: ReplayTurnIdentity) {
   await page.waitForURL((url) => url.pathname.endsWith(`/${threadId}`), { timeout: timeoutMs });
   await page
     .getByText(replayMarker, { exact: false })
@@ -272,6 +343,46 @@ async function assertCompleted(page: Page, threadId: string): Promise<void> {
   await page
     .getByRole("button", { name: "Stop generation", exact: true })
     .waitFor({ state: "hidden", timeout: timeoutMs });
+  const snapshot = await readThreadSnapshot(page, threadId);
+  Assert.equal(snapshot.projection.runs.length, 1, "Recovery must not create a second fixture run");
+  const run = snapshot.projection.runs.find((item) => item.id === identity.runId);
+  const attempt = snapshot.projection.attempts.find((item) => item.id === identity.attemptId);
+  const providerTurn = snapshot.projection.providerTurns.find(
+    (item) => item.id === identity.providerTurnId,
+  );
+  Assert.ok(run, "The original replay run must still exist");
+  Assert.ok(attempt, "The original replay attempt must still exist");
+  Assert.ok(providerTurn, "The original replay provider turn must still exist");
+  Assert.equal(run.status, "completed", `Replay run ${run.id} did not complete`);
+  Assert.equal(attempt.status, "completed", `Replay attempt ${attempt.id} did not complete`);
+  Assert.equal(
+    providerTurn.status,
+    "completed",
+    `Replay provider turn ${providerTurn.id} did not complete`,
+  );
+  Assert.equal(attempt.runId, run.id);
+  Assert.equal(attempt.providerTurnId, providerTurn.id);
+  Assert.equal(providerTurn.runAttemptId, attempt.id);
+  Assert.ok(run.completedAt);
+  Assert.ok(attempt.completedAt);
+  Assert.ok(providerTurn.completedAt);
+  const message = snapshot.projection.messages.find(
+    (item) =>
+      item.role === "assistant" && item.runId === run.id && item.text.includes(replayMarker),
+  );
+  Assert.ok(message, "The completed replay text must belong to the recorded run");
+  Assert.equal(message.streaming, false);
+  return {
+    ...identity,
+    snapshotSequence: snapshot.snapshotSequence,
+    runStatus: run.status,
+    attemptStatus: attempt.status,
+    providerTurnStatus: providerTurn.status,
+    runCompletedAt: DateTime.formatIso(run.completedAt),
+    attemptCompletedAt: DateTime.formatIso(attempt.completedAt),
+    providerTurnCompletedAt: DateTime.formatIso(providerTurn.completedAt),
+    assistantMessageId: message.id,
+  };
 }
 
 async function exercise(implementation: Implementation): Promise<void> {
@@ -326,13 +437,23 @@ async function exercise(implementation: Implementation): Promise<void> {
     serverPort,
     webPort,
     processGroups: [] as number[],
+    currentStep: "application startup",
     completedSteps: [] as string[],
     threadId: null as string | null,
     threadUrl: null as string | null,
+    turnIdentity: null as ReplayTurnIdentity | null,
+    completedSnapshots: [] as Array<
+      Awaited<ReturnType<typeof assertCompleted>> & { checkpoint: string }
+    >,
     browserErrors: [] as string[],
     error: null as string | null,
   };
   const saveProof = () => writeJson(NodePath.join(directory, "proof.json"), proof);
+  const starting = (step: string) => {
+    proof.currentStep = step;
+    saveProof();
+    console.log(`[${implementation}] Starting ${step}`);
+  };
   const completed = (step: string) => {
     proof.completedSteps.push(step);
     saveProof();
@@ -366,7 +487,13 @@ async function exercise(implementation: Implementation): Promise<void> {
       NodePath.join(directory, "startup.log"),
     );
     proof.processGroups.push(application.pid);
+    starting("initial setup");
     await page.goto(application.pairingUrl, { waitUntil: "domcontentloaded" });
+    await completeInitialSetup(page);
+    completed(
+      "Completed initial setup through the normal UI without agent sign-in or project import",
+    );
+    starting("local project creation");
     await page.getByRole("button", { name: "Add project", exact: true }).first().click();
     const dialog = page.getByRole("dialog");
     await dialog.getByText("Local folder", { exact: true }).click();
@@ -376,6 +503,7 @@ async function exercise(implementation: Implementation): Promise<void> {
     await page.getByText("hybrid-fixture", { exact: true }).first().waitFor({ state: "visible" });
     completed("Created local project through the normal client");
 
+    starting("controlled replay and approval");
     await page.waitForFunction(
       () => (window as DevReplayWindow).t3dev?.replayScenarios().includes("showcase"),
       undefined,
@@ -389,18 +517,29 @@ async function exercise(implementation: Implementation): Promise<void> {
     proof.threadId = threadId;
     const approval = page.getByRole("button", { name: /^(Yes|Approve)$/u }).first();
     await approval.waitFor({ state: "visible" });
+    const turnIdentity = replayTurnIdentity(await readThreadSnapshot(page, threadId));
+    proof.turnIdentity = turnIdentity;
     await capture(page, directory, "approval");
     await approval.click();
     completed("Approved the controlled replay provider request in the normal client");
-    await assertCompleted(page, threadId);
+    starting("replay completion and durable snapshot");
+    proof.completedSnapshots.push({
+      checkpoint: "initial",
+      ...(await assertCompleted(page, threadId, turnIdentity)),
+    });
     proof.threadUrl = page.url();
     completed("Received the completed replay turn on the original thread route");
 
+    starting("client reload");
     await page.reload({ waitUntil: "domcontentloaded" });
-    await assertCompleted(page, threadId);
+    proof.completedSnapshots.push({
+      checkpoint: "client-reload",
+      ...(await assertCompleted(page, threadId, turnIdentity)),
+    });
     Assert.equal(page.url(), proof.threadUrl);
     completed("Reconnected after a client reload with the same completed thread");
 
+    starting("owned server restart");
     await application.stop();
     application = await startApplication(
       implementation,
@@ -410,6 +549,7 @@ async function exercise(implementation: Implementation): Promise<void> {
       NodePath.join(directory, "restart.log"),
     );
     proof.processGroups.push(application.pid);
+    starting("durable recovery in a fresh client");
     // Keep only the authenticated session cookies. A fresh client cannot satisfy recovery
     // from localStorage or IndexedDB, and must retrieve the old thread from the restarted server.
     // Do not consume the restart's new pairing token or persist the session cookies in proof.
@@ -422,7 +562,10 @@ async function exercise(implementation: Implementation): Promise<void> {
     page = await context.newPage();
     observePage(page);
     await page.goto(proof.threadUrl, { waitUntil: "domcontentloaded" });
-    await assertCompleted(page, threadId);
+    proof.completedSnapshots.push({
+      checkpoint: "server-restart",
+      ...(await assertCompleted(page, threadId, turnIdentity)),
+    });
     Assert.equal(page.url(), proof.threadUrl);
     completed(
       "Recovered the same durable thread after server restart in a fresh client with the existing session",
@@ -436,6 +579,23 @@ async function exercise(implementation: Implementation): Promise<void> {
       await capture(page, directory, "failure");
     } catch (captureError) {
       proof.browserErrors.push(redact(`Could not capture failure: ${captureError}`));
+    }
+    console.error(
+      `[${implementation}] Failure progress: ${JSON.stringify({
+        step: proof.currentStep,
+        url: redact(page.url()),
+        completedSteps: proof.completedSteps,
+        threadId: proof.threadId,
+        turnIdentity: proof.turnIdentity,
+        browserErrors: proof.browserErrors.slice(-5),
+      })}`,
+    );
+    const snapshotPath = NodePath.join(directory, "failure.aria.txt");
+    if (NodeFS.existsSync(snapshotPath)) {
+      const snapshot = NodeFS.readFileSync(snapshotPath, "utf8");
+      console.error(
+        `[${implementation}] Failure accessibility snapshot (first 8,000 characters):\n${snapshot.slice(0, 8_000)}`,
+      );
     }
     throw error;
   } finally {

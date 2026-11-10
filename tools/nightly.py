@@ -308,6 +308,66 @@ def read_lock(path: Path) -> dict:
     return value
 
 
+def port_impact(root: Path, baseline: str, changes: list[dict]) -> dict:
+    """Join immutable upstream changes to retained mappings, not fork file presence."""
+    path = root / "port-map.json"
+    contract_paths = [item["path"] for item in changes if item["path"].startswith("packages/contracts/")]
+    result = {
+        "status": "unavailable", "map": "port-map.json", "affected_ports": [],
+        "shared_contract_paths": contract_paths,
+        "contract_consumer_review": ["server", "providers", "client_runtime", "web", "desktop",
+                                     "mobile", "connect", "shared"] if contract_paths else [],
+        "unmapped_changes": [{"path": item["path"], "status": item["status"]} for item in changes],
+        "unmapped_action": "Retain and integrate the upstream implementation for unmapped functionality; review upstream removals deliberately. New functionality must not be omitted because it is not Rust.",
+    }
+    if not path.exists():
+        result["reason"] = "No port map is available; every changed path requires manual translation-impact review."
+        return result
+    try:
+        mapping = json.loads(path.read_text())
+    except (OSError, ValueError) as error:
+        raise TrackingError("Could not read the port map for upstream impact review.") from error
+    if not isinstance(mapping, dict) or mapping.get("schema_version") != 1:
+        raise TrackingError("Unsupported port map schema.")
+    if mapping.get("integrated_upstream_commit") != baseline:
+        raise TrackingError("Port map and locked integrated upstream baseline disagree.")
+    ports = mapping.get("ports")
+    if not isinstance(ports, list) or not ports:
+        raise TrackingError("Port map must identify the migrated ports.")
+    mapped_paths, identifiers = set(), set()
+    for port in ports:
+        if not isinstance(port, dict) or not isinstance(port.get("id"), str) or not port["id"]:
+            raise TrackingError("Port map contains a port without an identity.")
+        if port["id"] in identifiers:
+            raise TrackingError("Port map contains duplicate port identities.")
+        identifiers.add(port["id"])
+        if port.get("reviewed_upstream_commit") != baseline:
+            raise TrackingError(f"Port {port['id']} has not reviewed the integrated upstream baseline.")
+        sources = port.get("upstream_sources")
+        retired = port.get("retired_paths", [])
+        if not isinstance(sources, list) or not isinstance(retired, list):
+            raise TrackingError(f"Port {port['id']} has invalid upstream or retired paths.")
+        paths = set()
+        for source in sources + retired:
+            if not isinstance(source, dict) or not isinstance(source.get("path"), str) or not source["path"]:
+                raise TrackingError(f"Port {port['id']} contains an invalid source path.")
+            paths.add(source["path"])
+        mapped_paths.update(paths)
+        affected = [item["path"] for item in changes if item["path"] in paths]
+        if affected or contract_paths:
+            result["affected_ports"].append({
+                **{key: port.get(key) for key in ("id", "state", "domain_owner", "reviewed_upstream_commit",
+                                                "rust_paths", "rust_crates", "adapter_paths",
+                                                "platform_routes", "acceptance_tests")},
+                "changed_upstream_paths": affected,
+                "requires_shared_contract_review": bool(contract_paths),
+            })
+    result["status"] = "mapped"
+    result["integrated_upstream_commit"] = baseline
+    result["unmapped_changes"] = [item for item in result["unmapped_changes"] if item["path"] not in mapped_paths]
+    return result
+
+
 def report(root: Path, lock: dict, candidate: dict) -> dict:
     base = lock["upstream"]["commit"]
     head = candidate["upstream"]["commit"]
@@ -330,13 +390,16 @@ def report(root: Path, lock: dict, candidate: dict) -> dict:
         "state": "update_available" if updated else "current",
         "baseline": lock["upstream"],
         "candidate": candidate,
+        "revisions": {"detected": head, "integrated": base,
+                      "qualified": lock["qualification"].get("last_qualified_commit")},
         "qualification": lock["qualification"],
+        "port_impact": port_impact(root, base, changes),
         "requires_review": updated,
         "complete_tree_comparison": True,
         "changed_file_count": len(changes),
         "changed_surface_counts": {name: sum(name in item["surfaces"] for item in changes) for name in SCOPES},
         "changes": changes,
-        "next_step": "Inspect the candidate source diff and port affected behavior; run compatibility tests before separately advancing the qualified revision. This command never merges, changes branches, edits the lock, or qualifies a port.",
+        "next_step": "Review port_impact and the complete source diff, integrate unported implementation, and translate affected behavior. Run application and target acceptance gates before separately advancing integrated and qualified revisions. This command never merges, changes branches, edits the lock, or qualifies a port.",
     }
 
 

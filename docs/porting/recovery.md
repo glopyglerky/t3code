@@ -100,6 +100,7 @@ The recovered workspace passed a frozen pnpm install with Node 26.12.1 and pnpm
 | WebSocket, replay, cancellation, reconnect and client-state files | 337 passed |
 | Original/native provider-process scenarios after review fixes | 29 passed |
 | Compiler installer and packaging regressions | 6 passed |
+| Immutable nightly and translated-source impact regressions | 22 passed |
 | Original server and web bundles | Built successfully |
 
 [Hybrid CI](../../.github/workflows/hybrid.yml) repeats the gates on the published
@@ -111,6 +112,11 @@ project, approves a free replay turn, reloads, and restarts the server against t
 same state. A fresh browser context carrying only the existing session cookies
 must recover the completed thread. This gate retains screenshots, accessible
 snapshots and sanitized logs along with its pass/fail receipts.
+The client completes ordinary first-run onboarding before adding its project.
+It records the run, attempt and provider-turn identities during approval and
+requires those same records to be completed, with completion timestamps, after
+the initial response, reload and restart. Visible response text alone cannot
+satisfy this gate.
 Historical adapter proof strings now say native executable; aggregate receipts
 record the actual BlueFe route instead of mislabeling it native Lust.
 

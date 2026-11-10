@@ -105,3 +105,26 @@ component result cannot delete code needed by Windows or mobile consumers.
 
 Keep the mapping after retirement. Upstream may change a removed TypeScript
 module, and Git cannot identify the corresponding Rust behavior by itself.
+
+## Nightly impact report
+
+The existing read-only checker loads `port-map.json` from the checkout:
+
+```sh
+python3 tools/nightly.py check --repo-root "$PWD" --lock upstream.lock.json \
+  --output /absolute/path/outside-checkout/nightly-impact.json --fetch
+```
+
+The report lists detected, integrated and qualified revisions separately.
+`port_impact.affected_ports` joins changed upstream paths to their Rust modules,
+adapters, platform routes and acceptance tests, including mappings whose original
+files have been retired from the fork. Shared contract changes conservatively
+require review of every mapped port and the original server, provider and client
+consumers. This is an impact warning; it does not claim every consumer needs a
+code change.
+
+`unmapped_changes` retains additions and other changes needing original upstream
+implementation or explicit removal review. A missing map is reported as
+unavailable; a map or port review naming a different integrated revision fails.
+The command leaves the checkout, integration lock and qualification untouched.
+`--fetch` only obtains missing immutable Git objects for the comparison.
