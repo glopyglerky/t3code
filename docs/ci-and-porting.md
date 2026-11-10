@@ -12,6 +12,7 @@ The qualification planner compares the current commit with a verified successful
 | Mapped adapter or shared contract | Affected Rust ports, adapter typechecks and differential checks, and client/server integration |
 | Port tests only | Relevant Rust, mapped component acceptance, or adapter tests without rebuilding the client solely for a test change |
 | Unmodified upstream implementation imported at its exact Git identity | No independent upstream test run; mapped contracts and fork integration still select their checks |
+| Port-map changes limited to integrated and reviewed commits and source history | Source guard; every other mapping value must be unchanged, and actual runtime changes still select their checks |
 | Documentation only | Planning and lightweight tooling checks |
 | Shared locks, compiler pins, CI policy, or an unclassified fork integration change | Full fork qualification |
 
@@ -67,4 +68,4 @@ For an already fetched upstream snapshot, replace `--fetch-default` with `--upst
 
 `ci_plan.py --offline` skips remote receipt lookup and plans full fork qualification. `--full` explicitly forces that scope even when reusable evidence exists. These commands write plans; the workflow executes the selected checks.
 
-The current integrated upstream pin is recorded in [upstream.lock.json](../upstream.lock.json). The [934c7f8 integration](porting/default-934c7f8.md) advances the retained application beyond [nightly 8226715](porting/nightly-8226715.md) while preserving this CI policy. Application Rust still uses the pinned rustc-derived BlueFe package through Lustr's compatibility coordinator. Native Lust and platform retirement acceptance remain separately recorded in the [toolchain lock](../toolchain.lock.json) and [port map](../port-map.json).
+The current integrated upstream pin is recorded in [upstream.lock.json](../upstream.lock.json). The [4c361199 integration](porting/default-4c361199.md) follows the [934c7f8 integration](porting/default-934c7f8.md) and adds Rust guest upload classification. Application Rust still uses the pinned rustc-derived BlueFe package through Lustr's compatibility coordinator. Native Lust and platform retirement acceptance remain separately recorded in the [toolchain lock](../toolchain.lock.json) and [port map](../port-map.json).

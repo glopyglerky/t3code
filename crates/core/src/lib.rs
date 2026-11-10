@@ -7,6 +7,8 @@ pub mod connection;
 pub mod dispatch;
 pub mod guest_share;
 pub mod guest_share_wire;
+#[path = "../../../apps/server/src/guest/guest_uploads.rs"]
+pub mod guest_uploads;
 pub mod json;
 pub mod maintenance;
 pub mod maintenance_wire;

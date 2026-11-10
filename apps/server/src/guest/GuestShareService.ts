@@ -47,6 +47,7 @@ import * as ServerConfig from "../config.ts";
 import { CloudManagedEndpointRuntime } from "../cloud/ManagedEndpointRuntime.ts";
 import * as CommandOutputHub from "../orchestration-v2/CommandOutputHub.ts";
 import { GUEST_FAILURE } from "../orchestration-v2/GuestShareDecider.ts";
+import * as NativeGuestShare from "../orchestration-v2/NativeGuestShare.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import { coalesceThreadLiveStream } from "../orchestration-v2/ThreadLiveEventCoalescer.ts";
 import { buildBoundedThreadStreamSnapshot } from "../orchestration-v2/ThreadStream.ts";
@@ -60,7 +61,6 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as AnalyticsService from "../telemetry/AnalyticsService.ts";
 import { guestShareView, guestThreadModel } from "./guestView.ts";
 import {
-  classifyGuestUploads,
   GUEST_UPLOAD_HEADER_BYTES,
   guestHostImageType,
   type GuestUpload,
@@ -228,6 +228,7 @@ const make = Effect.gen(function* () {
   const random = yield* SecureRandom.SecureRandom;
   const analytics = yield* AnalyticsService.AnalyticsService;
   const signer = yield* PayloadSigner.make(SIGNING_SECRET_NAME);
+  const guestShareDecisions = yield* NativeGuestShare.make();
   /** A truncated HMAC keeps invite links short. 128 bits is still far beyond guessing range. */
   const inviteSignature = (shareId: string) =>
     signer.sign(`guest-invite:${shareId}`).pipe(
@@ -407,6 +408,7 @@ const make = Effect.gen(function* () {
     threadId: ThreadId,
     uploads: ReadonlyArray<GuestUpload>,
   ) {
+    if (uploads.length === 0) return [];
     const inspected = yield* Effect.forEach(uploads, (upload) =>
       Effect.gen(function* () {
         const info = yield* fileSystem.stat(upload.path);
@@ -421,7 +423,9 @@ const make = Effect.gen(function* () {
         Effect.mapError(() => uploadFailed),
       ),
     );
-    const classified = classifyGuestUploads(inspected);
+    const classified = yield* guestShareDecisions
+      .classifyGuestUploads(inspected)
+      .pipe(Effect.mapError(() => uploadFailed));
     if (!classified.ok) return yield* new GuestShareAccessError({ reason: classified.reason });
     const stored: Array<ChatAttachment> = [];
     yield* Effect.forEach(

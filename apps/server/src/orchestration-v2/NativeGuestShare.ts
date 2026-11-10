@@ -2,6 +2,8 @@ import { selectNativeExecutable } from "@t3tools/shared/nativeExecutable";
 // @effect-diagnostics nodeBuiltinImport:off -- This adapter validates a native executable path on the host OS.
 import * as NodePath from "node:path";
 import {
+  GUEST_MESSAGE_MAX_ATTACHMENT_BYTES,
+  GUEST_MESSAGE_MAX_ATTACHMENTS,
   GUEST_RESOLVED_MESSAGE_LIMIT,
   GuestMessageAttribution,
   OrchestrationV2AppThreadJson,
@@ -15,6 +17,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
+import * as GuestAttachments from "../guest/guestAttachments.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import * as Upstream from "./GuestShareDecider.ts";
 
@@ -77,6 +80,37 @@ const decodeStripped = Schema.decodeUnknownEffect(
   Schema.Struct({ context: Schema.optional(Schema.Unknown) }),
   { onExcessProperty: "error" },
 );
+const Utf16Unit = Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 0xffff }));
+const decodeClassifiedUploads = Schema.decodeUnknownEffect(
+  Schema.Union([
+    Schema.Struct({
+      ok: Schema.Literal(false),
+      reason: Schema.Literals(["too_many_files", "too_large", "unsupported_file"]),
+    }),
+    Schema.Struct({
+      ok: Schema.Literal(true),
+      attachments: Schema.Array(
+        Schema.Struct({
+          type: Schema.Literals(["image", "file"]),
+          nameUnits: Schema.Array(Utf16Unit).check(
+            Schema.isMinLength(1),
+            Schema.isMaxLength(255),
+          ),
+          mimeTypeUnits: Schema.Array(Utf16Unit).check(
+            Schema.isMinLength(1),
+            Schema.isMaxLength(100),
+          ),
+          sizeBytes: Schema.Number.check(Schema.isFinite()),
+        }),
+      ).check(Schema.isMaxLength(GUEST_MESSAGE_MAX_ATTACHMENTS)),
+    }),
+  ]),
+  { onExcessProperty: "error" },
+);
+
+function utf16Units(value: string): Array<number> {
+  return Array.from({ length: value.length }, (_, index) => value.charCodeAt(index));
+}
 
 function plainRecord(value: unknown): value is Record<string, unknown> {
   if (value === null || typeof value !== "object") return false;
@@ -385,6 +419,47 @@ export const make = Effect.fn("NativeGuestShare.make")(function* () {
   });
 
   return {
+    classifyGuestUploads: Effect.fn("NativeGuestShare.classifyGuestUploads")(function* (
+      uploads: ReadonlyArray<GuestAttachments.InspectedGuestUpload>,
+    ) {
+      if (executable === undefined) return GuestAttachments.classifyGuestUploads(uploads);
+      if (uploads.some((upload) => !Number.isFinite(upload.sizeBytes)))
+        return yield* new NativeGuestShareError({ stage: "request" });
+      const response = yield* call({
+        operation: "classify-uploads",
+        uploads: uploads.map((upload) => ({
+          nameUnits: utf16Units(upload.name),
+          // Keep JavaScript's Unicode case tables at the host boundary. Rust owns
+          // MIME selection, trimming, validation and all filename transformations.
+          contentTypeLowercaseUnits: utf16Units(upload.contentType.toLowerCase()),
+          sizeBytes: upload.sizeBytes,
+          header: Array.from(upload.header),
+        })),
+      });
+      if ("error" in response || response.changed !== undefined)
+        return yield* new NativeGuestShareError({ stage: "response" });
+      const classified = yield* decodeClassifiedUploads(response.ok).pipe(
+        Effect.mapError((cause) => new NativeGuestShareError({ stage: "response", cause })),
+      );
+      if (!classified.ok) return classified;
+      if (
+        classified.attachments.length !== uploads.length ||
+        uploads.reduce((sum, upload) => sum + upload.sizeBytes, 0) >
+          GUEST_MESSAGE_MAX_ATTACHMENT_BYTES ||
+        classified.attachments.some((draft, index) => draft.sizeBytes !== uploads[index]?.sizeBytes)
+      ) {
+        return yield* new NativeGuestShareError({ stage: "response" });
+      }
+      return {
+        ok: true as const,
+        attachments: classified.attachments.map((draft) => ({
+          type: draft.type,
+          name: String.fromCharCode(...draft.nameUnits),
+          mimeType: String.fromCharCode(...draft.mimeTypeUnits),
+          sizeBytes: draft.sizeBytes,
+        })),
+      };
+    }),
     decideGuestShareCommand: Effect.fn("NativeGuestShare.decideGuestShareCommand")(function* (
       input: DecideInput,
     ) {

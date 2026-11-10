@@ -32,10 +32,29 @@ const upstream = new Function(
   releasedGuestAttachmentIds, withoutGuestAttribution,
 };`,
 )(DateTime, Result);
+const uploadConstants = ["GUEST_MESSAGE_MAX_ATTACHMENTS", "GUEST_MESSAGE_MAX_ATTACHMENT_BYTES"]
+  .map((name) => {
+    const declaration = contracts.match(new RegExp(`^export const ${name} = [^;]+;`, "m"));
+    NodeAssert.ok(declaration, `Review changed upstream constant: ${name}`);
+    return declaration[0];
+  })
+  .join("\n");
+const imagePredicate = upstreamSource("packages/contracts/src/chatAttachment.ts").match(
+  /^export const PROVIDER_SEND_TURN_SUPPORTED_IMAGE_MIME_TYPES = \[[\s\S]*?^export function isProviderSendTurnSupportedImageMimeType\(mimeType: string\): boolean \{[\s\S]*?^\}/m,
+);
+NodeAssert.ok(imagePredicate, "Review changed upstream image MIME predicate");
+const uploadJavascript = NodeModule.stripTypeScriptTypes(
+  `${uploadConstants}\n${imagePredicate[0]}\n${upstreamSource("apps/server/src/guest/guestAttachments.ts")}`,
+  { mode: "strip" },
+)
+  .replace(/^import\s[\s\S]*?;\s*$/gm, "")
+  .replace(/^export (?=(?:function|const) )/gm, "");
+const classifyUpstreamUploads = new Function(`${uploadJavascript}\nreturn classifyGuestUploads;`)();
 
 const copy = (value) => JSON.parse(JSON.stringify(value));
 let checks = 0;
 let comparisons = 0;
+let uploadComparisons = 0;
 function execute(input, args = []) {
   return NodeChildProcess.spawnSync(executable, args, {
     input,
@@ -127,6 +146,149 @@ function compare(label, input) {
   comparisons++;
   return actual;
 }
+const units = (value) => Array.from({ length: value.length }, (_, index) => value.charCodeAt(index));
+const upload = (fields = {}) => ({
+  name: "report.txt",
+  contentType: "text/plain",
+  sizeBytes: 1,
+  header: [],
+  ...fields,
+});
+const uploadRequest = (uploads) => ({
+  version: 1,
+  operation: "classify-uploads",
+  uploads: uploads.map(({ name, contentType, sizeBytes, header }) => ({
+    nameUnits: units(name),
+    contentTypeLowercaseUnits: units(contentType.toLowerCase()),
+    sizeBytes,
+    header: Array.from(header),
+  })),
+});
+function compareUploads(label, uploads) {
+  const inspected = uploads.map((entry) => ({ ...entry, header: Uint8Array.from(entry.header) }));
+  const before = JSON.stringify(inspected);
+  // The oracle receives the original content type, before the host's wire-only case folding.
+  const result = classifyUpstreamUploads(inspected);
+  NodeAssert.equal(JSON.stringify(inspected), before, "Upstream mutated inspected uploads");
+  const expected = result.ok
+    ? {
+        ok: true,
+        attachments: result.attachments.map(({ name, mimeType, ...attachment }) => ({
+          ...attachment,
+          nameUnits: units(name),
+          mimeTypeUnits: units(mimeType),
+        })),
+      }
+    : result;
+  NodeAssert.deepEqual(
+    succeeded(JSON.stringify(uploadRequest(uploads)) + "\n"),
+    { version: 1, ok: expected },
+    label,
+  );
+  comparisons++;
+  uploadComparisons++;
+}
+
+const tenMiB = 10 * 1024 * 1024;
+const signatures = [
+  ["image/png", [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]],
+  ["image/jpeg", [0xff, 0xd8, 0xff]],
+  ["image/gif", Array.from(Buffer.from("GIF8"))],
+  ["image/webp", Array.from(Buffer.from("RIFF\0\0\0\0WEBP"))],
+];
+const png = (fields = {}) => upload({ contentType: "image/png", header: signatures[0][1], ...fields });
+compareUploads("no uploads", []);
+compareUploads(
+  "four files preserve input order",
+  ["z", "a", "z", "b"].map((name) => upload({ name })),
+);
+compareUploads("count wins over bytes and unsupported files", [
+  upload({ sizeBytes: tenMiB + 1 }), ...Array.from({ length: 4 }, () => upload({ sizeBytes: 0 })),
+]);
+compareUploads("exact byte limit", [upload({ sizeBytes: tenMiB })]);
+compareUploads("one extra byte", [upload({ sizeBytes: tenMiB }), upload()]);
+compareUploads("byte budget wins before content validation", [
+  png({ sizeBytes: 0, header: [] }), upload({ sizeBytes: tenMiB + 1 }),
+]);
+compareUploads("empty image", [png({ sizeBytes: 0 })]);
+compareUploads("negative zero is empty", [upload({ sizeBytes: -0 })]);
+compareUploads("finite fractional and negative sizes retain original semantics", [
+  upload({ sizeBytes: -0.5 }), upload({ sizeBytes: 1.25 }), upload({ sizeBytes: tenMiB - 0.75 }),
+]);
+compareUploads("byte sum preserves JavaScript left-to-right arithmetic", [
+  upload({ sizeBytes: 2 ** 53 }), upload({ sizeBytes: -(2 ** 53) }), upload({ sizeBytes: tenMiB }),
+]);
+compareUploads("finite inputs whose total overflows exceed the limit", [
+  upload({ sizeBytes: Number.MAX_VALUE }), upload({ sizeBytes: Number.MAX_VALUE }),
+]);
+compareUploads(
+  "all supported images and extra header bytes",
+  signatures.map(([contentType, header]) =>
+    upload({ contentType, header: [...header, 0x80, 0xff], name: contentType }),
+  ),
+);
+for (const [contentType, header] of signatures) {
+  for (let length = 0; length < header.length; length++) {
+    compareUploads(`${contentType}: truncated signature at ${length} bytes`, [
+      upload({ contentType, header: header.slice(0, length) }),
+    ]);
+  }
+  compareUploads(`${contentType}: corrupt final signature byte`, [
+    upload({ contentType, header: [...header.slice(0, -1), header.at(-1) ^ 0xff] }),
+  ]);
+}
+for (const contentType of ["image/svg+xml", "image/heic", "image/avif", "image/jpg"]) {
+  compareUploads(`${contentType}: unsupported image`, [png({ contentType })]);
+}
+compareUploads("image signature must match the declared MIME", [png({ contentType: "image/jpeg" })]);
+compareUploads("empty MIME, parameters, case folding, and non-image bytes", [
+  upload({ contentType: "" }),
+  upload({ contentType: "; charset=utf-8" }),
+  upload({ contentType: " TeXT/PLAIN ; CHARSET=UTF-8", header: signatures[0][1] }),
+  png({ contentType: " IMAGE/PNG; charset=ignored " }),
+]);
+compareUploads("Unicode lowercasing and UTF-16 MIME length", [
+  upload({ contentType: "APPLICATION/X-İ-ΟΣ" }),
+  upload({ contentType: "x".repeat(98) + "🦀" }),
+  upload({ contentType: "x".repeat(99) + "🦀" }),
+  upload({ contentType: "x-\ud800\udfff\ud800" }),
+]);
+const trimUnits = [
+  9, 10, 11, 12, 13, 32, 0xa0, 0x1680,
+  ...Array.from({ length: 11 }, (_, index) => 0x2000 + index),
+  0x2028, 0x2029, 0x202f, 0x205f, 0x3000, 0xfeff,
+];
+for (let start = 0; start < trimUnits.length; start += 4) {
+  compareUploads(
+    `JavaScript whitespace ${start}`,
+    trimUnits.slice(start, start + 4).map((unit) => {
+      const whitespace = String.fromCharCode(unit);
+      return upload({ contentType: `${whitespace}TeXT/PLAIN${whitespace}` });
+    }),
+  );
+}
+compareUploads(
+  "Unicode characters outside JavaScript whitespace remain",
+  [0x85, 0x180e, 0x200b].map((unit) => {
+    const character = String.fromCharCode(unit);
+    return upload({ contentType: `${character}TeXT/PLAIN${character}` });
+  }),
+);
+compareUploads("names sanitize control, separator, and bidi characters", [
+  upload({ name: "a" + String.fromCharCode(...Array.from({ length: 32 }, (_, n) => n)) + "z" }),
+  upload({ name: "a" + String.fromCharCode(...Array.from({ length: 33 }, (_, n) => n + 0x7f)) + "z" }),
+  upload({ name: " a/\\b\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069 " }),
+  upload({ name: "\u202f keep\u200b\u200d\u180e \ufeff" }),
+]);
+compareUploads("empty names use the matching attachment fallback", [
+  upload({ name: "" }), png({ name: "\ufeff\u202f " }), upload({ name: "\t\n" }), png({ name: "" }),
+]);
+compareUploads("names slice at 255 UTF-16 units and retain lone surrogates", [
+  upload({ name: "a".repeat(255) + "suffix" }),
+  png({ name: "a".repeat(254) + "🦀" }),
+  upload({ name: "🦀".repeat(128) }),
+  upload({ name: "\ud800lone\udfff" }),
+]);
 
 const now = Date.parse("2026-11-08T12:00:00.123Z");
 const expiresAt = "2026-11-09T12:00:00.123Z";
@@ -306,6 +468,53 @@ for (const context of [
     request("strip", context === undefined ? {} : { context }),
   );
 
+const validUploads = uploadRequest([upload()]);
+for (const fields of [
+  { uploads: undefined }, { uploads: null }, { uploads: {} }, { parsedDates: {} },
+]) {
+  rejected("invalid upload envelope", JSON.stringify({ ...validUploads, ...fields }) + "\n");
+}
+for (const fields of [
+  { nameUnits: undefined }, { nameUnits: "file" }, { nameUnits: [65, -1] },
+  { nameUnits: [0x10000] }, { nameUnits: [1.25] }, { nameUnits: [null] },
+  { contentTypeLowercaseUnits: undefined }, { contentTypeLowercaseUnits: ["65"] },
+  { contentTypeLowercaseUnits: [0x10000] }, { sizeBytes: undefined },
+  { sizeBytes: null }, { sizeBytes: "1" }, { header: undefined }, { header: null },
+  { header: [0x100] }, { header: [-1] }, { header: [1.25] }, { header: ["1"] },
+  { header: [false] }, { path: "PRIVATE UPLOAD PATH MUST NOT ENTER STDERR" },
+]) {
+  rejected(
+    "invalid inspected upload",
+    JSON.stringify({ ...validUploads, uploads: [{ ...validUploads.uploads[0], ...fields }] }) + "\n",
+  );
+}
+rejected("non-object inspected upload", JSON.stringify({ ...validUploads, uploads: [null] }) + "\n");
+rejected(
+  "nonfinite inspected size",
+  JSON.stringify(validUploads).replace('"sizeBytes":1', '"sizeBytes":1e400') + "\n",
+);
+rejected(
+  "duplicate inspected size",
+  JSON.stringify(validUploads).replace('"sizeBytes":1', '"sizeBytes":1,"sizeBytes":2') + "\n",
+  "duplicate object key",
+);
+NodeAssert.deepEqual(
+  succeeded('{"version":1,"operation":"classify-uploads","uploads":[{"nameUnits":[65.0,6.6e1],"contentTypeLowercaseUnits":[],"sizeBytes":1.25,"header":[255.0,1e0]}]}\n'),
+  {
+    version: 1,
+    ok: {
+      ok: true,
+      attachments: [{
+        type: "file",
+        nameUnits: [65, 66],
+        mimeTypeUnits: units("application/octet-stream"),
+        sizeBytes: 1.25,
+      }],
+    },
+  },
+  "integral JSON number forms are valid UTF-16 units and bytes",
+);
+
 const empty = request("strip");
 const valid = JSON.stringify(empty);
 for (const [label, input] of [
@@ -388,5 +597,5 @@ rejected("input byte limit", Buffer.alloc(maximumBytes + 1, 0x20), "input limit 
 }
 
 console.log(
-  `${checks} guest-share executable checks passed, including ${comparisons} complete comparisons with immutable upstream functions and actual Effect, retained payloads, explicit identity, strict framing, duplicate keys, Unicode, and input/output bounds. Failures emitted no partial stdout.`,
+  `${checks} guest-share executable checks passed, including ${comparisons} complete comparisons with immutable upstream functions (${uploadComparisons} upload classifications) and actual Effect, retained payloads, explicit identity, strict framing, duplicate keys, Unicode, and input/output bounds. Failures emitted no partial stdout.`,
 );

@@ -67,6 +67,42 @@ COMPONENT_MANIFEST = {
 }
 
 
+def provenance_mapping(revision="a" * 40):
+    mapping = copy.deepcopy(MAPPING)
+    mapping.update({
+        "schema_version": 1,
+        "recovery_commit": "9" * 40,
+        "integrated_upstream_commit": revision,
+        "source_history": [revision],
+        "supported_targets": ["linux-x64"],
+        "qualification": {"accepted": False},
+        "upstream_removals": [{
+            "path": "apps/server/src/RemovedUpstream.ts",
+            "source_commit": "8" * 40, "source_blob": "7" * 40,
+            "removed_in": "a" * 40, "replacement_paths": ["apps/server/src/Replacement.ts"],
+        }],
+    })
+    for entry in mapping["ports"]:
+        entry.update({
+            "reviewed_upstream_commit": revision,
+            "domain_owner": "apps/server/src/orchestration-v2",
+            "state": "candidate",
+            "notes": "Retain existing implementation pending acceptance.",
+            "platform_routes": [{
+                "targets": ["linux-x64"], "state": "candidate", "implementation": "rust",
+                "compiler_route": "lustr-bluefe-compatibility", "acceptance_evidence": {},
+            }],
+        })
+    mapping["ports"][0]["upstream_sources"] = [{
+        "path": "apps/server/src/orchestration-v2/ProjectCommands.ts", "blob": "c" * 40,
+    }]
+    mapping["ports"][0]["retired_paths"] = [{
+        "path": "apps/server/src/orchestration-v2/RetiredProjectCommands.ts",
+        "source_commit": "8" * 40, "source_blob": "d" * 40,
+    }]
+    return mapping
+
+
 class SelectionTests(unittest.TestCase):
     def select(self, paths, trusted=(), mapping=None, old=None, full_reason=None, manifest=None):
         return ci_plan.select_checks(
@@ -80,6 +116,17 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(result["gates"], {"native": False, "adapters": False, "application": False})
         self.assertEqual(result["rust_packages"], [])
         self.assertEqual(result["component_tests"], [])
+        self.assertFalse(result["stage_native"])
+        self.assertFalse(result["upstream_tests"])
+
+    def assert_source_guards_only(self, result):
+        self.assertEqual(result["mode"], "affected-fork")
+        self.assertEqual(result["gates"], {"native": True, "adapters": False, "application": False})
+        self.assertEqual(result["rust_packages"], ["t3code-ls-tools"])
+        self.assertEqual(result["adapter_ports"], [])
+        self.assertEqual(result["affected_ports"], [])
+        self.assertEqual(result["component_tests"], [])
+        self.assertTrue(result["source_guards"])
         self.assertFalse(result["stage_native"])
         self.assertFalse(result["upstream_tests"])
 
@@ -186,6 +233,162 @@ class SelectionTests(unittest.TestCase):
                 self.assertTrue(result["source_guards"])
                 self.assertFalse(result["stage_native"])
                 self.assertFalse(result["gates"]["application"])
+
+    def test_map_revision_bookkeeping_selects_source_guards_only(self):
+        old = provenance_mapping()
+        advanced = provenance_mapping("b" * 40)
+        advanced["source_history"].insert(0, "a" * 40)
+        variants = [advanced]
+        for key in ["integrated_upstream_commit", "source_history"]:
+            mapping = copy.deepcopy(old)
+            mapping[key] = advanced[key]
+            variants.append(mapping)
+        for index in range(len(old["ports"])):
+            mapping = copy.deepcopy(old)
+            mapping["ports"][index]["reviewed_upstream_commit"] = "b" * 40
+            variants.append(mapping)
+        for index, mapping in enumerate(variants):
+            with self.subTest(variant=index):
+                self.assert_source_guards_only(self.select(["port-map.json"], mapping=mapping, old=old))
+
+    def test_provenance_import_of_unmapped_trusted_source_keeps_source_guards_only(self):
+        paths = ["apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts",
+                 "apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.test.ts"]
+        result = self.select(["port-map.json", "upstream.lock.json", *paths], trusted=paths,
+                             mapping=provenance_mapping("b" * 40), old=provenance_mapping())
+        self.assert_source_guards_only(result)
+        self.assertEqual(result["trusted_upstream_paths"], sorted(paths))
+
+    def test_provenance_edits_preserve_runtime_and_contract_selection(self):
+        mapping, old = provenance_mapping("b" * 40), provenance_mapping()
+        for path in ["crates/core/src/project_commands.rs", "crates/storage/src/lib.rs",
+                     "apps/server/src/orchestration-v2/NativeProjectCommands.ts",
+                     "apps/server/src/orchestration-v2/ProjectCommands.ts",
+                     "packages/contracts/src/orchestrationV2.ts"]:
+            with self.subTest(path=path):
+                expected = self.select([path], trusted=[path], mapping=mapping, old=old)
+                result = self.select(["port-map.json", path], trusted=[path], mapping=mapping, old=old)
+                self.assertEqual(result["mode"], "affected-fork")
+                self.assertEqual({key: value for key, value in result.items() if key != "reasons"},
+                                 {key: value for key, value in expected.items() if key != "reasons"})
+
+    def test_other_mapping_changes_always_require_full_qualification(self):
+        old, advanced = provenance_mapping(), provenance_mapping("b" * 40)
+        mutations = [
+            (("schema_version",), 2),
+            (("recovery_commit",), "f" * 40),
+            (("supported_targets",), ["linux-arm64"]),
+            (("qualification", "accepted"), True),
+            (("qualification", "accepted"), 0),
+            (("upstream_removals", 0, "path"), "apps/server/src/AnotherRemoval.ts"),
+            (("upstream_removals", 0, "source_blob"), "f" * 40),
+            (("upstream_removals", 0, "replacement_paths"), []),
+            (("upstream_removals",), []),
+            (("new_mapping_field",), "new policy"),
+            (("ports", 0, "id"), "renamed-port"),
+            (("ports", 0, "domain_owner"), "apps/web/src"),
+            (("ports", 0, "state"), "accepted"),
+            (("ports", 0, "notes"), "Changed scope."),
+            (("ports", 0, "upstream_sources", 0, "path"), "apps/server/src/AnotherSource.ts"),
+            (("ports", 0, "upstream_sources", 0, "blob"), "f" * 40),
+            (("ports", 0, "rust_paths"), ["crates/core/src/another.rs"]),
+            (("ports", 0, "rust_crates"), ["crates/storage"]),
+            (("ports", 0, "adapter_paths"), ["apps/server/src/AnotherAdapter.ts"]),
+            (("ports", 0, "acceptance_tests"), []),
+            (("ports", 0, "platform_routes", 0, "targets"), ["linux-arm64"]),
+            (("ports", 0, "platform_routes", 0, "state"), "accepted"),
+            (("ports", 0, "platform_routes", 0, "implementation"), "upstream"),
+            (("ports", 0, "platform_routes", 0, "compiler_route"), "native-lust"),
+            (("ports", 0, "platform_routes", 0, "acceptance_evidence"), {"linux-x64": "docs/receipt.json"}),
+            (("ports", 0, "retired_paths", 0, "path"), "apps/server/src/AnotherRetirement.ts"),
+            (("ports", 0, "retired_paths", 0, "source_commit"), "f" * 40),
+            (("ports", 0, "retired_paths", 0, "source_blob"), "f" * 40),
+            (("ports", 0, "retired_paths"), []),
+            (("ports", 0, "new_port_field"), "new policy"),
+            (("ports",), advanced["ports"][1:]),
+            (("ports",), list(reversed(advanced["ports"]))),
+            (("ports",), [*advanced["ports"], {**advanced["ports"][0], "id": "added-port"}]),
+        ]
+        for keys, value in mutations:
+            with self.subTest(keys=keys, value=value):
+                mapping = copy.deepcopy(advanced)
+                target = mapping
+                for key in keys[:-1]:
+                    target = target[key]
+                target[keys[-1]] = value
+                result = self.select(["port-map.json"], mapping=mapping, old=old)
+                self.assertEqual(result["mode"], "full-fork")
+                self.assertEqual(set(result["rust_packages"]), set(NAMES.values()))
+                self.assertTrue(all(result["gates"].values()))
+
+    def test_removed_mapping_fields_cannot_use_the_provenance_fast_path(self):
+        old = provenance_mapping()
+        for keys in [("recovery_commit",), ("upstream_removals",), ("ports", 0, "notes"),
+                     ("ports", 0, "domain_owner"), ("ports", 0, "retired_paths")]:
+            with self.subTest(keys=keys):
+                mapping = provenance_mapping("b" * 40)
+                target = mapping
+                for key in keys[:-1]:
+                    target = target[key]
+                del target[keys[-1]]
+                result = self.select(["port-map.json"], mapping=mapping, old=old)
+                self.assertEqual(result["mode"], "full-fork")
+
+    def test_malformed_provenance_cannot_use_the_fast_path(self):
+        valid = provenance_mapping()
+        malformed = [None, {}, [], MAPPING]
+        for key, value in [("schema_version", True), ("schema_version", 1.0),
+                           ("integrated_upstream_commit", "main"),
+                           ("source_history", []), ("source_history", "a" * 40),
+                           ("source_history", ["main"]), ("source_history", [None]),
+                           ("ports", []), ("ports", {}), ("ports", [None])]:
+            mapping = copy.deepcopy(valid)
+            mapping[key] = value
+            malformed.append(mapping)
+        for key, value in [("id", ""), ("id", None), ("reviewed_upstream_commit", "main"),
+                           ("reviewed_upstream_commit", None)]:
+            mapping = copy.deepcopy(valid)
+            mapping["ports"][0][key] = value
+            malformed.append(mapping)
+        for key in ["integrated_upstream_commit", "source_history", "ports"]:
+            mapping = copy.deepcopy(valid)
+            del mapping[key]
+            malformed.append(mapping)
+        mapping = copy.deepcopy(valid)
+        del mapping["ports"][0]["reviewed_upstream_commit"]
+        malformed.append(mapping)
+        mapping = copy.deepcopy(valid)
+        mapping["ports"][1]["id"] = mapping["ports"][0]["id"]
+        malformed.append(mapping)
+        for index, mapping in enumerate(malformed):
+            with self.subTest(variant=index):
+                self.assertFalse(ci_plan.provenance_only_mapping_change(mapping, valid))
+                self.assertFalse(ci_plan.provenance_only_mapping_change(valid, mapping))
+                self.assertFalse(ci_plan.provenance_only_mapping_change(mapping, mapping))
+
+    def test_provenance_comparison_does_not_mutate_either_mapping(self):
+        for other_change in [False, True]:
+            with self.subTest(other_change=other_change):
+                mapping, old = provenance_mapping("b" * 40), provenance_mapping()
+                if other_change:
+                    mapping["ports"][0]["notes"] = "Changed scope."
+                before = copy.deepcopy((mapping, old))
+                ci_plan.select_checks(["port-map.json"], mapping, old, NAMES, REVERSE, set(),
+                                      component_manifest=COMPONENT_MANIFEST)
+                self.assertEqual((mapping, old), before)
+
+    def test_provenance_change_cannot_downgrade_a_full_qualification_reason(self):
+        for path in ["tools/ci_plan.py", "tools/ci_receipt.py", "Cargo.lock",
+                     "apps/server/src/UnmappedForkRuntime.ts"]:
+            with self.subTest(path=path):
+                result = self.select(["port-map.json", path], mapping=provenance_mapping("b" * 40),
+                                     old=provenance_mapping())
+                self.assertEqual(result["mode"], "full-fork")
+                self.assertTrue(all(result["gates"].values()))
+        result = self.select(["port-map.json"], mapping=provenance_mapping("b" * 40),
+                             old=provenance_mapping(), full_reason="No verified qualified ancestor is available")
+        self.assertEqual(result["mode"], "full-fork")
+        self.assertTrue(all(result["gates"].values()))
 
     def test_acceptance_receipts_in_current_or_previous_mapping_are_source_guard_inputs(self):
         path = "docs/qualification/project-linux.json"
@@ -461,6 +664,9 @@ class GitFixtureTests(unittest.TestCase):
     def test_true_upstream_source_advance_and_addition_skip_unrelated_integration_checks(self):
         existing = "apps/web/src/TrustedUpstreamView.tsx"
         added = "apps/web/src/NewUpstreamView.tsx"
+        mapping = provenance_mapping(self.upstream)
+        self.write("port-map.json", json.dumps(mapping))
+        self.base = self.commit("qualified provenance fixture")
         self.run_git("checkout", "--detach", self.upstream)
         self.write(existing, "export const label = 'upstream advance';\n")
         self.write(added, "export const label = 'upstream addition';\n")
@@ -468,11 +674,18 @@ class GitFixtureTests(unittest.TestCase):
         self.run_git("checkout", "--detach", self.base)
         self.run_git("checkout", upstream, "--", existing, added)
         self.write("upstream.lock.json", json.dumps({"upstream": {"commit": upstream}}))
+        mapping["integrated_upstream_commit"] = upstream
+        mapping["source_history"].append(upstream)
+        for entry in mapping["ports"]:
+            entry["reviewed_upstream_commit"] = upstream
+        self.write("port-map.json", json.dumps(mapping))
         head = self.commit("mechanical upstream import")
         result = ci_plan.make_plan(self.root, head, self.qualification())
+        self.assertEqual(set(result["changed_paths"]), {existing, added, "upstream.lock.json", "port-map.json"})
         self.assertEqual(set(result["trusted_upstream_paths"]), {existing, added})
         self.assertEqual(result["mode"], "affected-fork")
         self.assertEqual(result["rust_packages"], ["t3code-ls-tools"])
+        self.assertTrue(result["source_guards"])
         self.assertFalse(result["gates"]["adapters"])
         self.assertFalse(result["gates"]["application"])
 

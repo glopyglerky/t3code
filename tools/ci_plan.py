@@ -147,6 +147,42 @@ def is_reporting_tool(path: str) -> bool:
     )
 
 
+def provenance_only_mapping_change(mapping: dict, old_mapping: dict) -> bool:
+    """Ignore only revision bookkeeping; check-source still validates the full map."""
+    def without_provenance(value):
+        if (not isinstance(value, dict) or type(value.get("schema_version")) is not int
+                or value["schema_version"] != 1):
+            return None
+        try:
+            nightly.require_sha(value["integrated_upstream_commit"])
+            history, ports = value["source_history"], value["ports"]
+            if not isinstance(history, list) or not history or not isinstance(ports, list) or not ports:
+                return None
+            for revision in history:
+                nightly.require_sha(revision)
+            ids, retained_ports = set(), []
+            for port in ports:
+                if not isinstance(port, dict):
+                    return None
+                identifier = port.get("id")
+                if not isinstance(identifier, str) or not identifier or identifier in ids:
+                    return None
+                ids.add(identifier)
+                nightly.require_sha(port["reviewed_upstream_commit"])
+                retained_ports.append({key: child for key, child in port.items()
+                                       if key != "reviewed_upstream_commit"})
+            retained = {key: child for key, child in value.items()
+                        if key not in {"integrated_upstream_commit", "source_history", "ports"}}
+            retained["ports"] = retained_ports
+            # JSON comparison preserves value types, unlike Python's True == 1.
+            return json.dumps(retained, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        except (KeyError, TypeError, ValueError, nightly.TrackingError):
+            return None
+
+    current, previous = without_provenance(mapping), without_provenance(old_mapping)
+    return current is not None and previous is not None and current == previous
+
+
 def select_checks(changed: list[str], mapping: dict, old_mapping: dict, names: dict,
                   reverse: dict, trusted_paths: set[str], full_reason: str | None = None,
                   component_manifest: dict | None = None) -> dict:
@@ -188,7 +224,10 @@ def select_checks(changed: list[str], mapping: dict, old_mapping: dict, names: d
 
     for path in changed:
         nightly.require_relative_path(path)
-        if is_policy(path) or path in GLOBAL_INPUTS or path.startswith(".cargo/"):
+        if path == "port-map.json" and provenance_only_mapping_change(mapping, old_mapping):
+            guards = True
+            reasons.append("Port-map provenance changed; validate the fork's retained source accounting")
+        elif is_policy(path) or path in GLOBAL_INPUTS or path.startswith(".cargo/"):
             full_reason = full_reason or f"Shared build, mapping or CI input changed: {path}"
         exact_ports = [port for port in ports if path in
                        port.get("rust_paths", []) + port.get("adapter_paths", []) + port.get("acceptance_tests", [])

@@ -5,6 +5,7 @@ use crate::guest_share::{
     self, Attachment, Attribution, Command, Expiration, GuestMessage, GuestShare, MessageContext,
     MessageStatus, SettlementOverride, Thread, Timestamp,
 };
+use crate::guest_uploads::{self, AttachmentDraft, InspectedUpload};
 use crate::json::{self, Value};
 use std::collections::HashSet;
 
@@ -57,6 +58,82 @@ fn number(value: &Value) -> WireResult<f64> {
         }
         _ => Err(Error::InvalidRequest),
     }
+}
+
+fn unsigned_integer(value: &Value, maximum: u16) -> WireResult<u16> {
+    let value = number(value)?;
+    if value < 0.0 || value > f64::from(maximum) || value.fract() != 0.0 {
+        return Err(Error::InvalidRequest);
+    }
+    Ok(value as u16)
+}
+
+fn code_units(value: &Value) -> WireResult<Vec<u16>> {
+    value
+        .as_array()
+        .ok_or(Error::InvalidRequest)?
+        .iter()
+        .map(|value| unsigned_integer(value, u16::MAX))
+        .collect()
+}
+
+fn inspected_upload(value: &Value) -> WireResult<InspectedUpload> {
+    allowed_fields(
+        value,
+        &["nameUnits", "contentTypeLowercaseUnits", "sizeBytes", "header"],
+    )?;
+    Ok(InspectedUpload {
+        name_units: code_units(field(value, "nameUnits")?)?,
+        content_type_lowercase_units: code_units(field(value, "contentTypeLowercaseUnits")?)?,
+        size_bytes: number(field(value, "sizeBytes")?)?,
+        header: field(value, "header")?
+            .as_array()
+            .ok_or(Error::InvalidRequest)?
+            .iter()
+            .map(|value| unsigned_integer(value, u16::from(u8::MAX)).map(|byte| byte as u8))
+            .collect::<WireResult<Vec<u8>>>()?,
+    })
+}
+
+fn code_units_value(units: &[u16]) -> Value {
+    Value::Array(
+        units
+            .iter()
+            .map(|unit| Value::Number(unit.to_string()))
+            .collect(),
+    )
+}
+
+fn upload_draft_value(draft: &AttachmentDraft) -> Value {
+    object(vec![
+        ("type", Value::String(draft.kind.as_str().to_string())),
+        ("nameUnits", code_units_value(&draft.name_units)),
+        ("mimeTypeUnits", code_units_value(&draft.mime_type_units)),
+        ("sizeBytes", Value::Number(draft.size_bytes.to_string())),
+    ])
+}
+
+fn classify_uploads(input: &Value) -> WireResult<Value> {
+    let uploads = field(input, "uploads")?
+        .as_array()
+        .ok_or(Error::InvalidRequest)?
+        .iter()
+        .map(inspected_upload)
+        .collect::<WireResult<Vec<InspectedUpload>>>()?;
+    let result = match guest_uploads::classify_uploads(&uploads) {
+        Ok(attachments) => object(vec![
+            ("ok", Value::Bool(true)),
+            (
+                "attachments",
+                Value::Array(attachments.iter().map(upload_draft_value).collect()),
+            ),
+        ]),
+        Err(reason) => object(vec![
+            ("ok", Value::Bool(false)),
+            ("reason", Value::String(reason.as_str().to_string())),
+        ]),
+    };
+    Ok(success(result, None))
 }
 
 fn timestamp(value: &Value) -> WireResult<Timestamp> {
@@ -510,9 +587,13 @@ pub fn evaluate(input: &Value) -> WireResult<Value> {
         ],
         "release" => &["version", "operation", "before", "after", "parsedDates"],
         "strip" => &["version", "operation", "context"],
+        "classify-uploads" => &["version", "operation", "uploads"],
         _ => return Err(Error::InvalidRequest),
     };
     allowed_fields(input, keys)?;
+    if operation == "classify-uploads" {
+        return classify_uploads(input);
+    }
     if operation == "strip" {
         let context = input
             .get("context")
@@ -654,4 +735,155 @@ pub fn respond(frame: &str) -> WireResult<String> {
     let mut encoded = json::stringify(&response);
     encoded.push('\n');
     Ok(encoded)
+}
+
+#[cfg(test)]
+mod upload_tests {
+    use super::*;
+
+    fn upload() -> Value {
+        object(vec![
+            ("nameUnits", code_units_value(&[97, 0xd800])),
+            (
+                "contentTypeLowercaseUnits",
+                code_units_value(&"text/plain".encode_utf16().collect::<Vec<_>>()),
+            ),
+            ("sizeBytes", Value::Number("1.5".to_string())),
+            ("header", Value::Array(vec![])),
+        ])
+    }
+
+    fn request(upload: Value) -> Value {
+        object(vec![
+            ("version", Value::Number("1".to_string())),
+            ("operation", Value::String("classify-uploads".to_string())),
+            ("uploads", Value::Array(vec![upload])),
+        ])
+    }
+
+    fn frame(value: &Value) -> String {
+        format!("{}\n", json::stringify(value))
+    }
+
+    fn numeric_array(values: &[&str]) -> Value {
+        Value::Array(
+            values
+                .iter()
+                .map(|value| Value::Number((*value).to_string()))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn classification_round_trips_utf16_and_sizes_without_dates_or_changed() {
+        let response = respond(&frame(&request(upload()))).unwrap();
+        assert_eq!(
+            response,
+            "{\"version\":1,\"ok\":{\"ok\":true,\"attachments\":[{\"type\":\"file\",\"nameUnits\":[97,55296],\"mimeTypeUnits\":[116,101,120,116,47,112,108,97,105,110],\"sizeBytes\":1.5}]}}\n"
+        );
+        let mut input = request(upload());
+        set(&mut input, "uploads", Value::Array(vec![]));
+        assert_eq!(
+            respond(&frame(&input)).unwrap(),
+            "{\"version\":1,\"ok\":{\"ok\":true,\"attachments\":[]}}\n"
+        );
+        set(&mut input, "uploads", Value::Array(vec![upload(); 5]));
+        assert_eq!(
+            respond(&frame(&input)).unwrap(),
+            "{\"version\":1,\"ok\":{\"ok\":false,\"reason\":\"too_many_files\"}}\n"
+        );
+    }
+
+    #[test]
+    fn classification_accepts_integral_code_units_and_bytes_in_json_number_forms() {
+        let mut source = upload();
+        set(&mut source, "nameUnits", numeric_array(&["6.5e1", "65535.0"]));
+        set(&mut source, "header", numeric_array(&["0.0", "2.55e2"]));
+        set(&mut source, "sizeBytes", Value::Number("-1.25".to_string()));
+        let response = evaluate(&request(source)).unwrap();
+        let draft = &response
+            .get("ok")
+            .unwrap()
+            .get("attachments")
+            .unwrap()
+            .as_array()
+            .unwrap()[0];
+        assert_eq!(draft.get("nameUnits"), Some(&numeric_array(&["65", "65535"])));
+        assert_eq!(draft.get("sizeBytes"), Some(&Value::Number("-1.25".to_string())));
+        assert!(response.get("changed").is_none());
+    }
+
+    #[test]
+    fn classification_rejects_missing_unknown_and_duplicate_fields() {
+        let input = request(upload());
+        for key in ["version", "operation", "uploads"] {
+            assert_eq!(
+                evaluate(&object_without(&input, &[key]).unwrap()),
+                Err(Error::InvalidRequest)
+            );
+        }
+        for key in ["nameUnits", "contentTypeLowercaseUnits", "sizeBytes", "header"] {
+            assert_eq!(
+                evaluate(&request(object_without(&upload(), &[key]).unwrap())),
+                Err(Error::InvalidRequest)
+            );
+        }
+        let mut extra_root = input.clone();
+        set(&mut extra_root, "parsedDates", object(vec![]));
+        assert_eq!(evaluate(&extra_root), Err(Error::InvalidRequest));
+        let mut extra_upload = upload();
+        set(&mut extra_upload, "path", Value::String("/not-sent".to_string()));
+        assert_eq!(evaluate(&request(extra_upload)), Err(Error::InvalidRequest));
+
+        for mut duplicate in [input, upload()] {
+            let Value::Object(fields) = &mut duplicate else {
+                unreachable!();
+            };
+            fields.push(fields[0].clone());
+            let input = if duplicate.get("operation").is_some() {
+                duplicate
+            } else {
+                request(duplicate)
+            };
+            assert_eq!(respond(&frame(&input)), Err(Error::DuplicateKey));
+        }
+    }
+
+    #[test]
+    fn classification_rejects_invalid_arrays_ranges_types_and_nonfinite_sizes() {
+        for key in ["nameUnits", "contentTypeLowercaseUnits", "header"] {
+            let beyond = if key == "header" { "256" } else { "65536" };
+            for invalid in [
+                Value::Null,
+                Value::String("units".to_string()),
+                numeric_array(&["-1"]),
+                numeric_array(&["1.5"]),
+                numeric_array(&[beyond]),
+                numeric_array(&["1e309"]),
+                Value::Array(vec![Value::Null]),
+                Value::Array(vec![Value::String("1".to_string())]),
+                Value::Array(vec![Value::Bool(true)]),
+            ] {
+                let mut source = upload();
+                set(&mut source, key, invalid);
+                assert_eq!(respond(&frame(&request(source))), Err(Error::InvalidRequest), "{key}");
+            }
+        }
+        for invalid in [
+            Value::Null,
+            Value::String("1".to_string()),
+            Value::Bool(false),
+            Value::Number("1e309".to_string()),
+            Value::Number("-1e309".to_string()),
+        ] {
+            let mut source = upload();
+            set(&mut source, "sizeBytes", invalid);
+            assert_eq!(respond(&frame(&request(source))), Err(Error::InvalidRequest));
+        }
+        for invalid in [Value::Null, object(vec![]), Value::Array(vec![Value::Null])] {
+            let mut input = request(upload());
+            set(&mut input, "uploads", invalid);
+            assert_eq!(respond(&frame(&input)), Err(Error::InvalidRequest));
+        }
+    }
 }

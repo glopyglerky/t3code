@@ -78,6 +78,8 @@ const encodeEvent = Schema.encodeSync(OrchestrationV2DomainEventJson);
 const encodeProjection = Schema.encodeSync(OrchestrationV2ThreadProjectionJson);
 const PNG = Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13);
 const MIB = 1024 * 1024;
+const utf16Units = (value) =>
+  Array.from({ length: value.length }, (_, index) => value.charCodeAt(index));
 const adapter = {
   instanceId,
   driver: ProviderDriverKind.make("codex"),
@@ -86,7 +88,7 @@ const adapter = {
   openSession: () => Effect.die("This guest-share fixture must never open a provider session"),
 };
 
-function serviceLayer(name, filename) {
+function serviceLayer(name, filename, copyCalls) {
   const database =
     filename === undefined
       ? SqlitePersistence.layerMemory
@@ -117,7 +119,27 @@ function serviceLayer(name, filename) {
       { databaseLayer: database, runEffectWorker: false },
     ).pipe(Layer.provide(cleanup)),
   );
-  return GuestShareService.layer.pipe(
+  const guestService =
+    copyCalls === undefined
+      ? GuestShareService.layer
+      : GuestShareService.layer.pipe(
+          Layer.provide(
+            Layer.effect(
+              FileSystem.FileSystem,
+              Effect.gen(function* () {
+                const actual = yield* FileSystem.FileSystem;
+                return {
+                  ...actual,
+                  copyFile: (...args) => {
+                    copyCalls.push(args);
+                    return actual.copyFile(...args);
+                  },
+                };
+              }),
+            ),
+          ),
+        );
+  return guestService.pipe(
     Layer.provideMerge(CommandOutputHub.layer.pipe(Layer.provideMerge(orchestration))),
     Layer.provide(
       Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
@@ -146,12 +168,12 @@ function serviceLayer(name, filename) {
   );
 }
 
-async function run(effect, selection, name, filename, direct = false) {
+async function run(effect, selection, name, filename, direct = false, copyCalls) {
   const clock = Effect.runSync(Clock.Clock);
   return Effect.runPromise(
     effect.pipe(
       Effect.scoped,
-      Effect.provide(direct ? NodeServices.layer : serviceLayer(name, filename)),
+      Effect.provide(direct ? NodeServices.layer : serviceLayer(name, filename, copyCalls)),
       Effect.provideService(
         HostProcess.Environment,
         selection === undefined
@@ -256,14 +278,19 @@ const rejectedDispatch = Effect.fn("checkGuestShareAdapter.rejectedDispatch")(fu
   return error;
 });
 
-const uploads = Effect.fn("checkGuestShareAdapter.uploads")(function* (name, size = PNG.length) {
+const uploads = Effect.fn("checkGuestShareAdapter.uploads")(function* (
+  name,
+  size = PNG.length,
+  contentType = "image/png",
+  header = PNG,
+) {
   const fs = yield* FileSystem.FileSystem;
   const directory = yield* fs.makeTempDirectoryScoped({ prefix: "native-guest-upload-" });
   const bytes = new Uint8Array(size);
-  bytes.set(PNG);
+  bytes.set(header.subarray(0, size));
   const path = NodePath.join(directory, "upload");
   yield* fs.writeFile(path, bytes);
-  return [{ path, name, contentType: "image/png" }];
+  return [{ path, name, contentType }];
 });
 
 const storedFiles = Effect.gen(function* () {
@@ -994,6 +1021,7 @@ const directNoopsAndDates = Effect.gen(function* () {
 async function controlledForwarder() {
   const modePath = NodePath.join(temporary, "native-mode.json");
   const countPath = NodePath.join(temporary, "native-call-count");
+  const callsPath = NodePath.join(temporary, "native-calls.jsonl");
   const readyPath = NodePath.join(temporary, "native-ready.json");
   const path = await fixture(
     "controlled-guest-native",
@@ -1006,6 +1034,11 @@ if (Object.keys(process.env).length !== 0 || process.argv.length !== 2) {
   process.exit(78);
 }
 const request = JSON.parse(input.toString("utf8"));
+fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify({
+  operation: request.operation,
+  commandType: request.command?.type,
+  uploads: request.uploads,
+}) + "\\n");
 const mode = JSON.parse(fs.readFileSync(${JSON.stringify(modePath)}, "utf8"));
 let target = mode.operation === request.operation && (mode.commandType === undefined || mode.commandType === request.command?.type);
 if (target && mode.failOnCall !== undefined) {
@@ -1046,6 +1079,13 @@ if (target && mode.kind === "invalid-json") {
     }
     if (mode.kind === "foreign-release") response.ok.attachmentIds.push(mode.attachmentId);
     if (mode.kind === "keep-attribution") response.ok.context = request.context;
+    if (mode.kind === "upload-count") response.ok.attachments.pop();
+    if (mode.kind === "upload-order") response.ok.attachments.reverse();
+    if (mode.kind === "upload-size") response.ok.attachments[0].sizeBytes += 1;
+    if (mode.kind === "upload-type") response.ok.attachments[0].type = "video";
+    if (mode.kind === "upload-units") response.ok.attachments[0].nameUnits = [65536];
+    if (mode.kind === "upload-reason") response.ok = { ok: false, reason: "forged" };
+    if (mode.kind === "upload-changed") response.changed = false;
     if (mode.kind === "cancel-replaced") {
       response.ok = { ...request.thread, updatedAt: request.now, guestShare: { ...request.thread.guestShare, messages: request.thread.guestShare.messages.map((message) => message.id === request.guest.guestMessageId ? { ...message, status: "dismissed" } : message) } };
       response.changed = true;
@@ -1058,9 +1098,16 @@ if (target && mode.kind === "invalid-json") {
   const setMode = Effect.fn("checkGuestShareAdapter.setMode")(function* (mode = {}) {
     yield* Effect.promise(() => NodeFSP.writeFile(modePath, JSON.stringify(mode)));
     yield* Effect.promise(() => NodeFSP.writeFile(countPath, "0"));
+    yield* Effect.promise(() => NodeFSP.writeFile(callsPath, ""));
   });
   await Effect.runPromise(setMode());
-  return { path, setMode, readyPath };
+  const calls = Effect.promise(async () =>
+    (await NodeFSP.readFile(callsPath, "utf8"))
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line)),
+  );
+  return { path, setMode, readyPath, calls };
 }
 
 function nativeError(error, stage = "response") {
@@ -1068,8 +1115,136 @@ function nativeError(error, stage = "response") {
   NodeAssert.equal(error.stage, stage);
 }
 
+const directUploadRoundTrip = Effect.gen(function* () {
+  const native = yield* NativeGuestShare.make();
+  NodeAssert.deepEqual(yield* native.classifyGuestUploads([]), { ok: true, attachments: [] });
+  const inspected = [
+    {
+      name: " \u202ereport/one.png ",
+      contentType: " IMAGE/PNG; charset=ignored",
+      sizeBytes: PNG.length,
+      header: PNG,
+    },
+    {
+      name: "a".repeat(254) + "🦀",
+      contentType: "text/plain",
+      sizeBytes: 0.5,
+      header: new Uint8Array(),
+    },
+    {
+      name: "\ud800raw\udfff",
+      contentType: "APPLICATION/X-İ-ΟΣ",
+      sizeBytes: 1,
+      header: new Uint8Array(),
+    },
+    { name: "\ufeff ", contentType: "", sizeBytes: 2, header: new Uint8Array() },
+  ];
+  const before = inspected.map((entry) => ({ ...entry, header: Uint8Array.from(entry.header) }));
+  NodeAssert.deepEqual(yield* native.classifyGuestUploads(inspected), {
+    ok: true,
+    attachments: [
+      { type: "image", name: "_report_one.png", mimeType: "image/png", sizeBytes: PNG.length },
+      { type: "file", name: "a".repeat(254) + "\ud83e", mimeType: "text/plain", sizeBytes: 0.5 },
+      { type: "file", name: "\ud800raw\udfff", mimeType: "application/x-i\u0307-ος", sizeBytes: 1 },
+      { type: "file", name: "file", mimeType: "application/octet-stream", sizeBytes: 2 },
+    ],
+  });
+  NodeAssert.deepEqual(inspected, before, "native classification must not mutate inspected uploads");
+});
+
+async function uploadClassificationChecks(control) {
+  const copies = [];
+  await run(
+    Effect.gen(function* () {
+      yield* control.setMode();
+      const { guestShares, token, shareId } = yield* join();
+      const image = yield* uploads(" ../invoice\u202e.png ", PNG.length, " IMAGE/PNG; charset=ignored");
+      const file = yield* uploads(" report.txt ", PNG.length + 1, "TEXT/PLAIN; charset=utf-8");
+      yield* control.setMode();
+      yield* guestShares.submit(token, { shareId, text: "Classify both files" }, [...image, ...file]);
+      const calls = yield* control.calls;
+      const classifyIndex = calls.findIndex((call) => call.operation === "classify-uploads");
+      NodeAssert.notEqual(classifyIndex, -1, "real guest upload must invoke the native classifier");
+      NodeAssert.ok(
+        calls.findIndex((call) => call.commandType === "thread.guest-message.submit") > classifyIndex,
+      );
+      NodeAssert.equal(calls.filter((call) => call.operation === "classify-uploads").length, 1);
+      NodeAssert.deepEqual(
+        calls[classifyIndex].uploads,
+        [image[0], file[0]].map((entry, index) => ({
+          nameUnits: utf16Units(entry.name),
+          contentTypeLowercaseUnits: utf16Units(entry.contentType.toLowerCase()),
+          sizeBytes: PNG.length + index,
+          // Inspection reads 12 bytes, so the text file's final zero is excluded.
+          header: Array.from(PNG),
+        })),
+        "native request contains inspected bytes and metadata, without host file paths",
+      );
+      const attachments = (yield* projection()).thread.guestShare.messages[0].attachments;
+      NodeAssert.deepEqual(attachments.map(({ id: _id, ...draft }) => draft), [
+        { type: "image", name: ".._invoice_.png", mimeType: "image/png", sizeBytes: PNG.length },
+        { type: "file", name: "report.txt", mimeType: "text/plain", sizeBytes: PNG.length + 1 },
+      ]);
+      NodeAssert.equal(copies.length, 2, "both classified files must use real upload copies");
+      scenarios.push(
+        "guest service invokes native upload classification before dispatch and stores ordered image/file metadata",
+      );
+
+      const expectNoWrite = Effect.fn("checkGuestShareAdapter.classifierRejectsBeforeCopy")(
+        function* (label, supplied, reason, kind) {
+          const before = yield* snapshot();
+          const files = yield* storedFiles;
+          const copyCount = copies.length;
+          yield* control.setMode(kind === undefined ? {} : { operation: "classify-uploads", kind });
+          const error = yield* Effect.flip(
+            guestShares.submit(token, { shareId, text: label }, supplied),
+          );
+          NodeAssert.equal(error.reason, reason, label);
+          NodeAssert.equal(copies.length, copyCount, `${label}: classifier must fail before copying`);
+          NodeAssert.deepEqual(yield* storedFiles, files, `${label}: retained attachments changed`);
+          NodeAssert.deepEqual(yield* snapshot(), before, `${label}: classifier committed durable changes`);
+          const calls = yield* control.calls;
+          NodeAssert.equal(
+            calls.filter((call) => call.operation === "classify-uploads").length, 1, label,
+          );
+          NodeAssert.equal(
+            calls.some((call) => call.commandType === "thread.guest-message.submit"), false, label,
+          );
+        },
+      );
+      yield* expectNoWrite("too many files", Array(5).fill(image[0]), "too_many_files");
+      yield* expectNoWrite("too many bytes", yield* uploads("large.png", 10 * MIB + 1), "too_large");
+      yield* expectNoWrite(
+        "unsupported image", [{ ...image[0], contentType: "image/svg+xml" }], "unsupported_file",
+      );
+      scenarios.push(
+        "native count, byte and MIME rejections copy nothing and leave all SQLite records and prior files unchanged",
+      );
+      for (const kind of [
+        "upload-count", "upload-order", "upload-size", "upload-type", "upload-units",
+        "upload-reason", "upload-changed", "invalid-json", "exit",
+      ]) {
+        yield* expectNoWrite(`classifier ${kind}`, [...image, ...file], "rejected", kind);
+        scenarios.push(`${kind}: classifier failure rejects before copy or dispatch without upstream fallback`);
+      }
+      yield* control.setMode();
+      yield* guestShares.submit(token, { shareId, text: "Text after classifier failures" }, []);
+      NodeAssert.equal(
+        (yield* control.calls).some((call) => call.operation === "classify-uploads"), false,
+      );
+      NodeAssert.equal(copies.length, 2, "text-only submission does not inspect or copy uploads");
+    }),
+    control.path,
+    "upload-classification",
+    undefined,
+    false,
+    copies,
+  );
+}
+
 async function nativeFailureChecks() {
   const control = await controlledForwarder();
+  await uploadClassificationChecks(control);
   for (const kind of ["drop-pending", "reorder-pending"]) {
     await run(
       Effect.gen(function* () {
@@ -1424,71 +1599,80 @@ async function nativeFailureChecks() {
     "invalid send attribution and failed second queued-edit strip commit no partial message or turn item",
   );
 
-  let readyResolve;
-  let readyReject;
-  const ready = new Promise((resolve, reject) => {
-    readyResolve = resolve;
-    readyReject = reject;
-  });
-  const watcher = NodeFS.watch(temporary, (_event, filename) => {
-    if (filename === NodePath.basename(control.readyPath))
-      NodeFSP.readFile(control.readyPath, "utf8").then(
-        (value) => readyResolve(Number(value)),
-        readyReject,
+  for (const operation of ["classify-uploads", "decide"]) {
+    await NodeFSP.rm(control.readyPath, { force: true });
+    const copies = [];
+    let readyResolve;
+    let readyReject;
+    const ready = new Promise((resolve, reject) => {
+      readyResolve = resolve;
+      readyReject = reject;
+    });
+    const watcher = NodeFS.watch(temporary, (_event, filename) => {
+      if (filename === NodePath.basename(control.readyPath))
+        NodeFSP.readFile(control.readyPath, "utf8").then(
+          (value) => readyResolve(Number(value)),
+          readyReject,
+        );
+    });
+    watcher.on("error", readyReject);
+    try {
+      await run(
+        Effect.gen(function* () {
+          const { guestShares, token, shareId } = yield* join();
+          const before = yield* snapshot();
+          const files = yield* storedFiles;
+          yield* control.setMode({
+            operation,
+            ...(operation === "decide" ? { commandType: "thread.guest-message.submit" } : {}),
+            kind: "hang",
+          });
+          const upload = yield* uploads("interrupted.png");
+          const running = yield* guestShares
+            .submit(token, { shareId, text: "Interrupted upload" }, upload)
+            .pipe(Effect.forkScoped);
+          const pid = yield* Effect.promise(() => ready);
+          NodeAssert.ok(Number.isSafeInteger(pid) && pid > 0);
+          const expectedCopies = operation === "decide" ? 1 : 0;
+          NodeAssert.equal(copies.length, expectedCopies, `${operation}: incorrect upload copy boundary`);
+          NodeAssert.equal((yield* storedFiles).length, files.length + expectedCopies);
+          yield* Fiber.interrupt(running);
+          const outcome = yield* Fiber.await(running);
+          NodeAssert.ok(Exit.isFailure(outcome) && Cause.hasInterruptsOnly(outcome.cause));
+          NodeAssert.throws(
+            () => process.kill(pid, 0),
+            { code: "ESRCH" },
+            "interruption must reap the owned planner child",
+          );
+          NodeAssert.deepEqual(
+            yield* snapshot(),
+            before,
+            "interruption must not commit a decision or a rejected receipt",
+          );
+          NodeAssert.deepEqual(yield* storedFiles, files, "interrupted submit must retain no new files");
+          NodeAssert.equal(copies.length, expectedCopies, "interruption must not retry through upstream");
+          if (operation === "classify-uploads") {
+            NodeAssert.equal(
+              (yield* control.calls).some((call) => call.commandType === "thread.guest-message.submit"),
+              false,
+              "interrupted classification must never dispatch the submission",
+            );
+          }
+          yield* control.setMode();
+          yield* guestShares.submit(token, { shareId, text: "Retry after interruption" }, []);
+        }),
+        control.path,
+        `interruption-${operation}`,
+        undefined,
+        false,
+        copies,
       );
-  });
-  watcher.on("error", readyReject);
-  try {
-    await run(
-      Effect.gen(function* () {
-        const { guestShares, token, shareId } = yield* join();
-        const before = yield* snapshot();
-        const files = yield* storedFiles;
-        yield* control.setMode({
-          operation: "decide",
-          commandType: "thread.guest-message.submit",
-          kind: "hang",
-        });
-        const upload = yield* uploads("interrupted.png");
-        const running = yield* guestShares
-          .submit(token, { shareId, text: "Interrupted upload" }, upload)
-          .pipe(Effect.forkScoped);
-        const pid = yield* Effect.promise(() => ready);
-        NodeAssert.ok(Number.isSafeInteger(pid) && pid > 0);
-        NodeAssert.equal(
-          (yield* storedFiles).length,
-          files.length + 1,
-          "interrupt must follow the real upload copy",
-        );
-        yield* Fiber.interrupt(running);
-        const outcome = yield* Fiber.await(running);
-        NodeAssert.ok(Exit.isFailure(outcome) && Cause.hasInterruptsOnly(outcome.cause));
-        NodeAssert.throws(
-          () => process.kill(pid, 0),
-          { code: "ESRCH" },
-          "interruption must reap the owned planner child",
-        );
-        NodeAssert.deepEqual(
-          yield* snapshot(),
-          before,
-          "interruption must not commit a decision or a rejected receipt",
-        );
-        NodeAssert.deepEqual(
-          yield* storedFiles,
-          files,
-          "interrupted submit must remove its copied upload",
-        );
-        yield* control.setMode();
-        yield* guestShares.submit(token, { shareId, text: "Retry after interruption" }, []);
-      }),
-      control.path,
-      "interruption",
-    );
-    scenarios.push(
-      "interrupted native submit reaps its child, removes copied upload, preserves durable state and releases thread lock",
-    );
-  } finally {
-    watcher.close();
+      scenarios.push(
+        `${operation}: interruption reaps its child, preserves files and durable state, and releases the thread lock`,
+      );
+    } finally {
+      watcher.close();
+    }
   }
 }
 
@@ -1518,6 +1702,10 @@ try {
     scenarios.push(
       "five actual native adapter methods preserve unknown nested payloads, DateTime values and generic command fields",
     );
+    await run(directUploadRoundTrip, executable, "native-upload-round-trip", undefined, true);
+    scenarios.push(
+      "native upload adapter preserves empty batches, MIME case folding, attachment order and lone UTF-16 surrogates",
+    );
     await run(directNoopsAndDates, executable, "native-noops-dates", undefined, true);
     scenarios.push(
       "native adapter preserves no-op identity, equal-valued changes and JavaScript expiry parsing",
@@ -1532,6 +1720,7 @@ try {
     "apps/server/src/guest/GuestShareService.ts",
     "apps/server/src/guest/GuestShareService.test.ts",
     "apps/server/src/guest/guestAttachments.ts",
+    "apps/server/src/guest/guest_uploads.rs",
     "apps/server/src/guest/guestView.ts",
     "apps/server/src/auth/PayloadSigner.ts",
     "apps/server/src/auth/ServerSecretStore.ts",
@@ -1627,7 +1816,8 @@ try {
     actual_resource_cleanup: true,
     actual_signing_and_owned_files: true,
     actual_native_guest_decisions: !baselineOnly,
-    note: "Guest decision integration only. Auth, service orchestration and clients remain upstream TypeScript; this does not establish a complete application, mobile or Iroh port.",
+    actual_native_guest_upload_classification: !baselineOnly,
+    note: "Guest decision and upload classification integration only. Auth, service orchestration and clients remain upstream TypeScript; this does not establish a complete application, mobile or Iroh port.",
   };
   if (proofPath !== undefined && proofPath !== "--baseline-only")
     await NodeFSP.writeFile(proofPath, JSON.stringify(proof, null, 2) + "\n");

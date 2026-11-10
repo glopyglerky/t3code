@@ -88,7 +88,7 @@ jobs:
             ${{ env.CARGO_HOME }}/registry
             ${{ env.CARGO_HOME }}/git
             ${{ env.CARGO_TARGET_DIR }}
-          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchain.lock.json', 'rust-toolchain.toml', 'Cargo.lock') }}-${{ steps.scope.outputs.key }}-${{ hashFiles('crates/**', 'tools/src/**', '**/Cargo.toml', '.cargo/**') }}
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchain.lock.json', 'rust-toolchain.toml', 'Cargo.lock') }}-${{ steps.scope.outputs.key }}-${{ hashFiles('crates/**', 'tools/src/**', '**/*.rs', '**/Cargo.toml', '.cargo/**') }}
           restore-keys: |
             cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchain.lock.json', 'rust-toolchain.toml', 'Cargo.lock') }}-${{ steps.scope.outputs.key }}-
       - name: Fetch immutable migration source references
