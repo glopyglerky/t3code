@@ -516,7 +516,7 @@ add("replayed recovered subagent projection allocates nothing", fixture("orphan"
 add("replayed recovered root projection allocates nothing", fixture("roots", state));
 
 const executable = process.argv[2];
-NodeAssert.ok(executable, "Pass the Lust-built provider recovery matrix executable");
+NodeAssert.ok(executable, "Pass the native provider recovery matrix executable");
 const result = NodeChildProcess.spawnSync(executable, [], {
   input: cases.map(({ input }) => JSON.stringify(input)).join("\n") + "\n",
   encoding: "utf8",

@@ -46,7 +46,7 @@ import * as ProviderAdapterRegistry from "../apps/server/src/orchestration-v2/Pr
 import * as ProviderReplayHarness from "../apps/server/src/orchestration-v2/testkit/ProviderReplayHarness.ts";
 import * as ProjectionReplay from "../apps/server/src/orchestration-v2/testkit/ProjectionReplay.ts";
 
-NodeAssert.ok(process.argv[2], "Pass the Lust-built recovery executable");
+NodeAssert.ok(process.argv[2], "Pass the native recovery executable");
 const executable = NodePath.resolve(process.argv[2]);
 const proofPath = process.argv[3];
 const baselineOnly = process.argv.includes("--baseline-only");
@@ -248,7 +248,9 @@ async function run(effect, selection, filename, layerOverride) {
       Effect.scoped,
       Effect.provideService(
         HostProcess.Environment,
-        selection === undefined ? {} : { T3_CODE_LS_RECOVERY_EXECUTABLE: selection },
+        selection === undefined
+          ? { T3_CODE_LS_IMPLEMENTATION: "upstream" }
+          : { T3_CODE_LS_RECOVERY_EXECUTABLE: selection },
       ),
       Effect.provideService(HostProcess.WorkingDirectory, temporary),
       Effect.provide(layerOverride ?? databaseLayer(filename)),

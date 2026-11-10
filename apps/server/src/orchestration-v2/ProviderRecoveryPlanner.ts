@@ -1,4 +1,4 @@
-import { nativeExecutable } from "@t3tools/shared/nativeExecutable";
+import { selectNativeExecutable } from "@t3tools/shared/nativeExecutable";
 // @effect-diagnostics nodeBuiltinImport:off -- This adapter validates a native executable path on the host OS.
 import * as NodePath from "node:path";
 import {
@@ -28,8 +28,8 @@ export class NativeRecoveryPlannerError extends Schema.TaggedError<NativeRecover
   }
 }
 
-type OrphanInput<E> = UpstreamRecovery.OrphanRecoveryInput<E>;
-type RootsInput<E> = UpstreamRecovery.RootRecoveryInput<E>;
+type OrphanInput<E> = Parameters<typeof UpstreamRecovery.endOrphanedNativeSubagent<E>>[0];
+type RootsInput<E> = Parameters<typeof UpstreamRecovery.endRunlessRootTurns<E>>[0];
 type ReconcileInput<E> = Omit<RootsInput<E>, "projection"> & {
   readonly projection: Pick<
     OrchestrationV2ThreadProjection,
@@ -214,7 +214,13 @@ function responseScope<E>(operation: Operation, input: Input<E>) {
 }
 
 export const make = Effect.fn("ProviderRecoveryPlanner.make")(function* () {
-  const executable = nativeExecutable("recovery", (yield* HostProcess.Environment).T3_CODE_LS_RECOVERY_EXECUTABLE);
+  const executable = selectNativeExecutable(
+    "recovery",
+    (yield* HostProcess.Environment).T3_CODE_LS_RECOVERY_EXECUTABLE,
+    yield* HostProcess.Platform,
+    yield* HostProcess.Architecture,
+    (yield* HostProcess.Environment).T3_CODE_LS_IMPLEMENTATION,
+  );
   const runner = yield* ProcessRunner.make();
 
   const native = Effect.fn("ProviderRecoveryPlanner.native")(function* <E>(
@@ -323,8 +329,45 @@ export const make = Effect.fn("ProviderRecoveryPlanner.make")(function* () {
   });
 
   return {
-    endOrphanedNativeSubagent: <E>(input: OrphanInput<E>) => native("orphan", input),
-    endRunlessRootTurns: <E>(input: RootsInput<E>) => native("roots", input),
-    reconcile: <E>(input: ReconcileInput<E>) => native("reconcile", input),
+    endOrphanedNativeSubagent: Effect.fn("ProviderRecoveryPlanner.endOrphanedNativeSubagent")(
+      function* <E>(input: OrphanInput<E>) {
+        return yield* executable === undefined
+          ? UpstreamRecovery.endOrphanedNativeSubagent(input)
+          : native("orphan", input);
+      },
+    ),
+    endRunlessRootTurns: Effect.fn("ProviderRecoveryPlanner.endRunlessRootTurns")(function* <E>(
+      input: RootsInput<E>,
+    ) {
+      return yield* executable === undefined
+        ? UpstreamRecovery.endRunlessRootTurns(input)
+        : native("roots", input);
+    }),
+    reconcile: Effect.fn("ProviderRecoveryPlanner.reconcile")(function* <E>(
+      input: ReconcileInput<E>,
+    ) {
+      if (executable !== undefined) return yield* native("reconcile", input);
+      const events: Array<OrchestrationV2DomainEvent> = [];
+      for (const subagent of input.projection.subagents ?? []) {
+        events.push(
+          ...(yield* UpstreamRecovery.endOrphanedNativeSubagent({
+            projection: input.projection,
+            subagentId: subagent.id,
+            status: input.status,
+            now: input.now,
+            ...(input.completedAt === undefined ? {} : { completedAt: input.completedAt }),
+            emitted: [...input.emitted, ...events],
+            allocateEventId: input.allocateEventId,
+          })),
+        );
+      }
+      events.push(
+        ...(yield* UpstreamRecovery.endRunlessRootTurns({
+          ...input,
+          emitted: [...input.emitted, ...events],
+        })),
+      );
+      return events;
+    }),
   };
 });

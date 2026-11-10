@@ -9,7 +9,7 @@ import {
   resolveDevProtocolClient,
   resolveElectronLaunchCommand,
 } from "./electron-launcher.mjs";
-import { nativeComponents, nativeFile } from "../../../tools/native-artifacts.mjs";
+import { nativeArtifactFiles } from "../../../tools/native-artifacts.mjs";
 import { waitForResources } from "./wait-for-resources.mjs";
 
 const devServerUrl = process.env.VITE_DEV_SERVER_URL?.trim();
@@ -23,6 +23,9 @@ if (!Number.isInteger(port) || port <= 0) {
   throw new Error(`VITE_DEV_SERVER_URL must include an explicit port: ${devServerUrl}`);
 }
 
+const nativeTarget = `${NodeOS.platform()}-${NodeOS.arch()}`;
+const nativeDirectory = "../server/dist/native-bin";
+const nativeWatchFiles = new Set(["manifest.json"]);
 const requiredFiles = [
   "dist-electron/main.cjs",
   "dist-electron/electron/WindowsForegroundFocusWorker.cjs",
@@ -31,10 +34,7 @@ const requiredFiles = [
   "dist-electron/snapShot/RegionSnapShotWorker.cjs",
   "dist-electron/snapShot/SnapShotAccessibilityWorker.cjs",
   "../server/dist/bin.mjs",
-  ...nativeComponents.map(
-    (component) =>
-      `../server/dist/native-bin/${nativeFile(component, `${NodeOS.platform()}-${NodeOS.arch()}`)}`,
-  ),
+  `${nativeDirectory}/manifest.json`,
 ];
 const watchedDirectories = [
   { directory: "dist-electron", files: new Set(["main.cjs", "preload.cjs"]) },
@@ -52,12 +52,8 @@ const watchedDirectories = [
   },
   { directory: "../server/dist", files: new Set(["bin.mjs"]) },
   {
-    directory: "../server/dist/native-bin",
-    files: new Set(
-      nativeComponents.map((component) =>
-        nativeFile(component, `${NodeOS.platform()}-${NodeOS.arch()}`),
-      ),
-    ),
+    directory: nativeDirectory,
+    files: nativeWatchFiles,
   },
 ];
 const forcedShutdownTimeoutMs = 1_500;
@@ -122,6 +118,12 @@ function startApp() {
   if (shuttingDown || currentApp !== null) {
     return;
   }
+
+  // The staged manifest records preexecution selection, including bundles staged
+  // through T3_CODE_LS_NATIVE_DIR after their build-time environment has gone away.
+  const stagedFiles = nativeArtifactFiles(NodePath.join(desktopDir, nativeDirectory), nativeTarget);
+  nativeWatchFiles.clear();
+  for (const file of stagedFiles) nativeWatchFiles.add(file);
 
   const electronArgs = remoteDebuggingPort
     ? [`--remote-debugging-port=${remoteDebuggingPort}`]

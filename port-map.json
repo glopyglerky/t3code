@@ -1,0 +1,605 @@
+{
+  "schema_version": 1,
+  "recovery_commit": "d29a94f3a175eac1f26c548023fedd8695cedfaf",
+  "integrated_upstream_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+  "supported_targets": [
+    "linux-x64",
+    "linux-arm64",
+    "darwin-x64",
+    "darwin-arm64",
+    "win32-x64",
+    "win32-arm64",
+    "browser",
+    "ios",
+    "android"
+  ],
+  "qualification": "No port is accepted by this recovery. Integrated describes recovered source wiring; fresh behavior and platform evidence is still required.",
+  "compiler_policy": "The current full-Rust route is the pinned Lustr coordinator with rustc-derived BlueFe. Direct native Lust coverage requires its own exact compiler identity and behavior receipts. Application CI consumes qualified compiler artifacts.",
+  "layout_policy": "Retain upstream paths. Current crates are preserved during recovery; domain_owner records where their responsibilities belong. Move source separately from behavior changes.",
+  "intentional_divergences": [
+    "redb remains the persistence destination; SQLite stays authoritative until the complete transaction boundary is qualified.",
+    "Iroh remains the transport destination; existing Connect identity, account and lifecycle behavior stays required."
+  ],
+  "ports": [
+    {
+      "id": "command-and-dispatch-policy",
+      "state": "integrated",
+      "domain_owner": "apps/server/src/orchestration-v2",
+      "reviewed_upstream_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "upstream_sources": [
+        {
+          "path": "apps/server/src/orchestration-v2/CommandPolicy.ts",
+          "blob": "02f329e536feb328e1c34674c7506023f2b916a2"
+        }
+      ],
+      "rust_paths": [
+        "crates/core/src/command_policy.rs",
+        "crates/core/src/dispatch.rs",
+        "crates/core/src/bin/t3-code-ls-policy.rs"
+      ],
+      "adapter_paths": [
+        "apps/server/src/orchestration-v2/CommandPolicy.ts",
+        "apps/server/src/orchestration-v2/NativeCommandPolicy.ts",
+        "apps/server/src/orchestration-v2/NativeDispatchFacts.ts",
+        "apps/server/src/orchestration-v2/NativeDispatchPolicy.ts",
+        "packages/shared/src/nativeExecutable.ts"
+      ],
+      "platform_routes": [
+        {
+          "targets": [
+            "linux-x64"
+          ],
+          "state": "integrated",
+          "implementation": "rust",
+          "compiler_route": "lustr-bluefe-compatibility",
+          "acceptance_evidence": {},
+          "host_requirements": "GNU Linux x86_64, GLIBC >= 2.39; explicit upstream mode retains the original implementation."
+        },
+        {
+          "targets": [
+            "linux-arm64",
+            "darwin-x64",
+            "darwin-arm64",
+            "win32-x64",
+            "win32-arm64"
+          ],
+          "state": "integrated",
+          "implementation": "upstream",
+          "compiler_route": "node-upstream",
+          "acceptance_evidence": {}
+        }
+      ],
+      "acceptance_tests": [
+        "tools/check-policy-adapter.mjs",
+        "tools/check-policy.mjs",
+        "tools/check-dispatch.mjs"
+      ],
+      "retired_paths": [],
+      "notes": "Recovered production policy service calls Rust. Target execution and the normal client flow need fresh qualification; no acceptance claimed.",
+      "rust_crates": [
+        "crates/core"
+      ]
+    },
+    {
+      "id": "project-commands",
+      "state": "integrated",
+      "domain_owner": "apps/server/src/project",
+      "reviewed_upstream_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "upstream_sources": [
+        {
+          "path": "apps/server/src/orchestration-v2/ProjectCommands.ts",
+          "blob": "d4c1abb3ceda2c1fabbc6ce7aabe86e853fa328e"
+        },
+        {
+          "path": "apps/server/src/project/ProjectService.ts",
+          "blob": "9afaf22087a33f00be02cacc122a53bf259bf705"
+        }
+      ],
+      "rust_paths": [
+        "crates/core/src/project_commands.rs",
+        "crates/core/src/project_commands_wire.rs",
+        "crates/core/src/bin/t3-code-ls-project.rs"
+      ],
+      "adapter_paths": [
+        "apps/server/src/orchestration-v2/ProjectCommands.ts",
+        "apps/server/src/orchestration-v2/NativeProjectCommands.ts",
+        "apps/server/src/project/ProjectService.ts",
+        "packages/shared/src/nativeExecutable.ts"
+      ],
+      "platform_routes": [
+        {
+          "targets": [
+            "linux-x64"
+          ],
+          "state": "integrated",
+          "implementation": "rust",
+          "compiler_route": "lustr-bluefe-compatibility",
+          "acceptance_evidence": {},
+          "host_requirements": "GNU Linux x86_64, GLIBC >= 2.39; explicit upstream mode retains the original implementation."
+        },
+        {
+          "targets": [
+            "linux-arm64",
+            "darwin-x64",
+            "darwin-arm64",
+            "win32-x64",
+            "win32-arm64"
+          ],
+          "state": "integrated",
+          "implementation": "upstream",
+          "compiler_route": "node-upstream",
+          "acceptance_evidence": {}
+        }
+      ],
+      "acceptance_tests": [
+        "tools/check-project-adapter.mjs",
+        "tools/check-project-runtime.mjs",
+        "tools/check-project-commands.mjs"
+      ],
+      "retired_paths": [],
+      "notes": "Planner replacement remains behind ProjectService, preserving authorization, workspace locking, receipt ownership and forced-deletion partial progress. SQLite is still authoritative.",
+      "rust_crates": [
+        "crates/core"
+      ]
+    },
+    {
+      "id": "guest-share-decisions",
+      "state": "integrated",
+      "domain_owner": "apps/server/src/guest",
+      "reviewed_upstream_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "upstream_sources": [
+        {
+          "path": "apps/server/src/orchestration-v2/GuestShareDecider.ts",
+          "blob": "00f9f8ae3b9d224668b54d387492b7afeefda75b"
+        },
+        {
+          "path": "apps/server/src/guest/GuestShareService.ts",
+          "blob": "36be1d1e21c274b97d39ecec82e3e70fb677883a"
+        }
+      ],
+      "rust_paths": [
+        "crates/core/src/guest_share.rs",
+        "crates/core/src/guest_share_wire.rs",
+        "crates/core/src/bin/t3-code-ls-guest-share.rs"
+      ],
+      "adapter_paths": [
+        "apps/server/src/orchestration-v2/NativeGuestShare.ts",
+        "apps/server/src/orchestration-v2/GuestShareDecider.ts",
+        "apps/server/src/guest/GuestShareService.ts",
+        "packages/shared/src/nativeExecutable.ts"
+      ],
+      "platform_routes": [
+        {
+          "targets": [
+            "linux-x64"
+          ],
+          "state": "integrated",
+          "implementation": "rust",
+          "compiler_route": "lustr-bluefe-compatibility",
+          "acceptance_evidence": {},
+          "host_requirements": "GNU Linux x86_64, GLIBC >= 2.39; explicit upstream mode retains the original implementation."
+        },
+        {
+          "targets": [
+            "linux-arm64",
+            "darwin-x64",
+            "darwin-arm64",
+            "win32-x64",
+            "win32-arm64"
+          ],
+          "state": "integrated",
+          "implementation": "upstream",
+          "compiler_route": "node-upstream",
+          "acceptance_evidence": {}
+        }
+      ],
+      "acceptance_tests": [
+        "tools/check-guest-share-adapter.mjs",
+        "tools/check-guest-share-runtime.mjs",
+        "tools/check-guest-share.mjs"
+      ],
+      "retired_paths": [],
+      "notes": "Recovered decision adapter retains the existing event sink, upload authorization and cleanup lifecycle.",
+      "rust_crates": [
+        "crates/core"
+      ]
+    },
+    {
+      "id": "provider-recovery",
+      "state": "integrated",
+      "domain_owner": "apps/server/src/orchestration-v2",
+      "reviewed_upstream_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "upstream_sources": [
+        {
+          "path": "packages/provider-core/src/server/subagentProjection.ts",
+          "blob": "dbd929192e04d4ecd815f1e7455aeb761d264144"
+        },
+        {
+          "path": "apps/server/src/orchestration-v2/ProviderRuntimeRecoveryService.ts",
+          "blob": "89e43e5b1ede4ea4aa7de4bda6b892851de77a24"
+        }
+      ],
+      "rust_paths": [
+        "crates/core/src/provider_recovery.rs",
+        "crates/core/src/provider_recovery_wire.rs",
+        "crates/core/src/bin/t3-code-ls-recovery.rs"
+      ],
+      "adapter_paths": [
+        "apps/server/src/orchestration-v2/ProviderRecoveryPlanner.ts",
+        "apps/server/src/orchestration-v2/ProviderRuntimeRecoveryService.ts",
+        "packages/provider-core/src/server/subagentProjection.ts",
+        "packages/shared/src/nativeExecutable.ts"
+      ],
+      "platform_routes": [
+        {
+          "targets": [
+            "linux-x64"
+          ],
+          "state": "integrated",
+          "implementation": "rust",
+          "compiler_route": "lustr-bluefe-compatibility",
+          "acceptance_evidence": {},
+          "host_requirements": "GNU Linux x86_64, GLIBC >= 2.39; explicit upstream mode retains the original implementation."
+        },
+        {
+          "targets": [
+            "linux-arm64",
+            "darwin-x64",
+            "darwin-arm64",
+            "win32-x64",
+            "win32-arm64"
+          ],
+          "state": "integrated",
+          "implementation": "upstream",
+          "compiler_route": "node-upstream",
+          "acceptance_evidence": {}
+        }
+      ],
+      "acceptance_tests": [
+        "tools/check-recovery-adapter.mjs",
+        "tools/check-recovery-runtime.mjs",
+        "tools/check-provider-recovery.mjs"
+      ],
+      "retired_paths": [],
+      "notes": "Recovered startup/shutdown and live reconciliation routes use the Rust planner. Effect still owns IDs, interruption and the authoritative transaction.",
+      "rust_crates": [
+        "crates/core"
+      ]
+    },
+    {
+      "id": "provider-maintenance",
+      "state": "integrated",
+      "domain_owner": "packages/provider-core/src/server",
+      "reviewed_upstream_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "upstream_sources": [
+        {
+          "path": "packages/provider-core/src/server/maintenanceResolver.ts",
+          "blob": "bb60e8e8657142287d0e1124c4f756b68e518977"
+        }
+      ],
+      "rust_paths": [
+        "crates/core/src/maintenance.rs",
+        "crates/core/src/maintenance_wire.rs",
+        "crates/core/src/bin/t3-code-ls-maintenance.rs"
+      ],
+      "adapter_paths": [
+        "packages/provider-core/src/server/NativeMaintenancePolicy.ts",
+        "packages/provider-core/src/server/maintenanceResolver.ts",
+        "packages/shared/src/nativeExecutable.ts"
+      ],
+      "platform_routes": [
+        {
+          "targets": [
+            "linux-x64"
+          ],
+          "state": "integrated",
+          "implementation": "rust",
+          "compiler_route": "lustr-bluefe-compatibility",
+          "acceptance_evidence": {},
+          "host_requirements": "GNU Linux x86_64, GLIBC >= 2.39; explicit upstream mode retains the original implementation."
+        },
+        {
+          "targets": [
+            "linux-arm64",
+            "darwin-x64",
+            "darwin-arm64",
+            "win32-x64",
+            "win32-arm64"
+          ],
+          "state": "integrated",
+          "implementation": "upstream",
+          "compiler_route": "node-upstream",
+          "acceptance_evidence": {}
+        }
+      ],
+      "acceptance_tests": [
+        "tools/check-maintenance-adapter.mjs",
+        "tools/check-maintenance-runtime.mjs",
+        "tools/check-maintenance.mjs"
+      ],
+      "retired_paths": [],
+      "notes": "The Rust ownership and installation decision port is integrated. Filesystem observation, credential handling and actual provider updates remain in their existing services.",
+      "rust_crates": [
+        "crates/core"
+      ]
+    },
+    {
+      "id": "codex-structured-generation",
+      "state": "integrated",
+      "domain_owner": "apps/server/src/textGeneration",
+      "reviewed_upstream_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "upstream_sources": [
+        {
+          "path": "apps/server/src/textGeneration/CodexTextGeneration.ts",
+          "blob": "cbf095b303abcade02a57a36f2fd58a1cc0e9113"
+        }
+      ],
+      "rust_paths": [
+        "crates/core/src/codex_generation.rs",
+        "crates/core/src/codex_generation_wire.rs",
+        "crates/core/src/bin/t3-code-ls-generate.rs"
+      ],
+      "adapter_paths": [
+        "apps/server/src/textGeneration/CodexTextGeneration.ts",
+        "apps/server/src/textGeneration/NativeCodexTextGeneration.ts",
+        "apps/server/src/textGeneration/WindowsCodexTextGeneration.ts",
+        "packages/shared/src/nativeExecutable.ts"
+      ],
+      "platform_routes": [
+        {
+          "targets": [
+            "linux-x64"
+          ],
+          "state": "integrated",
+          "implementation": "rust",
+          "compiler_route": "lustr-bluefe-compatibility",
+          "acceptance_evidence": {},
+          "host_requirements": "GNU Linux x86_64, GLIBC >= 2.39; explicit upstream mode retains the original implementation."
+        },
+        {
+          "targets": [
+            "linux-arm64",
+            "darwin-x64",
+            "darwin-arm64"
+          ],
+          "state": "integrated",
+          "implementation": "upstream",
+          "compiler_route": "node-upstream",
+          "acceptance_evidence": {}
+        },
+        {
+          "targets": [
+            "win32-x64",
+            "win32-arm64"
+          ],
+          "state": "integrated",
+          "implementation": "upstream",
+          "compiler_route": "node-upstream",
+          "acceptance_evidence": {}
+        }
+      ],
+      "acceptance_tests": [
+        "tools/check-generation-adapter.mjs",
+        "tools/check-generation-runtime.mjs",
+        "tools/check-generation.mjs"
+      ],
+      "retired_paths": [],
+      "notes": "Qualified Linux selection enters the Rust process runtime. Other hosts retain their original implementation. Selection occurs before effects and native errors never retry through the old implementation.",
+      "rust_crates": [
+        "crates/core"
+      ]
+    },
+    {
+      "id": "codex-process-runtime",
+      "state": "integrated",
+      "domain_owner": "apps/server/src/provider",
+      "reviewed_upstream_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "upstream_sources": [
+        {
+          "path": "apps/server/src/provider/CodexProvider.ts",
+          "blob": "2d546b36a9b1525b853c75b9552511d6f4c9bdd7"
+        },
+        {
+          "path": "apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts",
+          "blob": "9eb80cf7a2143e40c41e3640e6a5fd5f48336eb7"
+        }
+      ],
+      "rust_paths": [
+        "crates/core/src/provider_process.rs",
+        "crates/core/src/bin/t3-code-ls-provider.rs"
+      ],
+      "adapter_paths": [
+        "apps/server/src/provider/CodexAppServerProcess.ts",
+        "apps/server/src/provider/CodexProvider.ts",
+        "apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts",
+        "packages/shared/src/nativeExecutable.ts"
+      ],
+      "platform_routes": [
+        {
+          "targets": [
+            "linux-x64"
+          ],
+          "state": "integrated",
+          "implementation": "rust",
+          "compiler_route": "lustr-bluefe-compatibility",
+          "acceptance_evidence": {},
+          "host_requirements": "GNU Linux x86_64, GLIBC >= 2.39; explicit upstream mode retains the original implementation."
+        },
+        {
+          "targets": [
+            "linux-arm64",
+            "darwin-x64",
+            "darwin-arm64"
+          ],
+          "state": "integrated",
+          "implementation": "upstream",
+          "compiler_route": "node-upstream",
+          "acceptance_evidence": {}
+        },
+        {
+          "targets": [
+            "win32-x64",
+            "win32-arm64"
+          ],
+          "state": "integrated",
+          "implementation": "upstream",
+          "compiler_route": "node-upstream",
+          "acceptance_evidence": {}
+        }
+      ],
+      "acceptance_tests": [
+        "tools/check-provider-adapter.mjs",
+        "tools/check-provider.mjs"
+      ],
+      "retired_paths": [],
+      "notes": "Rust owns the Unix child-process protocol transport. Existing provider schemas, orchestration event translation and Windows process path remain required.",
+      "rust_crates": [
+        "crates/core"
+      ]
+    },
+    {
+      "id": "redb-persistence",
+      "state": "candidate",
+      "domain_owner": "apps/server/src/persistence",
+      "reviewed_upstream_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "upstream_sources": [
+        {
+          "path": "apps/server/src/orchestration-v2/EventSink.ts",
+          "blob": "81e64ddb709206d279dbefc942bbb3316663e279"
+        },
+        {
+          "path": "apps/server/src/orchestration-v2/EffectOutbox.ts",
+          "blob": "92e1e01ad43f2a4a4b43b0a3dad7038d75a9725a"
+        },
+        {
+          "path": "apps/server/src/orchestration-v2/CommandReceiptStore.ts",
+          "blob": "f39de342b552625bc51be4bae819e0cec468ce4c"
+        }
+      ],
+      "rust_paths": [
+        "crates/storage/src/lib.rs",
+        "crates/storage/src/backend.rs",
+        "crates/storage/src/outbox.rs",
+        "crates/storage/src/project_service.rs",
+        "crates/storage/src/thread_service.rs",
+        "crates/storage/src/sqlite_import.rs"
+      ],
+      "adapter_paths": [
+        "apps/server/src/orchestration-v2/NativeDatabase.ts",
+        "apps/server/src/orchestration-v2/NativeEffectOutbox.ts",
+        "apps/server/src/orchestration-v2/EventSink.ts"
+      ],
+      "platform_routes": [
+        {
+          "targets": [
+            "linux-x64"
+          ],
+          "state": "candidate",
+          "implementation": "sqlite-authoritative; redb-component",
+          "compiler_route": "lustr-bluefe-compatibility",
+          "acceptance_evidence": {}
+        }
+      ],
+      "acceptance_tests": [
+        "tools/check-native-database.mjs",
+        "tools/check-native-outbox-worker.mjs",
+        "tools/check-outbox-claim-recovery.mjs",
+        "tools/check-project-persistence.mjs"
+      ],
+      "retired_paths": [],
+      "notes": "Candidate only. redb is the intended destination, but the restored application continues its complete SQLite transaction boundary. Migration, replay, crash recovery and backup/restore must qualify before authoritative cutover.",
+      "rust_crates": [
+        "crates/core",
+        "crates/storage"
+      ]
+    },
+    {
+      "id": "iroh-transport",
+      "state": "candidate",
+      "domain_owner": "infra/relay",
+      "reviewed_upstream_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "upstream_sources": [
+        {
+          "path": "apps/server/src/ws.ts",
+          "blob": "cf2606c3a130592bd5c47f701d468d2fd0b82b7b"
+        }
+      ],
+      "rust_paths": [
+        "crates/transport/src/bridge.rs",
+        "crates/transport/src/identity.rs",
+        "crates/transport/src/admission_file.rs"
+      ],
+      "adapter_paths": [],
+      "platform_routes": [
+        {
+          "targets": [
+            "linux-x64"
+          ],
+          "state": "candidate",
+          "implementation": "separate-transport-component",
+          "compiler_route": "lustr-bluefe-compatibility",
+          "acceptance_evidence": {}
+        }
+      ],
+      "acceptance_tests": [
+        "crates/transport/tests/bridge.rs",
+        "crates/transport/tests/admission_file.rs",
+        "tools/check-connection.mjs"
+      ],
+      "retired_paths": [],
+      "notes": "Authenticated byte forwarding is a candidate transport. It does not replace Connect account, pairing, session, browser, push or mobile reconnect services.",
+      "rust_crates": [
+        "crates/core",
+        "crates/transport"
+      ]
+    },
+    {
+      "id": "native-api-component",
+      "state": "candidate",
+      "domain_owner": "apps/server",
+      "reviewed_upstream_commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+      "upstream_sources": [
+        {
+          "path": "packages/contracts/src/orchestrationV2.ts",
+          "blob": "eb0e9d43190dc28fe745a8636ce7c66b70ecd512"
+        },
+        {
+          "path": "apps/server/src/ws.ts",
+          "blob": "cf2606c3a130592bd5c47f701d468d2fd0b82b7b"
+        }
+      ],
+      "rust_paths": [
+        "crates/app/src/lib.rs",
+        "crates/app/src/service.rs",
+        "crates/app/src/provider.rs",
+        "crates/app/src/http.rs"
+      ],
+      "adapter_paths": [],
+      "platform_routes": [
+        {
+          "targets": [
+            "linux-x64"
+          ],
+          "state": "candidate",
+          "implementation": "standalone-component",
+          "compiler_route": "lustr-bluefe-compatibility",
+          "acceptance_evidence": {}
+        }
+      ],
+      "acceptance_tests": [
+        "crates/app/tests/application.rs",
+        "crates/app/tests/http.rs",
+        "crates/app/tests/provider_session.rs",
+        "crates/app/tests/provider_runtime.rs"
+      ],
+      "retired_paths": [],
+      "notes": "Preserved component work. Its POST /rpc protocol does not replace the application WebSocket contract and is not the product entry point. Move reusable internals into their domains only in separate behavior-preserving changes.",
+      "rust_crates": [
+        "crates/core",
+        "crates/storage",
+        "crates/app"
+      ]
+    }
+  ],
+  "backend_selection": "Select before execution. Compatible Linux GNU x86_64 defaults to Rust; other hosts use the retained upstream implementation. Explicit per-component native overrides fail visibly. T3_CODE_LS_IMPLEMENTATION=upstream provides a controlled original baseline. No retry through another implementation."
+}

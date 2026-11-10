@@ -6,7 +6,7 @@ import * as Result from "effect/Result";
 import { upstreamSource } from "./upstream-source.mjs";
 
 const executable = process.argv[2];
-NodeAssert.ok(executable, "Pass the Lust-built guest-share executable");
+NodeAssert.ok(executable, "Pass the native guest-share executable");
 const maximumBytes = 128 * 1024 * 1024;
 const source = upstreamSource("apps/server/src/orchestration-v2/GuestShareDecider.ts");
 const contracts = upstreamSource("packages/contracts/src/guestShare.ts");

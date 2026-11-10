@@ -1,0 +1,59 @@
+{
+  "schema": 1,
+  "compatibility": {
+    "repository": "https://github.com/glopyglerky/blueFe",
+    "release": "preview-2026.11.09-2",
+    "host": "x86_64-unknown-linux-gnu",
+    "compiler_revision": "1b74388e196ee8813f38ba9eeb6d4ab43b6b1071",
+    "coordinator_revision": "07470b20464bf097c3c88983124aff56c5e44f9a",
+    "archive": "bluefe-lustr-preview-2026.11.09-2-x86_64-unknown-linux-gnu.tar.zst",
+    "root": "bluefe-lustr",
+    "glibc_minimum": "2.39",
+    "host_adapter": {
+      "producer_interpreter": "/usr/lib/ld-linux-x86-64.so.2",
+      "fallback_loader": "/lib64/ld-linux-x86-64.so.2",
+      "location": "host-tools beside the verified package, when the producer interpreter is absent",
+      "linker_dispatch_source": "https://github.com/glopyglerky/blueFe/blob/1b74388e196ee8813f38ba9eeb6d4ab43b6b1071/src/tools/lld-wrapper/src/main.rs",
+      "scope": "Generated launcher wrappers and explicit sysroot selection. The archive, ELF files and libraries stay byte-for-byte unchanged. Compiler/application tests qualify the selected host route separately."
+    },
+    "scope": "Produced BlueFe rustc through the Lustr compatibility coordinator. Linux x86_64 execution and Wasm linking are qualified by the producer; application acceptance is recorded separately. Native Lust is absent.",
+    "assets": [
+      {
+        "name": "bluefe-lustr-preview-2026.11.09-2-x86_64-unknown-linux-gnu.tar.zst",
+        "size": 247378460,
+        "sha256": "c57bfc06b7e2b3a7619d503b7f8d7c7ebc8fe29693fc296d21e27fa2baa836fb"
+      },
+      {
+        "name": "payload-manifest.json",
+        "size": 282380,
+        "sha256": "5be11a5ded7f604ae9d341aec38644d94a514133f9587250cf257c360957792e"
+      },
+      {
+        "name": "platform.json",
+        "size": 28231,
+        "sha256": "4c68b2765257d61dcf7a750eca152c2de6e575e46de1a27c69f5f192c9eb9580"
+      },
+      {
+        "name": "qualification.json",
+        "size": 1697,
+        "sha256": "4563ee3887eaa8583c2f3ea59f18c6255c268983a5d936ac705ccd9dd3feb8cc"
+      },
+      {
+        "name": "SHA256SUMS",
+        "size": 475,
+        "sha256": "030be119c4c0a1e909607d3135b64f1a21bdf575cea8597b705d77c83dc55455"
+      },
+      {
+        "name": "source-components.json",
+        "size": 2528,
+        "sha256": "38bc9ddb19843fb1e79feaa95dbaae8f9a54591b330136bca8f058aee57ccf5b"
+      }
+    ]
+  },
+  "native_lust": {
+    "metadata": "lust-toolchain.json",
+    "revision": "6339fbb104d6adda4be7e6be7dc637a6a9e5586b",
+    "route": "Historical separately qualified native Lust subset, retained without changing compiler identity. The compatibility archive does not supply this compiler.",
+    "qualification": "Existing receipts qualify only their exact application and compiler inputs; rerun adapter gates after changes."
+  }
+}

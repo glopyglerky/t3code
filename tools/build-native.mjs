@@ -9,16 +9,65 @@ import {
   nativeFile,
   nativeHash,
   nativeTargets,
+  nativeTargetQualified,
+  isQualifiedNativeHost,
   stageNativeArtifacts,
+  stageUpstreamManifest,
 } from "./native-artifacts.mjs";
+import { flagsForSysroot } from "./install-toolchain.mjs";
 
 const root = NodePath.resolve(NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)), "..");
 const destination = NodePath.resolve(root, process.argv[2] ?? "bin");
 const targetKey = process.env.T3_CODE_LS_NATIVE_TARGET ?? `${NodeOS.platform()}-${NodeOS.arch()}`;
 const rustTarget = nativeTargets[targetKey];
 if (!rustTarget) throw new Error(`Unsupported native component target: ${targetKey}`);
+const requestedImplementation = process.env.T3_CODE_LS_IMPLEMENTATION;
+if (
+  requestedImplementation !== undefined &&
+  !["native", "upstream"].includes(requestedImplementation)
+)
+  throw new Error("T3_CODE_LS_IMPLEMENTATION must be native or upstream");
+const incompatibleHost =
+  targetKey === `${NodeOS.platform()}-${NodeOS.arch()}` && !isQualifiedNativeHost();
+const upstreamSelection =
+  requestedImplementation === "upstream"
+    ? "explicit-upstream"
+    : !nativeTargetQualified(targetKey)
+      ? "unqualified-platform"
+      : incompatibleHost
+        ? "incompatible-host-libc"
+        : undefined;
+const explicitHelper = Object.keys(process.env).find(
+  (name) => /^T3_CODE_LS_.*_EXECUTABLE$/.test(name) && process.env[name] !== undefined,
+);
+if (
+  upstreamSelection &&
+  (process.env.T3_CODE_LS_TOOLCHAIN !== undefined ||
+    process.env.T3_CODE_LS_SYSROOT !== undefined ||
+    explicitHelper ||
+    requestedImplementation === "native")
+) {
+  throw new Error(
+    requestedImplementation === "upstream"
+      ? "Explicit upstream service selection conflicts with native compiler/helper settings"
+      : `Native service components are not qualified for ${targetKey}; remove explicit native compiler/helper selection to retain the upstream implementations`,
+  );
+}
 if (process.env.T3_CODE_LS_NATIVE_DIR) {
+  const selected = JSON.parse(
+    NodeFS.readFileSync(NodePath.join(process.env.T3_CODE_LS_NATIVE_DIR, "manifest.json"), "utf8"),
+  );
+  if (
+    (requestedImplementation === "upstream" && selected.implementation !== "upstream") ||
+    (requestedImplementation === "native" && selected.implementation === "upstream") ||
+    (incompatibleHost && selected.implementation !== "upstream")
+  )
+    throw new Error(
+      "Selected component bundle conflicts with the requested implementation or host qualification",
+    );
   stageNativeArtifacts(NodePath.resolve(process.env.T3_CODE_LS_NATIVE_DIR), destination, targetKey);
+} else if (upstreamSelection) {
+  stageUpstreamManifest(destination, targetKey, upstreamSelection);
 } else {
   const toolchain = process.env.T3_CODE_LS_TOOLCHAIN;
   if (!toolchain)
@@ -32,20 +81,28 @@ if (process.env.T3_CODE_LS_NATIVE_DIR) {
   if (!NodeFS.existsSync(NodePath.resolve(sysroot, "lib/rustlib", rustTarget, "lib"))) {
     throw new Error(`Missing produced target sysroot for ${rustTarget}: set T3_CODE_LS_SYSROOT`);
   }
-  const target = NodePath.resolve(process.env.CARGO_TARGET_DIR ?? NodePath.resolve(root, "target"));
+  const requestedTarget = process.env.CARGO_TARGET_DIR;
+  if (!requestedTarget || !NodePath.isAbsolute(requestedTarget))
+    throw new Error(
+      "Set CARGO_TARGET_DIR to an absolute generated-output directory outside the checkout",
+    );
+  NodeFS.mkdirSync(requestedTarget, { recursive: true });
+  const target = NodeFS.realpathSync(requestedTarget);
+  const canonicalRoot = NodeFS.realpathSync(root);
+  if (target === canonicalRoot || target.startsWith(`${canonicalRoot}${NodePath.sep}`))
+    throw new Error("CARGO_TARGET_DIR must be outside the source checkout");
   const flags =
     process.env.CARGO_ENCODED_RUSTFLAGS?.split("\x1f") ??
     process.env.RUSTFLAGS?.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g)?.map((flag) =>
       flag.replace(/^(["'])(.*)\1$/, "$2"),
     ) ??
     [];
-  if (flags.some((flag) => flag === "--sysroot" || flag.startsWith("--sysroot=")))
-    throw new Error("Select sysroot with T3_CODE_LS_SYSROOT instead of Rust flags");
   const env = {
     ...process.env,
+    CARGO: NodePath.resolve(toolchain, "bin/cargo"),
     RUSTC: NodePath.resolve(toolchain, "bin/rustc"),
     RUSTDOC: NodePath.resolve(toolchain, "bin/rustdoc"),
-    CARGO_ENCODED_RUSTFLAGS: [...flags, "--sysroot", sysroot].join("\x1f"),
+    CARGO_ENCODED_RUSTFLAGS: flagsForSysroot(sysroot, flags.join("\x1f")),
   };
   NodeChildProcess.execFileSync(
     NodePath.resolve(toolchain, "bin/lustr"),

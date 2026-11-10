@@ -27,9 +27,10 @@ import {
   selectCodexAppServerCommand,
 } from "../apps/server/src/provider/CodexAppServerProcess.ts";
 
-NodeAssert.ok(process.argv[2], "Pass the Lust-built provider executable");
+NodeAssert.ok(process.argv[2], "Pass the native provider executable");
 const executable = NodePath.resolve(process.argv[2]);
 const hostPlatform = Effect.runSync(HostProcess.Platform);
+const hostArchitecture = Effect.runSync(HostProcess.Architecture);
 const selectionOnly = process.argv.includes("--selection-only");
 const proofPath = process.argv[3] === "--selection-only" ? undefined : process.argv[3];
 const upstreamPeer = NodeURL.fileURLToPath(
@@ -54,7 +55,7 @@ let nextAudit = 0;
 await NodeFSP.writeFile(
   peer,
   `#!${process.execPath}
-import { writeFileSync } from "node:fs";
+import { appendFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 writeFileSync(process.env.T3LS_ADAPTER_AUDIT, JSON.stringify({
   pid: process.pid, ppid: process.ppid, cwd: process.cwd(), argv: process.argv.slice(2),
@@ -63,7 +64,12 @@ writeFileSync(process.env.T3LS_ADAPTER_AUDIT, JSON.stringify({
   selector: process.env.T3_CODE_LS_PROVIDER_EXECUTABLE ?? null,
   originator: process.env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE,
 }));
-if (process.env.T3LS_ADAPTER_MODE === "exit") {
+if (process.env.T3LS_ADAPTER_INVOCATIONS) {
+  appendFileSync(process.env.T3LS_ADAPTER_INVOCATIONS, JSON.stringify(process.argv.slice(2)) + "\\n");
+}
+if (process.argv[2] === "--version") {
+  process.stdout.write("codex-cli 0.159.0\\n", () => process.exit(0));
+} else if (process.env.T3LS_ADAPTER_MODE === "exit") {
   process.stderr.write("Error: synthetic Codex startup failure\\n", () => process.exit(7));
 } else if (["status", "hold"].includes(process.env.T3LS_ADAPTER_MODE)) {
   let pending = "";
@@ -121,7 +127,9 @@ function settings(binaryPath = peer) {
 function observe(options = {}) {
   return {
     selected: options.selected,
+    implementation: options.implementation,
     host: options.host ?? hostPlatform,
+    architecture: options.architecture ?? hostArchitecture,
     cwd: options.cwd ?? process.cwd(),
     handles: [],
     commands: [],
@@ -172,13 +180,16 @@ function run(operation, observation, options) {
   }).pipe(
     Effect.scoped,
     Effect.provide(NodeServices.layer),
-    Effect.provideService(
-      HostProcess.Environment,
-      observation.selected === undefined
+    Effect.provideService(HostProcess.Environment, {
+      ...(observation.implementation === undefined
         ? {}
-        : { T3_CODE_LS_PROVIDER_EXECUTABLE: observation.selected },
-    ),
+        : { T3_CODE_LS_IMPLEMENTATION: observation.implementation }),
+      ...(observation.selected === undefined
+        ? {}
+        : { T3_CODE_LS_PROVIDER_EXECUTABLE: observation.selected }),
+    }),
     Effect.provideService(HostProcess.Platform, observation.host),
+    Effect.provideService(HostProcess.Architecture, observation.architecture),
     Effect.provideService(HostProcess.WorkingDirectory, observation.cwd),
     Effect.provideService(HostProcess.HomeDirectory, home),
   );
@@ -277,7 +288,10 @@ try {
   await check("unset selection uses the default native process runtime", async () => {
     const input = { command: "codex", args: ["app-server", "argument with spaces"] };
     const result = value(await run(selectCodexAppServerCommand(input), observe()));
-    NodeAssert.equal(result.command, NodeURL.fileURLToPath(new URL("../bin/t3-code-ls-provider", import.meta.url)));
+    NodeAssert.equal(
+      result.command,
+      NodeURL.fileURLToPath(new URL("../bin/t3-code-ls-provider", import.meta.url)),
+    );
     NodeAssert.deepEqual(result.args.slice(result.args.indexOf("--") + 1), input.args);
   });
   await check(
@@ -365,7 +379,10 @@ try {
           `${kind} ${selected ? "native" : "direct"} runs generated RPC, approval, notification, and cleanup`,
           async () => {
             const auditPath = NodePath.join(temporary, `audit-${nextAudit++}`);
-            const observation = observe({ selected });
+            const observation = observe({
+              selected,
+              implementation: selected === undefined ? "upstream" : undefined,
+            });
             const result = value(
               await run(
                 conversation(
@@ -393,9 +410,10 @@ try {
             NodeAssert.equal(observation.handles.length, 1);
             NodeAssert.ok(!observation.commands[0].args.join("\0").includes(credential));
             if (selected) NodeAssert.equal(audit.ppid, observation.handles[0].pid);
+            else NodeAssert.equal(audit.ppid, process.pid);
             if (kind === "session") {
               NodeAssert.equal(observation.scopes.length, 1);
-              NodeAssert.equal(observation.scopes[0].command, selected ?? NodeURL.fileURLToPath(new URL("../bin/t3-code-ls-provider", import.meta.url)));
+              NodeAssert.equal(observation.scopes[0].command, selected ?? peer);
               NodeAssert.equal(observation.scopes[0].shared, true);
               NodeAssert.equal(observation.scopes[0].threadId, "thread-provider-integration");
               NodeAssert.ok(!observation.scopes[0].args.join("\0").includes(credential));
@@ -445,7 +463,10 @@ try {
           `${kind} ${selected ? "native" : "direct"} keeps provider exit code and stderr diagnosis`,
           async () => {
             const auditPath = NodePath.join(temporary, `audit-${nextAudit++}`);
-            const observation = observe({ selected });
+            const observation = observe({
+              selected,
+              implementation: selected === undefined ? "upstream" : undefined,
+            });
             const operation = Effect.gen(function* () {
               const client = yield* open(
                 kind,
@@ -494,6 +515,54 @@ try {
         assertClosed(observation, audit);
       },
     );
+    for (const selection of [
+      {
+        name: "explicit upstream Linux",
+        host: "linux",
+        architecture: "x64",
+        implementation: "upstream",
+      },
+      { name: "macOS host selection", host: "darwin", architecture: "arm64" },
+      { name: "Linux arm64 host selection", host: "linux", architecture: "arm64" },
+      { name: "native helper", selected: executable },
+    ]) {
+      await check(
+        `failed status probe preserves version diagnostics for ${selection.name}`,
+        async () => {
+          const auditPath = NodePath.join(temporary, `audit-${nextAudit++}`);
+          const invocationsPath = `${auditPath}-invocations`;
+          const observation = observe(selection);
+          const result = value(
+            await run(
+              CodexProvider.checkCodexProviderStatus(
+                settings(),
+                undefined,
+                environment(auditPath, {
+                  T3LS_ADAPTER_MODE: "exit",
+                  T3LS_ADAPTER_INVOCATIONS: invocationsPath,
+                }),
+              ),
+              observation,
+            ),
+          );
+          const originalSelected = selection.selected === undefined;
+          NodeAssert.equal(result.status, "error");
+          NodeAssert.equal(result.installed, true);
+          NodeAssert.match(result.message, /synthetic Codex startup failure/);
+          NodeAssert.equal(result.version, originalSelected ? "0.159.0" : null);
+          NodeAssert.equal(observation.handles.length, originalSelected ? 2 : 1);
+          const invocations = (await NodeFSP.readFile(invocationsPath, "utf8"))
+            .trim()
+            .split("\n")
+            .map((line) => JSON.parse(line));
+          NodeAssert.deepEqual(invocations, [
+            ["app-server", "--fixture", "space argument"],
+            ...(originalSelected ? [["--version"]] : []),
+          ]);
+          assertClosed(observation, JSON.parse(await NodeFSP.readFile(auditPath, "utf8")));
+        },
+      );
+    }
     await check(
       "configured launcher exit never falls back to original version command",
       async () => {
@@ -502,7 +571,7 @@ try {
           mode: 0o700,
         });
         const auditPath = NodePath.join(temporary, `audit-${nextAudit++}`);
-        const observation = observe({ selected: broken });
+        const observation = observe({ selected: broken, implementation: "upstream" });
         const result = value(
           await run(
             CodexProvider.checkCodexProviderStatus(settings(), undefined, environment(auditPath)),
@@ -594,7 +663,10 @@ try {
         `${selected ? "native" : "direct"} session survives 129 interrupted unanswered requests`,
         async () => {
           const auditPath = NodePath.join(temporary, `audit-${nextAudit++}`);
-          const observation = observe({ selected });
+          const observation = observe({
+            selected,
+            implementation: selected === undefined ? "upstream" : undefined,
+          });
           value(
             await run(
               Effect.gen(function* () {

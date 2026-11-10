@@ -19,32 +19,44 @@
   "inventory_format": "SHA-256 of ASCII compact JSON arrays [path,mode,kind,Git-object-id], sorted by path; source objects come from the pinned commit, never the working tree.",
   "source_surfaces": {
     "server": {
-      "path_prefixes": ["apps/server/"],
+      "path_prefixes": [
+        "apps/server/"
+      ],
       "entries": 1600,
       "inventory_sha256": "d6991ddd0ae2fc5b254688fc349c02ff9991d7d600e53bd9e89eed18ae50778b"
     },
     "contracts": {
-      "path_prefixes": ["packages/contracts/"],
+      "path_prefixes": [
+        "packages/contracts/"
+      ],
       "entries": 110,
       "inventory_sha256": "298584f222b7683d581855244cc035b767f3acf7604b09dfa26ba8160999fea3"
     },
     "client_runtime": {
-      "path_prefixes": ["packages/client-runtime/"],
+      "path_prefixes": [
+        "packages/client-runtime/"
+      ],
       "entries": 396,
       "inventory_sha256": "a48e1f4f6d9a08d791dc622c9ba63a98fa68f07f1588088cd00ce2b7321d13b8"
     },
     "web": {
-      "path_prefixes": ["apps/web/"],
+      "path_prefixes": [
+        "apps/web/"
+      ],
       "entries": 1917,
       "inventory_sha256": "2b70cf5da894b02d25a9337b1d4a050f2bbb25b2cd963e2376fec19eabd0e87e"
     },
     "desktop": {
-      "path_prefixes": ["apps/desktop/"],
+      "path_prefixes": [
+        "apps/desktop/"
+      ],
       "entries": 293,
       "inventory_sha256": "5f2d34e114f8d270481bccf0b4aac4f86a7b4894133f8499ca10aae9851ca6fe"
     },
     "mobile": {
-      "path_prefixes": ["apps/mobile/"],
+      "path_prefixes": [
+        "apps/mobile/"
+      ],
       "entries": 1700,
       "inventory_sha256": "5915dbf0b3322b39f5bbe135c2eb00d8fd50d092c4b5911723749d22c06476df"
     },
@@ -73,9 +85,26 @@
       "inventory_sha256": "69758ba5c49c15c1979ff88cb9674170cf88aa164435bb869ae19c47d1bed42a"
     },
     "shared": {
-      "path_prefixes": ["packages/shared/"],
+      "path_prefixes": [
+        "packages/shared/"
+      ],
       "entries": 237,
       "inventory_sha256": "f63b7806baadd17829dbe2be125666a4ba813ad201915802cf9bff19b596ac9e"
     }
+  },
+  "detection": {
+    "channel": "nightly",
+    "tag": "v0.1.9-nightly.20261110.4452",
+    "release_id": 439894945,
+    "commit": "822671581383a357c5dc8d3ea9984b408c3e03c6",
+    "published_at": "2026-11-10T02:59:35Z",
+    "release_url": "https://github.com/pingdotgg/t3code/releases/tag/v0.1.9-nightly.20261110.4452",
+    "status": "detected-not-integrated"
+  },
+  "integration": {
+    "commit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+    "recovered_from": "d29a94f3a175eac1f26c548023fedd8695cedfaf",
+    "preserved_rust_base": "0be60f85268daece83e616b97f6fc421ec83ee6b",
+    "meaning": "The upstream field pins the restored implementation baseline. Detection does not advance integration; integration does not establish full application qualification."
   }
 }

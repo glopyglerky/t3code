@@ -1842,6 +1842,7 @@ const buildDesktopBundlesUnlocked = Effect.fn("buildDesktopBundlesUnlocked")(fun
   repoRoot: string,
   appVersion: string,
   verbose: boolean,
+  nativeTarget?: string,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -1867,7 +1868,10 @@ const buildDesktopBundlesUnlocked = Effect.fn("buildDesktopBundlesUnlocked")(fun
           ChildProcess.make(spawnCommand.command, spawnCommand.args, {
             cwd: repoRoot,
             shell: spawnCommand.shell,
-            env: { APP_VERSION: appVersion },
+            env: {
+              APP_VERSION: appVersion,
+              ...(nativeTarget ? { T3_CODE_LS_NATIVE_TARGET: nativeTarget } : {}),
+            },
             extendEnv: true,
           }),
           { label: "vp run build:desktop", verbose },
@@ -3681,7 +3685,12 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
 
   if (!options.skipBuild) {
     yield* Effect.log("[desktop-artifact] Building desktop/server/web artifacts...");
-    yield* buildDesktopBundlesUnlocked(repoRoot, appVersion, options.verbose);
+    yield* buildDesktopBundlesUnlocked(
+      repoRoot,
+      appVersion,
+      options.verbose,
+      `${options.platform === "mac" ? "darwin" : options.platform === "win" ? "win32" : options.platform}-${options.arch}`,
+    );
   }
 
   const requiredBuildInputs = [

@@ -1,88 +1,85 @@
-name: Native application with source-built Lustr and BlueFe
+name: Rust components with packaged Lustr and BlueFe
 
 on:
-  push:
-    branches: [main, 'codex/t3code-ls-native-*']
+  workflow_call:
   workflow_dispatch:
 
 permissions:
   contents: read
 
-concurrency:
-  group: native-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   qualify:
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 40
     env:
-      CARGO_BUILD_JOBS: '2'
-      CARGO_INCREMENTAL: '0'
-      CARGO_PROFILE_DEV_DEBUG: '0'
-      CARGO_PROFILE_TEST_DEBUG: '0'
-      GIT_TERMINAL_PROMPT: '0'
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      GIT_TERMINAL_PROMPT: "0"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
-      - name: Reserve space on the disposable hosted runner
-        run: |
-          echo "T3_CODE_LS_BOOTSTRAP_DIR=$RUNNER_TEMP/t3-bluefe" >> "$GITHUB_ENV"
-          echo "T3_CODE_LS_TOOLCHAIN=$RUNNER_TEMP/t3-toolchain" >> "$GITHUB_ENV"
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
-          df -h "$RUNNER_TEMP"
-
-      - name: Compile the source bootstrap coordinator
-        run: |
-          rustup toolchain install nightly-2026-11-03 --profile minimal
-          rustc +nightly-2026-11-03 --edition=2024 tools/src/bin/t3code-ls-bootstrap.rs -o "$RUNNER_TEMP/t3-bootstrap"
-          rustc +nightly-2026-11-03 --edition=2024 --test tools/src/bin/t3code-ls-bootstrap.rs -o "$RUNNER_TEMP/t3-bootstrap-tests"
-          "$RUNNER_TEMP/t3-bootstrap-tests"
-
-      - name: Restore the produced compiler payload
-        id: compiler-cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
-          path: ${{ env.T3_CODE_LS_TOOLCHAIN }}
-          key: bluefe-ubuntu24-x64-${{ hashFiles('tools/src/bin/t3code-ls-bootstrap.rs') }}
-          # Migrate the first source-built payload without changing its runtime hashes.
-          restore-keys: bluefe-ubuntu24-x64-a5e6c6e44ce94dbe65b79381195c5c9666956323c06763d1361fed2075f80138
+          node-version: 26.12.1
 
-      - name: Validate a restored compiler before using it
-        if: steps.compiler-cache.outputs.cache-matched-key != ''
-        run: '"$RUNNER_TEMP/t3-bootstrap" --restore "$T3_CODE_LS_TOOLCHAIN"'
-
-      - name: Build pinned BlueFe and Lustr sources
-        if: steps.compiler-cache.outputs.cache-matched-key == ''
-        run: '"$RUNNER_TEMP/t3-bootstrap"'
-
-      - name: Save the verified compiler payload
-        if: steps.compiler-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: ${{ env.T3_CODE_LS_TOOLCHAIN }}
-          key: bluefe-ubuntu24-x64-${{ hashFiles('tools/src/bin/t3code-ls-bootstrap.rs') }}
-
-      - name: Fetch the immutable upstream behavior reference
-        run: git fetch --no-tags --depth=1 https://github.com/pingdotgg/t3code.git 521ac7c218b3faa74281fb72fc36ce74a0951fb3
-
-      - name: Test the application with the produced compiler
+      - name: Select isolated generated output
         run: |
-          export CARGO_ENCODED_RUSTFLAGS=$'--sysroot\x1f'"$T3_CODE_LS_TOOLCHAIN"
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/t3code-ls-cargo" >> "$GITHUB_ENV"
+
+      - name: Test compiler-package admission and host launchers
+        run: node --test tools/install-toolchain.test.mjs tools/native-packaging.test.mjs
+
+      - name: Cache immutable compiler downloads
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          key: bluefe-package-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchain.lock.json') }}
+          path: |
+            ${{ runner.temp }}/t3code-ls-toolchains/preview-2026.11.09-2/bluefe-lustr-preview-2026.11.09-2-x86_64-unknown-linux-gnu.tar.zst
+            ${{ runner.temp }}/t3code-ls-toolchains/preview-2026.11.09-2/source-components.json
+            ${{ runner.temp }}/t3code-ls-toolchains/preview-2026.11.09-2/payload-manifest.json
+            ${{ runner.temp }}/t3code-ls-toolchains/preview-2026.11.09-2/platform.json
+            ${{ runner.temp }}/t3code-ls-toolchains/preview-2026.11.09-2/qualification.json
+            ${{ runner.temp }}/t3code-ls-toolchains/preview-2026.11.09-2/SHA256SUMS
+
+      - name: Install and verify the pinned compiler package
+        id: toolchain
+        run: node tools/install-toolchain.mjs --destination "$RUNNER_TEMP/t3code-ls-toolchains/preview-2026.11.09-2"
+
+      - name: Fetch the immutable upstream and recovery references
+        run: |
+          upstream_commit="$(node --input-type=module -e 'import fs from "node:fs"; const commit = JSON.parse(fs.readFileSync("upstream.lock.json", "utf8")).upstream.commit; if (!/^[0-9a-f]{40}$/.test(commit)) throw Error("invalid upstream pin"); console.log(commit)')"
+          git fetch --no-tags --depth=1 https://github.com/pingdotgg/t3code.git "$upstream_commit"
+          git fetch --no-tags --depth=1 origin d29a94f3a175eac1f26c548023fedd8695cedfaf
+
+      - name: Test Rust components and migration guards
+        run: |
           "$T3_CODE_LS_TOOLCHAIN/bin/lustr" --bluefe-root "$T3_CODE_LS_TOOLCHAIN" test --locked --workspace --all-targets
           "$T3_CODE_LS_TOOLCHAIN/bin/lustr" --bluefe-root "$T3_CODE_LS_TOOLCHAIN" run --locked -p t3code-ls-tools -- check-source
           "$T3_CODE_LS_TOOLCHAIN/bin/lustr" --bluefe-root "$T3_CODE_LS_TOOLCHAIN" run --locked -p t3code-ls-tools -- check-upstream-readme
 
-      - name: Retain compiler provenance
+      - name: Stage core binaries for actual application adapters
+        run: node tools/build-native.mjs
+
+      - name: Retain exact adapter binaries and manifest
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: hybrid-native-binaries
+          path: bin/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Retain compiler identity
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: source-built-toolchain-proof
+          name: packaged-toolchain-proof
           path: |
-            ${{ env.T3_CODE_LS_TOOLCHAIN }}/toolchain-proof.json
-            ${{ env.T3_CODE_LS_TOOLCHAIN }}/source-identity.txt
-            ${{ env.T3_CODE_LS_TOOLCHAIN }}/payload.sha256
-          if-no-files-found: ignore
-          retention-days: 7
+            toolchain.lock.json
+            lust-toolchain.json
+            ${{ runner.temp }}/t3code-ls-toolchains/preview-2026.11.09-2/installation-proof.json
+          if-no-files-found: warn
+          retention-days: 14

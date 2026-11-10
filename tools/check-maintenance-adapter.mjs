@@ -27,7 +27,7 @@ import * as ProviderMaintenanceRunner from "../apps/server/src/provider/provider
 import * as ProviderRegistry from "../apps/server/src/provider/ProviderRegistry.ts";
 import * as ModelManifest from "../apps/server/src/provider/ModelManifest.ts";
 
-NodeAssert.ok(process.argv[2], "Pass the Lust-built maintenance executable");
+NodeAssert.ok(process.argv[2], "Pass the native maintenance executable");
 const executable = NodePath.resolve(process.argv[2]);
 const proofPath = process.argv[3];
 const root = NodeURL.fileURLToPath(new URL("../", import.meta.url));

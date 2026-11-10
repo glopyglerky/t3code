@@ -1,51 +1,67 @@
 # t3code-ls design and divergence
 
-The default tree contains native Rust components and an application API/CLI.
-The former application clients, server adapters and foreign-language tooling
-are retired; the native application's implemented subset does not replace their
-full behavior. Their source is available
-in Git history and upstream at the immutable `upstream.lock.json` revision.
-No vendored reference checkout belongs in this product checkout.
+## One application
 
-Core protocol/decision code, redb storage and Iroh transport retain their existing
-contracts. Standalone redb does not substitute for an installed application's
-shared transaction boundary. Iroh carries authenticated bytes; it does not
-supply Connect identities, account pairing, push or mobile lifecycle.
+The original T3 Code server and clients remain the product. The fork replaces
+implementation behind existing services and public contracts. Required source
+stays at its upstream path until the Rust replacement runs in the real
+application and passes the affected behavior and platform gates.
 
-The native application shares one redb event/projection/receipt transaction
-boundary for its project and thread service operations. Its provider runtime
-records intent before submitting external work and never automatically replays
-an uncertain action. Raw provider events and native session projections have
-their own namespace; they are not upstream orchestration events. A process-wide
-server lock prevents another native server from declaring live sessions crashed.
-Database multiwriter support alone does not establish provider process ownership.
+The restored application source comes from `d29a94f`; the overlay preserves the
+later Rust work on `0be60f8`. Source recovery does not certify the historical
+application. [Recovery evidence](../porting/recovery.md) records current checks.
+The root Cargo workspace coexists with upstream's pnpm workspace. The port map
+assigns preserved crates to application domains; moves are separate from behavior
+changes. There is no second vendored application or permanent legacy tree.
 
-After a normal stop, a native session records confirmed process cleanup. After
-a hard restart, process ownership is unknown and cleanup-dependent lifecycle
-operations remain blocked. A workspace change cannot silently reuse a provider
-thread created with different execution settings. Project/thread deletion and
-the general outbox executor remain outside the implemented service subset.
+## Contracts and integration
 
-KDE capture depended on executable JavaScript/QML, including scripts embedded
-through Rust strings. That helper was retired as a unit. The remaining optional
-Hyprland and resource-monitor crates contain Rust implementation with upstream
-platform dependencies. They are excluded from the root workspace and have no
-qualified desktop delivery path.
+Server adapters preserve upstream authorization, request and response schemas,
+errors, cancellation and event ordering. Policy, project, guest-share, recovery,
+maintenance and Unix Codex runtime/generation code already have native callers.
+Choose an implementation before execution. Never retry an uncertain effect
+through another backend. Default native selection is restricted to Linux GNU x86_64 with GLIBC 2.39 or
+newer. Other hosts retain the original implementation. Explicit native overrides
+fail through their existing error contracts; `T3_CODE_LS_IMPLEMENTATION=upstream`
+selects the original backend for controlled comparisons before effects begin.
 
-Native Lust subset acceptance and full Rust via the Lustr/BlueFe coordinator
-remain different checks. Compiler and database pins remain explicit. Whole-stack
-memory safety is unverified: upstream libraries, cryptographic native code,
-OS interfaces, compiler payloads and provider processes are separate dependencies.
+`crates/app` is preserved experimental native service work. Its JSON-RPC HTTP
+protocol and raw Codex events do not implement the existing clients' WebSocket
+and orchestration contracts. Its tests cannot qualify the normal application.
 
-The hosted source bootstrap produces a relocatable compiler payload with a full
-file manifest. A cache hit is not qualification: restored source identities,
-hashes, native execution, procedural macros, tests, Wasm linkage and native Lust
-execution must pass before the application is compiled. The old root-layout
-qualification record remains historical evidence for its own source revision;
-it does not qualify the current application or removed adapters.
+## Persistence and transport
 
-Historical reference source/tree pins live in `reference-history.json`. Read a
-historical file using `git show <historical_snapshot_commit>:<snapshot_prefix>/<path>`.
-The pinned upstream reference trees contain some files omitted by the original
-snapshot, and Alchemy's historical gitlink differs; both identities are recorded.
-Source/licensing history is preserved without restoring reference caches.
+Production SQLite still owns the common transaction containing events,
+projections, command receipts and outbox work. The redb store is a candidate for
+that complete boundary, not an independently authoritative participant. Cutover
+requires migration, rejected-command receipts, replay, ordering, worker lifecycle,
+crash recovery and backup/restore tests. Once redb accepts writes, switching back
+to an older SQLite copy is not a safe rollback without transferring those writes.
+SurrealDB is not part of this recovery.
+
+Iroh currently forwards authenticated bytes. Connect identity, pairing,
+authorization, browser/desktop/mobile connection lifecycle and reconnect behavior
+remain in the inherited application. Replacing those responsibilities requires
+separate acceptance through the same client messages.
+
+## Compilers and evidence
+
+`toolchain.lock.json` pins the application compiler package and its actual
+producer identities. Full Rust runs through Lustr's compatibility coordinator
+and rustc-derived BlueFe. `lust-toolchain.json` separately pins native Lust's
+supported subset. A compatibility build does not establish native Lustr coverage.
+Application CI consumes verified artifacts; compiler bootstrap belongs upstream.
+
+The port map distinguishes candidate, integrated, accepted, retired and synced.
+Tests qualify their exercised behavior and platforms. A Linux component result
+cannot retire Windows code, prove a browser Wasm build or replace a mobile UI.
+`check-source` validates source retention and migration records, never the
+absence of other languages. Source mappings survive retirement so future
+upstream changes still identify affected Rust modules.
+
+`upstream.lock.json` separates detected nightly, integrated source and qualified
+application revisions. Updating a pin does not incorporate behavior. Differential
+reference checkouts live outside the product tree. Existing licenses, reference
+pins and source history remain intact. Workspace-owned Rust forbids unsafe code;
+upstream dependencies, OS interfaces and external providers remain separate
+boundaries, so no whole-stack memory-safety claim follows.

@@ -13,7 +13,11 @@ import {
   RunId,
   RuntimeRequestId,
   ThreadId,
+  TurnItemId,
   type OrchestrationV2Command,
+  type OrchestrationV2ProviderTurn,
+  type OrchestrationV2Subagent,
+  type OrchestrationV2TurnItem,
   type OrchestrationV2ThreadProjection,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -41,6 +45,79 @@ const sessionId = ProviderSessionId.make("session:restart");
 const attemptId = RunAttemptId.make("attempt:restart");
 const scratchProjectId = ProjectId.make("project:scratch");
 const now = DateTime.makeUnsafe("2026-10-03T12:00:00.000Z");
+
+function makeSubagent(
+  id: string,
+  overrides: Partial<OrchestrationV2Subagent> = {},
+): OrchestrationV2Subagent {
+  return {
+    id: NodeId.make(id),
+    threadId,
+    runId,
+    parentNodeId: NodeId.make("node:restart"),
+    origin: "provider_native",
+    createdBy: "agent",
+    driver,
+    providerInstanceId: instanceId,
+    providerThreadId,
+    childThreadId: null,
+    nativeTaskRef: null,
+    prompt: "",
+    title: null,
+    model: null,
+    status: "running",
+    result: null,
+    startedAt: now,
+    completedAt: null,
+    updatedAt: now,
+    ...overrides,
+  };
+}
+
+function turnItemFields(id: string) {
+  return {
+    id: TurnItemId.make(id),
+    threadId,
+    runId,
+    nodeId: null,
+    providerThreadId,
+    providerTurnId: null,
+    nativeItemRef: null,
+    parentItemId: null,
+    ordinal: 0,
+    status: "running" as const,
+    title: null,
+    startedAt: now,
+    completedAt: null,
+    updatedAt: now,
+  };
+}
+
+type SubagentTurnItem = Extract<OrchestrationV2TurnItem, { type: "subagent" }>;
+function makeSubagentTurnItem(
+  id: string,
+  overrides: Partial<SubagentTurnItem> = {},
+): SubagentTurnItem {
+  return {
+    ...turnItemFields(id),
+    type: "subagent",
+    subagentId: NodeId.make(`${id}:subagent`),
+    origin: "provider_native",
+    driver,
+    providerInstanceId: instanceId,
+    childThreadId: null,
+    prompt: "",
+    result: null,
+    ...overrides,
+  };
+}
+
+function makeCommandTurnItem(
+  id: string,
+  input: string,
+): Extract<OrchestrationV2TurnItem, { type: "command_execution" }> {
+  return { ...turnItemFields(id), type: "command_execution", input };
+}
 
 function makeProjection() {
   return {
@@ -85,9 +162,14 @@ function makeProjection() {
       {
         id: ProviderTurnId.make("turn:restart"),
         providerThreadId,
+        nodeId: NodeId.make("node:restart"),
         runAttemptId: attemptId,
+        nativeTurnRef: null,
+        ordinal: 1,
         status: "running",
-      },
+        startedAt: now,
+        completedAt: null,
+      } satisfies OrchestrationV2ProviderTurn,
     ],
     runtimeRequests: [],
     attempts: [],
@@ -249,9 +331,9 @@ it.effect.each([
     Effect.gen(function* () {
       let committed: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | undefined;
       const recovery = yield* ProviderRuntimeRecovery.make.pipe(
-        Effect.provide(NodeServices.layer),
         Effect.provide(
           Layer.mergeAll(
+            NodeServices.layer,
             ServerSettings.layerTest({
               continueThreadsAfterServerUpdate: enabled,
               projectSettingsOverrides:
@@ -302,17 +384,17 @@ it.effect.each([
 it.effect("lets a cut blocking delegate_task wake its parent like an async task", () =>
   Effect.gen(function* () {
     const base = makeProjection();
-    const task = (id: string, completionWake: "settled_only" | "always", status: string) => ({
-      id: NodeId.make(id),
-      threadId,
-      runId,
-      origin: "app_owned",
-      childThreadId: ThreadId.make(`thread:${id}`),
-      driver,
-      providerInstanceId: instanceId,
-      completionWake,
-      status,
-    });
+    const task = (
+      id: string,
+      completionWake: "settled_only" | "always",
+      status: OrchestrationV2Subagent["status"],
+    ) =>
+      makeSubagent(id, {
+        origin: "app_owned",
+        childThreadId: ThreadId.make(`thread:${id}`),
+        completionWake,
+        status,
+      });
     const projection = {
       ...base,
       subagents: [
@@ -323,9 +405,9 @@ it.effect("lets a cut blocking delegate_task wake its parent like an async task"
     } as unknown as OrchestrationV2ThreadProjection;
     let committed: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | undefined;
     const recovery = yield* ProviderRuntimeRecovery.make.pipe(
-      Effect.provide(NodeServices.layer),
       Effect.provide(
         Layer.mergeAll(
+          NodeServices.layer,
           ServerSettings.layerTest({ continueThreadsAfterServerUpdate: true }),
           Layer.mock(ProjectionStore.ProjectionStoreV2)({
             getRecoveryThreadIds: () => Effect.succeed([threadId]),
@@ -361,14 +443,6 @@ it.effect.each(["running", "waiting"])(
   (status) =>
     Effect.gen(function* () {
       const base = makeProjection();
-      const item = (id: string, extra: Record<string, unknown>) => ({
-        id,
-        threadId,
-        runId,
-        nodeId: null,
-        status: "running",
-        ...extra,
-      });
       const projection = {
         ...base,
         runs: [{ ...base.runs[0]!, status }],
@@ -376,22 +450,21 @@ it.effect.each(["running", "waiting"])(
           { ...base.providerTurns[0]!, status: status === "waiting" ? "completed" : "running" },
         ],
         turnItems: [
-          item("item:native", {
-            type: "subagent",
+          makeSubagentTurnItem("item:native", {
             origin: "provider_native",
             providerThreadId: ProviderThreadId.make("provider-thread:child"),
-            nativeItemRef: { driver, nativeId: "agent-1" },
+            nativeItemRef: { driver, nativeId: "agent-1", strength: "strong" },
             title: "Sleeper",
             childThreadId: ThreadId.make("thread:child"),
           }),
-          item("item:shell", { type: "command_execution", providerThreadId, input: "ls" }),
+          makeCommandTurnItem("item:shell", "ls"),
         ],
       } as unknown as OrchestrationV2ThreadProjection;
       let committed: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | undefined;
       const recovery = yield* ProviderRuntimeRecovery.make.pipe(
-        Effect.provide(NodeServices.layer),
         Effect.provide(
           Layer.mergeAll(
+            NodeServices.layer,
             ServerSettings.layerTest({ continueThreadsAfterServerUpdate: true }),
             Layer.mock(ProjectionStore.ProjectionStoreV2)({
               getRecoveryThreadIds: () => Effect.succeed([threadId]),
@@ -515,9 +588,9 @@ it.effect("prepares no continuation for background work another provider thread 
     } as unknown as OrchestrationV2ThreadProjection;
     const writes: Parameters<EventSink.EventSinkV2["Service"]["writeWithEffects"]>[0][] = [];
     const recovery = yield* ProviderRuntimeRecovery.make.pipe(
-      Effect.provide(NodeServices.layer),
       Effect.provide(
         Layer.mergeAll(
+          NodeServices.layer,
           ServerSettings.layerTest({ continueThreadsAfterServerUpdate: true }),
           Layer.mock(ProjectionStore.ProjectionStoreV2)({
             getRecoveryThreadIds: () => Effect.succeed([threadId]),
@@ -543,9 +616,9 @@ it.effect("prepares no continuation for background work another provider thread 
       turnItems: [{ ...projection.turnItems[0]!, providerThreadId }],
     } as OrchestrationV2ThreadProjection;
     const ownRecovery = yield* ProviderRuntimeRecovery.make.pipe(
-      Effect.provide(NodeServices.layer),
       Effect.provide(
         Layer.mergeAll(
+          NodeServices.layer,
           ServerSettings.layerTest({ continueThreadsAfterServerUpdate: true }),
           Layer.mock(ProjectionStore.ProjectionStoreV2)({
             getRecoveryThreadIds: () => Effect.succeed([threadId]),
@@ -574,17 +647,10 @@ it.effect("prepares no continuation for background work another provider thread 
 );
 
 const backgroundSubagent = {
-  turnItem: {
-    id: "turn-item:background-subagent",
-    runId,
-    nodeId: null,
-    providerThreadId,
-    providerInstanceId: instanceId,
-    type: "subagent",
-    subagentId: "subagent:background",
+  turnItem: makeSubagentTurnItem("turn-item:background-subagent", {
+    subagentId: NodeId.make("subagent:background"),
     title: "Background reviewer",
-    status: "running",
-  },
+  }),
   work: {
     kind: "subagent" as const,
     label: "Background reviewer",
@@ -592,16 +658,7 @@ const backgroundSubagent = {
   },
 };
 const devServer = {
-  turnItem: {
-    id: "turn-item:dev-server",
-    runId,
-    nodeId: null,
-    providerThreadId,
-    providerInstanceId: instanceId,
-    type: "command_execution",
-    input: "vp run dev",
-    status: "running",
-  },
+  turnItem: makeCommandTurnItem("turn-item:dev-server", "vp run dev"),
   work: { kind: "shell" as const, label: "vp run dev", id: "turn-item:dev-server" },
 };
 
@@ -621,27 +678,15 @@ it.effect.each([
         runs: [{ ...base.runs[0]!, status }],
         providerTurns: [{ ...base.providerTurns[0]!, status: "completed" }],
         turnItems: [background.turnItem],
-        subagents:
-          background === backgroundSubagent
-            ? [
-                {
-                  id: "subagent:background",
-                  runId,
-                  origin: "provider_native",
-                  driver,
-                  providerInstanceId: instanceId,
-                  status: "running",
-                },
-              ]
-            : [],
+        subagents: background === backgroundSubagent ? [makeSubagent("subagent:background")] : [],
       } as unknown as OrchestrationV2ThreadProjection;
       for (const trigger of ["startup", "shutdown"] as const) {
         const commits: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0][] = [];
         const writes: Parameters<EventSink.EventSinkV2["Service"]["writeWithEffects"]>[0][] = [];
         const recovery = yield* ProviderRuntimeRecovery.make.pipe(
-          Effect.provide(NodeServices.layer),
           Effect.provide(
             Layer.mergeAll(
+              NodeServices.layer,
               ServerSettings.layerTest({ continueThreadsAfterServerUpdate: true }),
               Layer.mock(ProjectionStore.ProjectionStoreV2)({
                 getRecoveryThreadIds: () => Effect.succeed([threadId]),
@@ -791,9 +836,9 @@ it.effect("does not cancel or resume a run that completes while shutdown intent 
     let projection = makeProjection();
     const commits: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0][] = [];
     const recovery = yield* ProviderRuntimeRecovery.make.pipe(
-      Effect.provide(NodeServices.layer),
       Effect.provide(
         Layer.mergeAll(
+          NodeServices.layer,
           ServerSettings.layerTest({ continueThreadsAfterServerUpdate: true }),
           Layer.mock(ProjectionStore.ProjectionStoreV2)({
             getRecoveryThreadIds: () => Effect.succeed([threadId]),
@@ -1145,9 +1190,9 @@ it.effect("prepares later threads' continuations when one thread fails", () =>
     const brokenThreadId = ThreadId.make("thread:broken");
     const writes: Parameters<EventSink.EventSinkV2["Service"]["writeWithEffects"]>[0][] = [];
     const recovery = yield* ProviderRuntimeRecovery.make.pipe(
-      Effect.provide(NodeServices.layer),
       Effect.provide(
         Layer.mergeAll(
+          NodeServices.layer,
           ServerSettings.layerTest({ continueThreadsAfterServerUpdate: true }),
           Layer.mock(ProjectionStore.ProjectionStoreV2)({
             getRecoveryThreadIds: () => Effect.succeed([brokenThreadId, threadId]),
@@ -1282,9 +1327,9 @@ it.effect("prepares independent continuations together and waits for durable wri
     let reads = 0;
     let writes = 0;
     const recovery = yield* ProviderRuntimeRecovery.make.pipe(
-      Effect.provide(NodeServices.layer),
       Effect.provide(
         Layer.mergeAll(
+          NodeServices.layer,
           ServerSettings.layerTest({ continueThreadsAfterServerUpdate: true }),
           Layer.mock(ProjectionStore.ProjectionStoreV2)({
             getRecoveryThreadIds: () => Effect.succeed([threadId, ThreadId.make("thread:second")]),
@@ -1321,9 +1366,9 @@ it.effect("prepares independent continuations together and waits for durable wri
 it.effect("skips restart discovery when no project enables continuation", () =>
   Effect.gen(function* () {
     const recovery = yield* ProviderRuntimeRecovery.make.pipe(
-      Effect.provide(NodeServices.layer),
       Effect.provide(
         Layer.mergeAll(
+          NodeServices.layer,
           ServerSettings.layerTest({ continueThreadsAfterServerUpdate: false }),
           Layer.mock(ProjectionStore.ProjectionStoreV2)({}),
           Layer.mock(EventSink.EventSinkV2)({}),

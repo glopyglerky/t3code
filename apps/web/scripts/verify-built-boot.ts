@@ -16,8 +16,10 @@ if (!NodeFS.existsSync(NodePath.join(distDir, "index.html"))) {
   process.exit(1);
 }
 
-const browser = await chromium.launch();
+const executablePath = process.env.T3_CODE_LS_CHROMIUM_EXECUTABLE;
+const browser = await chromium.launch(executablePath ? { executablePath } : {});
 try {
+  console.log(`Browser: ${browser.version()}`);
   const page = await browser.newPage();
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.stack ?? error.message));

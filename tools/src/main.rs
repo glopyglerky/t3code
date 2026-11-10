@@ -1,3 +1,5 @@
+mod migration;
+
 use serde_json::Value;
 use std::{
     env,
@@ -31,89 +33,7 @@ fn git(args: &[&str]) -> Result<Vec<u8>> {
     output(Command::new("git").current_dir(root()).args(args))
 }
 fn check_source() -> Result<()> {
-    let files = git(&["ls-files", "-z"])?;
-    let mut count = 0;
-    for file in files
-        .split(|byte| *byte == 0)
-        .filter(|file| !file.is_empty())
-    {
-        let name = std::str::from_utf8(file)?;
-        let path = root().join(name);
-        if !path.exists() {
-            continue;
-        }
-        if name.starts_with(".repos/") || foreign_code(name) {
-            return Err(format!("retired implementation remains: {name}").into());
-        }
-        count += 1;
-    }
-    if root().join(".repos").exists() {
-        return Err("remove obsolete in-checkout reference caches".into());
-    }
-    println!(
-        "Checked {count} tracked files; no retired implementation languages or reference cache"
-    );
-    Ok(())
-}
-fn foreign_code(name: &str) -> bool {
-    let path = Path::new(name);
-    let extension = path
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or("");
-    matches!(
-        extension,
-        "ts" | "tsx"
-            | "js"
-            | "jsx"
-            | "mjs"
-            | "cjs"
-            | "mts"
-            | "cts"
-            | "py"
-            | "sh"
-            | "bash"
-            | "ps1"
-            | "bat"
-            | "cmd"
-            | "c"
-            | "cc"
-            | "cpp"
-            | "h"
-            | "hpp"
-            | "m"
-            | "mm"
-            | "swift"
-            | "kt"
-            | "kts"
-            | "java"
-            | "rb"
-            | "qml"
-            | "zig"
-            | "html"
-            | "css"
-            | "scss"
-            | "astro"
-            | "sql"
-            | "patch"
-            | "so"
-            | "a"
-            | "wasm"
-            | "tgz"
-    ) || matches!(
-        path.file_name().and_then(|value| value.to_str()),
-        Some(
-            "package.json"
-                | "pre-commit"
-                | "CMakeLists.txt"
-                | "Dockerfile"
-                | "Makefile"
-                | "PKGBUILD"
-                | "gradlew"
-                | "Podfile"
-                | "Brewfile"
-        )
-    )
+    migration::check(&root())
 }
 fn upstream_readme() -> Result<()> {
     let lock: Value = serde_json::from_slice(&fs::read(root().join("upstream.lock.json"))?)?;
@@ -309,25 +229,7 @@ mod tests {
         );
     }
     #[test]
-    fn retired_languages_and_ambiguous_boundaries_are_rejected() {
-        for file in [
-            "src/old.ts",
-            "src/code.py",
-            "package.json",
-            "lib.so",
-            "src/style.css",
-        ] {
-            assert!(foreign_code(file));
-        }
-        for file in [
-            "src/main.rs",
-            "Cargo.toml",
-            "fixtures/input.json",
-            "icon.svg",
-            "LICENSE",
-        ] {
-            assert!(!foreign_code(file));
-        }
+    fn ambiguous_readme_boundaries_are_rejected() {
         assert!(unique_boundary(b"start start", b"start").is_err());
         assert_eq!(unique_boundary(b"before start after", b"start").unwrap(), 7);
     }

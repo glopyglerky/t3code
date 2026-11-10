@@ -648,8 +648,7 @@ it.effect.each([false, true])("groups shutdown commits with rollback=%s", (fail)
     let eventlessNotifications = 0;
     let armed = fail;
     const recovery = yield* ProviderRuntimeRecovery.make.pipe(
-      Effect.provide(NodeServices.layer),
-      Effect.provide(ServerSettings.layerTest()),
+      Effect.provide(Layer.mergeAll(NodeServices.layer, ServerSettings.layerTest())),
       Effect.provideService(EffectOutbox.EffectOutboxV2, {
         ...outbox,
         signalCancellations: (ids) =>
@@ -3099,9 +3098,9 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
           turnItems: [],
         } as unknown as OrchestrationV2ThreadProjection;
         const recovery = yield* ProviderRuntimeRecovery.make.pipe(
-          Effect.provide(NodeServices.layer),
           Effect.provide(
             Layer.mergeAll(
+              NodeServices.layer,
               ServerSettings.layerTest({ continueThreadsAfterServerUpdate: true }),
               Layer.mock(ProjectionStore.ProjectionStoreV2)({
                 getRecoveryThreadIds: () => Effect.succeed([threadId]),
@@ -3286,8 +3285,7 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
       assert.isTrue(Option.isSome(yield* outbox.claimNext({ workerId: "crashed-worker" })));
 
       const recovery = yield* ProviderRuntimeRecovery.make.pipe(
-        Effect.provide(NodeServices.layer),
-        Effect.provide(ServerSettings.layerTest()),
+        Effect.provide(Layer.mergeAll(NodeServices.layer, ServerSettings.layerTest())),
         Effect.provideService(
           EffectWorker.OrchestrationEffectWorkerV2,
           EffectWorker.OrchestrationEffectWorkerV2.of({
@@ -3504,8 +3502,7 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
       });
 
       const recovery = yield* ProviderRuntimeRecovery.make.pipe(
-        Effect.provide(NodeServices.layer),
-        Effect.provide(ServerSettings.layerTest()),
+        Effect.provide(Layer.mergeAll(NodeServices.layer, ServerSettings.layerTest())),
         Effect.provideService(
           EffectWorker.OrchestrationEffectWorkerV2,
           EffectWorker.OrchestrationEffectWorkerV2.of({

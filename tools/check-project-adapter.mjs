@@ -44,7 +44,7 @@ import * as RepositoryIdentityResolver from "../apps/server/src/project/Reposito
 import * as ServerSettings from "../apps/server/src/serverSettings.ts";
 import * as WorkspacePaths from "../apps/server/src/workspace/WorkspacePaths.ts";
 
-NodeAssert.ok(process.argv[2], "Pass the Lust-built project executable");
+NodeAssert.ok(process.argv[2], "Pass the native project executable");
 const executable = NodePath.resolve(process.argv[2]);
 const proofPath = process.argv[3];
 const baselineOnly = process.argv.includes("--baseline-only");
@@ -139,7 +139,9 @@ async function run(effect, selection, name, filename, direct = false) {
       Effect.provide(direct ? NodeServices.layer : serviceLayer(name, filename)),
       Effect.provideService(
         HostProcess.Environment,
-        selection === undefined ? {} : { T3_CODE_LS_PROJECT_EXECUTABLE: selection },
+        selection === undefined
+          ? { T3_CODE_LS_IMPLEMENTATION: "upstream" }
+          : { T3_CODE_LS_PROJECT_EXECUTABLE: selection },
       ),
       Effect.provideService(HostProcess.WorkingDirectory, temporary),
       Effect.provideService(HostProcess.HomeDirectory, temporary),

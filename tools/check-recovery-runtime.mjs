@@ -6,7 +6,7 @@ import * as Effect from "effect/Effect";
 import { upstreamSource } from "./upstream-source.mjs";
 
 const executable = process.argv[2];
-NodeAssert.ok(executable, "Pass the Lust-built recovery executable");
+NodeAssert.ok(executable, "Pass the native recovery executable");
 const maximumBytes = 128 * 1024 * 1024;
 const maximumEvents = 65_536;
 const source = upstreamSource("packages/provider-core/src/server/subagentProjection.ts");

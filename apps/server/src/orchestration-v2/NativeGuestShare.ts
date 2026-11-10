@@ -1,4 +1,4 @@
-import { nativeExecutable } from "@t3tools/shared/nativeExecutable";
+import { selectNativeExecutable } from "@t3tools/shared/nativeExecutable";
 // @effect-diagnostics nodeBuiltinImport:off -- This adapter validates a native executable path on the host OS.
 import * as NodePath from "node:path";
 import {
@@ -32,9 +32,9 @@ export class NativeGuestShareError extends Schema.TaggedError<NativeGuestShareEr
   }
 }
 
-type DecideInput = Upstream.DecideGuestShareInput;
-type SendInput = Upstream.SendGuestMessageInput;
-type CancelGuest = Upstream.CancelGuest;
+type DecideInput = Parameters<typeof Upstream.decideGuestShareCommand>[0];
+type SendInput = Parameters<typeof Upstream.decideGuestMessageSend>[0];
+type CancelGuest = Parameters<typeof Upstream.guestShareAfterCancelledSend>[1];
 type ContextCommand = { readonly context?: OrchestrationMessageContext | undefined };
 type Transition =
   | Upstream.GuestShareCommand
@@ -307,7 +307,13 @@ function allowedRejection(
 }
 
 export const make = Effect.fn("NativeGuestShare.make")(function* () {
-  const executable = nativeExecutable("guest-share", (yield* HostProcess.Environment).T3_CODE_LS_GUEST_SHARE_EXECUTABLE);
+  const executable = selectNativeExecutable(
+    "guest-share",
+    (yield* HostProcess.Environment).T3_CODE_LS_GUEST_SHARE_EXECUTABLE,
+    yield* HostProcess.Platform,
+    yield* HostProcess.Architecture,
+    (yield* HostProcess.Environment).T3_CODE_LS_IMPLEMENTATION,
+  );
   const runner = yield* ProcessRunner.make();
 
   const call = Effect.fn("NativeGuestShare.call")(function* (request: object) {
@@ -382,6 +388,7 @@ export const make = Effect.fn("NativeGuestShare.make")(function* () {
     decideGuestShareCommand: Effect.fn("NativeGuestShare.decideGuestShareCommand")(function* (
       input: DecideInput,
     ) {
+      if (executable === undefined) return Upstream.decideGuestShareCommand(input);
       const response = yield* call({
         operation: "decide",
         thread: wireThread(input.thread),
@@ -404,6 +411,7 @@ export const make = Effect.fn("NativeGuestShare.make")(function* () {
     decideGuestMessageSend: Effect.fn("NativeGuestShare.decideGuestMessageSend")(function* (
       input: SendInput,
     ) {
+      if (executable === undefined) return Upstream.decideGuestMessageSend(input);
       const operation = { type: "send", messageId: input.guestMessageId } as const;
       const response = yield* call({
         operation: "send",
@@ -449,6 +457,8 @@ export const make = Effect.fn("NativeGuestShare.make")(function* () {
     }),
     guestShareAfterCancelledSend: Effect.fn("NativeGuestShare.guestShareAfterCancelledSend")(
       function* (thread: OrchestrationV2AppThread, guest: CancelGuest, now: DateTime.Utc) {
+        if (executable === undefined)
+          return Upstream.guestShareAfterCancelledSend(thread, guest, now);
         const response = yield* call({
           operation: "cancel",
           thread: wireThread(thread),
@@ -468,6 +478,7 @@ export const make = Effect.fn("NativeGuestShare.make")(function* () {
       before: ThreadGuestShare | null,
       after: ThreadGuestShare | null,
     ) {
+      if (executable === undefined) return Upstream.releasedGuestAttachmentIds(before, after);
       const response = yield* call({
         operation: "release",
         before,
@@ -504,6 +515,7 @@ export const make = Effect.fn("NativeGuestShare.make")(function* () {
     withoutGuestAttribution: Effect.fn("NativeGuestShare.withoutGuestAttribution")(function* <
       C extends ContextCommand,
     >(command: C) {
+      if (executable === undefined) return Upstream.withoutGuestAttribution(command);
       const response = yield* call({
         operation: "strip",
         ...(command.context === undefined ? {} : { context: command.context }),

@@ -9,7 +9,7 @@ import {
 } from "./check-project-commands.mjs";
 
 const executable = process.argv[2];
-NodeAssert.ok(executable, "Pass the Lust-built t3-code-ls-project executable");
+NodeAssert.ok(executable, "Pass the native t3-code-ls-project executable");
 const maximumBytes = 128 * 1024 * 1024;
 const maximumValues = 1_048_576;
 let checks = 0;

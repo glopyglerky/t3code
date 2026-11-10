@@ -5,6 +5,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 import * as NodeChildProcess from "node:child_process";
+import * as NodeNet from "node:net";
 
 NodeTest.test(
   "bundled and SEA modules resolve executable sidecars, including unpacked ASARs",
@@ -88,6 +89,26 @@ NodeTest.test(
         ),
         `-C\x1fdebuginfo=0\x1f--sysroot\x1f${toolchain}`,
       );
+      const inheritedFlags = `-C\x1flink-arg=a b\x1f--sysroot\x1f${toolchain}`;
+      const inherited = NodeChildProcess.spawnSync(
+        process.execPath,
+        [new URL("./build-native.mjs", import.meta.url).pathname, output],
+        { env: { ...env, CARGO_ENCODED_RUSTFLAGS: inheritedFlags }, encoding: "utf8" },
+      );
+      NodeAssert.equal(inherited.status, 0, inherited.stderr);
+      NodeAssert.equal(
+        JSON.parse(
+          NodeFS.readFileSync(NodePath.join(target, "x86_64-unknown-linux-gnu/release/flags.json")),
+        ),
+        inheritedFlags,
+      );
+      const conflicting = NodeChildProcess.spawnSync(
+        process.execPath,
+        [new URL("./build-native.mjs", import.meta.url).pathname, output],
+        { env: { ...env, CARGO_ENCODED_RUSTFLAGS: "--sysroot\x1f/another" }, encoding: "utf8" },
+      );
+      NodeAssert.notEqual(conflicting.status, 0);
+      NodeAssert.match(conflicting.stderr, /Conflicting.*sysroot/);
       const stage = NodePath.join(root, "archive/native-bin");
       stageNativeArtifacts(output, stage, "linux-x64");
       const archive = NodePath.join(root, "fixture.tar");
@@ -127,7 +148,130 @@ NodeTest.test(
         },
       );
       NodeAssert.notEqual(cross.status, 0);
-      NodeAssert.match(cross.stderr, /Missing produced target sysroot/);
+      NodeAssert.match(cross.stderr, /not qualified/);
+    } finally {
+      NodeFS.rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
+NodeTest.test(
+  "unqualified platforms package retained service implementations and reject native overrides",
+  async () => {
+    const {
+      nativeTargets,
+      nativeTargetQualified,
+      isQualifiedNativeHost,
+      stageNativeArtifacts,
+      nativeArtifactFiles,
+    } = await import("./native-artifacts.mjs");
+    const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-upstream-platform-"));
+    try {
+      NodeAssert.equal(isQualifiedNativeHost("linux", "x64", "2.38"), false);
+      NodeAssert.equal(isQualifiedNativeHost("linux", "x64", ""), false);
+      NodeAssert.equal(isQualifiedNativeHost("linux", "x64", "2.39"), true);
+      for (const target of Object.keys(nativeTargets)) {
+        const output = NodePath.join(root, target);
+        const env = { ...process.env, T3_CODE_LS_NATIVE_TARGET: target };
+        for (const name of Object.keys(env)) {
+          if (
+            /^T3_CODE_LS_.*_EXECUTABLE$/.test(name) ||
+            ["T3_CODE_LS_TOOLCHAIN", "T3_CODE_LS_SYSROOT", "T3_CODE_LS_NATIVE_DIR"].includes(name)
+          )
+            delete env[name];
+        }
+        env.T3_CODE_LS_IMPLEMENTATION = nativeTargetQualified(target) ? "upstream" : undefined;
+        const run = (extra = {}) =>
+          NodeChildProcess.spawnSync(
+            process.execPath,
+            [new URL("./build-native.mjs", import.meta.url).pathname, output],
+            { env: { ...env, ...extra }, encoding: "utf8" },
+          );
+        const baseline = run();
+        NodeAssert.equal(baseline.status, 0, baseline.stderr);
+        const manifest = JSON.parse(
+          NodeFS.readFileSync(NodePath.join(output, "manifest.json"), "utf8"),
+        );
+        NodeAssert.equal(manifest.implementation, "upstream");
+        NodeAssert.deepEqual(manifest.files, {});
+        NodeAssert.deepEqual(NodeFS.readdirSync(output), ["manifest.json"]);
+        stageNativeArtifacts(output, NodePath.join(root, "archive", target), target);
+        if (target === "linux-x64" && isQualifiedNativeHost()) {
+          const staged = NodePath.join(root, "desktop-staged");
+          const stagedEnv = { ...env, T3_CODE_LS_NATIVE_DIR: output };
+          delete stagedEnv.T3_CODE_LS_IMPLEMENTATION;
+          const bundle = NodeChildProcess.spawnSync(
+            process.execPath,
+            [new URL("./build-native.mjs", import.meta.url).pathname, staged],
+            { env: stagedEnv, encoding: "utf8" },
+          );
+          NodeAssert.equal(bundle.status, 0, bundle.stderr);
+          const readiness = nativeArtifactFiles(staged, target);
+          NodeAssert.deepEqual(readiness, ["manifest.json"]);
+          const { waitForResources } =
+            await import("../apps/desktop/scripts/wait-for-resources.mjs");
+          const listener = NodeNet.createServer((socket) => socket.destroy());
+          await new Promise((resolve, reject) => {
+            listener.once("error", reject);
+            listener.listen(0, "127.0.0.1", resolve);
+          });
+          try {
+            await waitForResources({
+              baseDir: staged,
+              files: readiness,
+              tcpHost: "127.0.0.1",
+              tcpPort: listener.address().port,
+              timeoutMs: 1000,
+            });
+          } finally {
+            await new Promise((resolve, reject) =>
+              listener.close((error) => (error ? reject(error) : resolve())),
+            );
+          }
+          const manifestPath = NodePath.join(staged, "manifest.json");
+          const wrongPin = JSON.parse(NodeFS.readFileSync(manifestPath, "utf8"));
+          wrongPin.upstreamCommit = "0".repeat(40);
+          NodeFS.writeFileSync(manifestPath, JSON.stringify(wrongPin));
+          NodeAssert.throws(() => nativeArtifactFiles(staged, target), /Invalid upstream-only/);
+          const installation = NodePath.join(root, "installed-original");
+          const module = NodePath.join(installation, "packages/shared/src/nativeExecutable.ts");
+          NodeFS.mkdirSync(NodePath.dirname(module), { recursive: true });
+          NodeFS.copyFileSync(
+            new URL("../packages/shared/src/nativeExecutable.ts", import.meta.url),
+            module,
+          );
+          stageNativeArtifacts(output, NodePath.join(installation, "bin"), target);
+          const installedEnv = { ...env };
+          delete installedEnv.T3_CODE_LS_IMPLEMENTATION;
+          const probe = NodeChildProcess.spawnSync(
+            process.execPath,
+            [
+              "--input-type=module",
+              "-e",
+              `import assert from 'node:assert/strict'; import { selectNativeExecutable } from ${JSON.stringify(NodeURL.pathToFileURL(module).href)}; assert.equal(selectNativeExecutable('policy'), undefined); assert.equal(selectNativeExecutable('policy', '/explicit/helper'), '/explicit/helper');`,
+            ],
+            { env: installedEnv, encoding: "utf8" },
+          );
+          NodeAssert.equal(probe.status, 0, probe.stderr);
+        }
+        for (const extra of [
+          { T3_CODE_LS_TOOLCHAIN: "/missing" },
+          { T3_CODE_LS_POLICY_EXECUTABLE: "/missing" },
+          { T3_CODE_LS_NATIVE_DIR: "/missing" },
+        ]) {
+          NodeAssert.notEqual(run(extra).status, 0);
+        }
+        if (target !== "linux-x64")
+          NodeAssert.throws(
+            () => stageNativeArtifacts(output, NodePath.join(root, "wrong"), "linux-x64"),
+            /do not match/,
+          );
+        NodeFS.writeFileSync(NodePath.join(output, "t3-code-ls-policy"), "stale binary");
+        NodeAssert.throws(
+          () => stageNativeArtifacts(output, NodePath.join(root, "stale"), target),
+          /native component/,
+        );
+      }
     } finally {
       NodeFS.rmSync(root, { recursive: true, force: true });
     }

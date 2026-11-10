@@ -62,7 +62,7 @@ import * as ServerSettings from "../apps/server/src/serverSettings.ts";
 import * as AnalyticsService from "../apps/server/src/telemetry/AnalyticsService.ts";
 import * as TerminalManager from "../apps/server/src/terminal/Manager.ts";
 
-NodeAssert.ok(process.argv[2], "Pass the Lust-built guest-share executable");
+NodeAssert.ok(process.argv[2], "Pass the native guest-share executable");
 const executable = NodePath.resolve(process.argv[2]);
 const proofPath = process.argv[3];
 const baselineOnly = process.argv.includes("--baseline-only");
@@ -154,7 +154,9 @@ async function run(effect, selection, name, filename, direct = false) {
       Effect.provide(direct ? NodeServices.layer : serviceLayer(name, filename)),
       Effect.provideService(
         HostProcess.Environment,
-        selection === undefined ? {} : { T3_CODE_LS_GUEST_SHARE_EXECUTABLE: selection },
+        selection === undefined
+          ? { T3_CODE_LS_IMPLEMENTATION: "upstream" }
+          : { T3_CODE_LS_GUEST_SHARE_EXECUTABLE: selection },
       ),
       Effect.provideService(HostProcess.WorkingDirectory, temporary),
       Effect.provideService(

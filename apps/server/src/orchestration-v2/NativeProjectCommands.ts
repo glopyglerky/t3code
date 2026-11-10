@@ -1,4 +1,4 @@
-import { nativeExecutable } from "@t3tools/shared/nativeExecutable";
+import { selectNativeExecutable } from "@t3tools/shared/nativeExecutable";
 // @effect-diagnostics nodeBuiltinImport:off -- This adapter validates a native executable path on the host OS.
 import * as NodePath from "node:path";
 import {
@@ -31,7 +31,7 @@ export class NativeProjectCommandsError extends Schema.TaggedError<NativeProject
   }
 }
 
-type PlanInput = Upstream.ProjectPlanInput;
+type PlanInput = Parameters<typeof Upstream.planProjectCommand>[0];
 
 const MAX_BYTES = 128 * 1024 * 1024;
 const MAX_DEPTH = 128;
@@ -246,7 +246,19 @@ function matchesRejection(
 }
 
 export const make = Effect.fn("NativeProjectCommands.make")(function* () {
-  const executable = nativeExecutable("project", (yield* HostProcess.Environment).T3_CODE_LS_PROJECT_EXECUTABLE);
+  const executable = selectNativeExecutable(
+    "project",
+    (yield* HostProcess.Environment).T3_CODE_LS_PROJECT_EXECUTABLE,
+    yield* HostProcess.Platform,
+    yield* HostProcess.Architecture,
+    (yield* HostProcess.Environment).T3_CODE_LS_IMPLEMENTATION,
+  );
+  if (executable === undefined)
+    return {
+      planProjectCommand: Effect.fn("NativeProjectCommands.planProjectCommand")(
+        (input: PlanInput) => Effect.sync(() => Upstream.planProjectCommand(input)),
+      ),
+    };
   const runner = yield* ProcessRunner.make();
 
   const planProjectCommand = Effect.fn("NativeProjectCommands.planProjectCommand")(function* (

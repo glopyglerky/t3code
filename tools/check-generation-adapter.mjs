@@ -29,7 +29,7 @@ import * as TextGeneration from "../apps/server/src/textGeneration/TextGeneratio
 import { makeCodexTextGeneration } from "../apps/server/src/textGeneration/CodexTextGeneration.ts";
 import { makeProcessProbe } from "../apps/server/src/testUtils/processProbe.ts";
 
-NodeAssert.ok(process.argv[2], "Pass the Lust-built generation executable");
+NodeAssert.ok(process.argv[2], "Pass the native generation executable");
 const executable = NodePath.resolve(process.argv[2]);
 const proofPath = process.argv[3];
 const root = NodeURL.fileURLToPath(new URL("../", import.meta.url));

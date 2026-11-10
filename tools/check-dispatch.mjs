@@ -235,5 +235,5 @@ if (process.argv[3] === "--service") {
     binary_sha256: createHash("sha256").update(await readFile(executable)).digest("hex"),
     scope: "Message-dispatch and goal service selection, protocol errors, and orchestrator call-site wiring; not whole-application qualification" };
   if (process.argv[4]) await writeFile(process.argv[4], JSON.stringify(proof, null, 2) + "\n");
-  console.log(`${assertions} actual message-dispatch/goal service and call-site checks passed with the Lust executable.`);
+  console.log(`${assertions} actual message-dispatch/goal service and call-site checks passed with the native executable.`);
 }

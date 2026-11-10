@@ -1,0 +1,104 @@
+name: Hybrid T3 Code recovery
+
+on:
+  push:
+    branches: [main, "codex/t3code-ls-hybrid-*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hybrid-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    uses: ./.github/workflows/native.yml
+
+  adapters:
+    name: Recovered production adapters
+    needs: native
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      T3CODE_DEV_SEED: "0"
+      VP_REMOTE_CACHE: "off"
+      VP_REMOTE_CACHE_URL: ""
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 26.12.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: hybrid-native-binaries
+          path: bin
+      - name: Verify exact-run native executables
+        run: node tools/check-hybrid.mjs --verify-binaries
+      - name: Fetch the immutable upstream behavior reference
+        run: |
+          upstream_commit="$(node -p 'JSON.parse(require("node:fs").readFileSync("upstream.lock.json", "utf8")).upstream.commit')"
+          [[ "$upstream_commit" =~ ^[0-9a-f]{40}$ ]]
+          git fetch --no-tags --depth=1 https://github.com/pingdotgg/t3code.git "$upstream_commit"
+      - name: Install the locked production-adapter test runtime
+        run: |
+          echo "T3_CODE_LS_TEST_RUNTIME=$RUNNER_TEMP/hybrid-test-runtime" >> "$GITHUB_ENV"
+          T3_CODE_LS_TEST_RUNTIME="$RUNNER_TEMP/hybrid-test-runtime" node tools/install-server-tests.mjs
+      - name: Exercise recovered services with controlled fixtures
+        run: node tools/check-hybrid.mjs --adapters "$RUNNER_TEMP/hybrid-proof"
+      - name: Retain adapter evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: hybrid-production-adapter-proof
+          path: ${{ runner.temp }}/hybrid-proof/*.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  application:
+    name: Original application contracts and build
+    needs: native
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      T3CODE_DEV_SEED: "0"
+      VP_REMOTE_CACHE: "off"
+      VP_REMOTE_CACHE_URL: ""
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+      NODE_OPTIONS: --max-old-space-size=6144
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 26.12.1
+      - name: Install the pinned workspace package manager
+        run: npm install --global pnpm@12.14.0 --ignore-scripts --no-audit --no-fund
+      - name: Install the unchanged locked application dependencies
+        run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: hybrid-native-binaries
+          path: bin
+      - name: Verify exact-run native executables
+        run: node tools/check-hybrid.mjs --verify-binaries
+      - name: Install Chromium for the original built client
+        run: node apps/web/node_modules/playwright/cli.js install --with-deps --only-shell chromium
+      - name: Check contracts, recovery, server and web bundles
+        run: node tools/check-hybrid.mjs --application "$RUNNER_TEMP/hybrid-proof"
+      - name: Exercise the original client with original and Rust services
+        run: node apps/web/scripts/verify-hybrid-client.ts "$RUNNER_TEMP/hybrid-proof/client" both
+      - name: Retain application evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: hybrid-application-proof
+          path: |
+            ${{ runner.temp }}/hybrid-proof/*.json
+            ${{ runner.temp }}/hybrid-proof/client/
+          if-no-files-found: warn
+          retention-days: 14

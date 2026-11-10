@@ -1,0 +1,10 @@
+{
+  "name": "@t3code-ls/port-oracles",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "@t3tools/contracts": "workspace:*",
+    "@t3tools/shared": "workspace:*",
+    "effect": "catalog:"
+  }
+}

@@ -1,6 +1,5 @@
 # Retained brand assets
 
-These are passive icons, fonts, images and Icon Composer data inherited from T3 Code.
-They remain for provenance and possible future Rust clients. The former Node/macOS
-export and application packaging tools are retired. These assets do not establish
-a working web, desktop or mobile application.
+These icons, fonts, images and Icon Composer data belong to the inherited T3 Code
+clients. Their export and packaging tools remain while those clients need them.
+Preserve asset identity and attribution as implementation moves to Rust.

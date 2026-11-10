@@ -1,88 +1,69 @@
 # t3code-ls
 
-t3code-ls is glopyglerky's native Rust port of [T3 Code](https://github.com/pingdotgg/t3code), in progress. It includes a native application API and command-line client, durable redb storage, Codex sessions and Iroh forwarding. It is **not a complete replacement for the original application**. Web, desktop and mobile user interfaces remain unfinished.
+## Lust Port Info
 
-## Usable components
+This is an incremental Rust port of [T3 Code](https://github.com/pingdotgg/t3code), using [Lust](https://github.com/pingdotgg/lust), [Lustr](https://github.com/glopyglerky/lustr) and [blueFe](https://github.com/glopyglerky/blueFe). The goal is one complete T3 Code application whose implementation becomes Rust without losing upstream functionality or changing the clients' public contracts.
 
-- `t3-code-ls-app`: authenticated native application server and command-line client. It connects project and thread commands to redb, provides durable event cursors, and runs explicitly configured Codex sessions on Unix.
-- `t3-code-ls`: authenticated Iroh transport with `serve` and `forward` commands; run `--help` for routing, identity and admission options. This is byte transport, not the original Connect account/pairing service.
-- `t3-code-ls-policy`, `project`, `guest-share`, `recovery`, `maintenance`, `outbox`, and `project-store` (each with the `t3-code-ls-` prefix): decision and JSON protocol components. They do not run an application server or user interface.
-- `t3-code-ls-provider` and `t3-code-ls-generate`: Unix process/protocol runtimes. They require an external provider executable. Windows process support is unimplemented.
-- `t3-code-ls-db`: standalone redb events, projections, receipts, outbox and SQLite-export import. It does not automatically migrate an installed T3 database or provide distributed active-active HA.
-- `t3code-ls-tools`: Rust build staging and source/upstream README checks.
+The original server, React web client, Electron desktop client and React Native mobile client are retained at their upstream paths. Rust replaces implementation behind their existing interfaces. Unported code stays until its replacement works in the actual application and passes the affected platform gates.
 
-The React web app, Node/Effect server and adapters, Electron/SEA/npm distributions, iOS/Android clients, Windows fallback and non-Rust build/test tools were removed. The native API below implements a subset of their behavior with a new protocol. It is not compatible with the retired clients. The KDE capture helper was retired because it depended on embedded JavaScript/QML. Rust-only resource-monitor and Hyprland helper sources remain separate optional crates; their desktop integration and platform execution are unqualified.
+## Build and run the hybrid application
 
-## Run the native application
-
-The [native API walkthrough](docs/native-api.md) shows a complete project, thread, provider turn, approval, close and archive sequence, including receipt recovery after a lost reply.
-
-Use the `t3-code-ls-app` executable from the verified build. Create a new, isolated state directory and start its server:
+Use Node `26.12.1` and pnpm `12.14.0`, matching the inherited workspace. Install the pinned Linux GNU x86_64 compiler package into a new directory outside the checkout:
 
 ```sh
-t3-code-ls-app initialize --state /tmp/t3code-ls-demo
-t3-code-ls-app serve --state /tmp/t3code-ls-demo --listen 127.0.0.1:3773
+T3_CODE_LS_TOOLCHAIN="$(node tools/install-toolchain.mjs --destination /absolute/path/t3code-ls-toolchain)"
+export T3_CODE_LS_TOOLCHAIN
+export CARGO_TARGET_DIR=/absolute/path/t3code-ls-build
+export CARGO="$T3_CODE_LS_TOOLCHAIN/bin/cargo"
+pnpm install --frozen-lockfile
+node tools/build-native.mjs
+T3CODE_DEV_SEED=0 pnpm dev
 ```
 
-Initialization creates `state.redb` and an owner-only `api-token`. It does not import an installed application's database. The server admits one process per state directory. Every request needs the token. It binds only to loopback; use the existing Iroh `serve` and `forward` commands for an authenticated remote byte connection. Iroh admission and the application token are separate checks.
+The compiler installer verifies the pinned archive, component identities and relocated toolchain. If the producer's ELF loader path is absent, it creates recorded host launchers outside the unchanged package; use the path printed by the installer. Application builds use the produced BlueFe compiler through Lustr's compatibility coordinator. This package does not contain native Lust; [lust-toolchain.json](lust-toolchain.json) separately retains the direct-Lust subset compiler identity. Full Rust compiled by BlueFe does not establish full native Lustr coverage.
 
-Save a request as JSON and pass it to the native client:
+Development and server packaging stage the Rust executables in `bin/` or `dist/native-bin/`. To use previously produced components, set `T3_CODE_LS_NATIVE_DIR` to a matching directory containing `manifest.json`. Staging verifies the target and executable hashes. Missing components fail visibly. Backend selection happens before execution; a failed or uncertain operation is not retried through another implementation.
 
-```json
-{"jsonrpc":"2.0","id":"capabilities","method":"application.capabilities","params":{}}
-```
+The default native route is restricted to Linux GNU x86_64 with GLIBC 2.39 or newer. Other hosts keep the original implementation, selected before execution. Their ordinary Node application build does not need a native compiler. An explicit native bundle or component override still requires matching artifacts and fails visibly when invalid. Platform-specific release and lifecycle qualification remains separate from retaining the working source.
 
-```sh
-t3-code-ls-app request --address 127.0.0.1:3773 --token-file /tmp/t3code-ls-demo/api-token < request.json
-```
+Set `T3_CODE_LS_IMPLEMENTATION=upstream` before starting the application to choose the original backend for controlled comparisons. Explicit component overrides select the requested native implementation. No operation retries through a different backend after failure.
 
-The HTTP endpoint is `POST /rpc`, with `Authorization: Bearer <token>` and `Content-Type: application/json`. Browser origins are not enabled. Requests have bounded size and execution time. JSON-RPC notifications and batches are not accepted; a caller must receive or recover the result of each operation.
+Use isolated development state and controlled replay-provider fixtures. Do not point tests at an installed T3 database or use real provider turns for routine qualification. [Application development](docs/operations/development.md) and the [user documentation](docs/README.md) describe the inherited application.
 
-| Method | Parameters and behavior |
+## Source organization
+
+| Path | Responsibility |
 | --- | --- |
-| `application.capabilities` | `{}` reports supported commands and whether Codex execution is configured. |
-| `command.execute` | `{ "command": ... }` accepts the supported upstream project/thread command shape. Keep its `commandId` unchanged when retrying a lost reply. |
-| `state.snapshot` | `{}` returns the redb revision, durable event cursor and current projections. |
-| `events.list` | `{ "afterSequence": 0, "limit": 256 }` reads ordered durable events; save the last returned sequence for reconnection. |
-| `receipt.get` | `{ "commandId": "..." }` retrieves a committed result. IDs beginning with `native:` are reserved for application-generated operations. |
-| `outbox.get` | `{ "effectId": "..." }` reads a background effect's current state. |
-| `session.open` / `session.close` | `{ "threadId": "..." }` opens or stops the configured Codex process for an existing native thread. |
-| `session.request` | `{ "threadId": "...", "commandId": "...", "method": "...", "params": {} }` accepts the Codex methods described below. |
-| `session.respond` | `{ "threadId": "...", "commandId": "...", "requestId": 123, "result": ... }` answers an observed pending provider request. |
-| `session.request.wait` | `{ "commandId": "..." }` waits for a persisted provider result or uncertain outcome. |
-| `session.approval.wait` | `{ "threadId": "..." }` waits for an observed pending provider request. |
-| `session.idle.wait` | `{ "threadId": "..." }` waits until the durable session has no active turn or unresolved turn start. Wait methods return `pending: true` after 25 seconds when no result is available. |
+| `apps/server` | Existing WebSocket/HTTP contracts, server services, provider orchestration and native adapters |
+| `apps/web`, `apps/desktop`, `apps/mobile`, `apps/marketing` | Original application clients and site |
+| `packages` | Shared contracts, client state, provider and source-control packages |
+| `native`, `infra` | Platform helpers and Connect infrastructure |
+| `Cargo.toml`, `Cargo.lock` | Root Rust workspace beside the temporary pnpm workspace |
+| `crates/core`, `crates/storage`, `crates/transport`, `crates/app` | Preserved Rust work, with domain ownership and migration status in the port map |
+| `tools`, `docs/porting` | Build, differential tests and migration accounting |
 
-Supported storage commands are project creation and metadata updates; thread creation and metadata updates; pinning, unpinning and ordering; archive/unarchive; read visits; and the auto-settle preference. Thread creation records the authenticated application's creation provenance. Events, projections and receipts commit together. Archive also commits its terminal-cleanup obligation; the native application does not yet execute that cleanup worker. Active or uncertain provider work blocks lifecycle changes requiring cleanup. A closed session with confirmed process cleanup can be archived.
+Source recovery, Rust source moves and behavior substitutions are separate changes. Unported implementation remains at its upstream location. No second vendored T3 application or `legacy/` tree is required.
 
-Provider execution is disabled until `serve` receives `--provider` with an absolute Codex executable path. Its default launch argument is `app-server`; repeated `--provider-arg` values supply a different trusted launch configuration. The external executable retains its own authentication. Only a thread selecting the configured `codex` instance can use this native path.
+## Current integration boundaries
 
-Open a session, request `thread/start` with `{}`, then request `turn/start` with `{"input":[{"type":"text","text":"..."}]}`. Use `thread/resume` after reopening a previously bound session, and `turn/interrupt` for an active turn. The host supplies the stored workspace, model and permission settings. Clients cannot override the native thread identity, executable, working directory or approval policy. Text input is supported; attachments require the unfinished attachment authorization port.
+Project planning, command/dispatch policy, guest sharing, recovery and maintenance have Rust implementations connected through the original server services. Codex process and structured-generation paths use native executables on the qualified Linux host route. Other hosts retain their original implementations until their native replacements are accepted. [port-map.json](port-map.json) records the actual consumers, compiler route, upstream source identities and acceptance state.
 
-Provider intents commit before transmission. Reusing a command ID reads its prior receipt instead of sending another turn or approval response. Provider replies, notifications and pending approval requests enter the same durable event log before clients can read them. A request receipt means the action was accepted, not that the provider finished it. Its terminal receipt is available under `native:result:<commandId>`. Restart recovery marks interrupted actions uncertain and never replays them automatically. It does not claim to have stopped a provider process after a hard crash. Explicit shutdown closes and reaps owned processes.
+Production persistence still uses the inherited SQLite transaction boundary. The standalone redb implementation remains available for completing that migration. Its cutover must cover events, projections, command and rejection receipts, outbox, replay, crash recovery, migration and backup/restore together. SurrealDB is not required. Switching back to an old database after redb has accepted new writes requires a defined data-transfer boundary.
 
-The native provider events preserve Codex protocol data. Full upstream orchestration, provider-event translation, checkpointing, queued/steered turns, other providers, project/thread deletion, attachments, guest hosting, scheduled tasks and terminals remain unfinished. These APIs do not establish UI or feature parity.
+Iroh provides authenticated byte forwarding. Connect identities, pairing, permissions, browser access, mobile reconnect and session lifecycle remain in the functioning application until their replacements are accepted.
 
-## Build and check
+The experimental `t3-code-ls-app` API/CLI is preserved as component work. Its `POST /rpc` protocol is not the existing clients' application protocol and is not the default T3 server. See [the native API documentation](docs/native-api.md) for its limited scope.
 
-[The native workflow](.github/workflows/native.yml) builds the pinned compiler sources from `glopyglerky/lustr` and `glopyglerky/blueFe` on a disposable GitHub-hosted runner. The Rust bootstrap helper verifies the upstream LLVM download and compiler identities, produces Rust and native Lust drivers, and checks their relocated sysroots. Cached payloads must pass exact source, file-hash and execution checks before application compilation. The bootstrap compiler is used to build the toolchain; the application is tested with produced BlueFe through Lustr.
+## Qualification and synchronization
 
-Use a qualified Lustr/BlueFe payload matching [lust-toolchain.json](lust-toolchain.json). Set `T3_CODE_LS_TOOLCHAIN` to its absolute directory, `RUSTC` and `RUSTDOC` to its produced drivers, `CARGO_TARGET_DIR` to an absolute generated-output directory outside this checkout, and `CARGO_ENCODED_RUSTFLAGS` to `--sysroot` followed by the unit-separator byte and the produced sysroot directory. Then invoke the toolchain's `bin/lustr --bluefe-root <toolchain>` with Cargo arguments:
+A candidate has component evidence. An integrated port has a real application consumer. Acceptance requires normal execution through Rust and behavior, failure-path and platform evidence. Only then may the accepted original implementation be retired. A synced port has also incorporated changes through its recorded upstream revision. The [migration gate](docs/porting/port-map.md) checks source retention and accounting; it does not manufacture behavioral acceptance.
 
-```text
-test --locked --workspace --all-targets
-run --locked -p t3code-ls-tools -- check-source
-run --locked -p t3code-ls-tools -- check-upstream-readme
-```
+[upstream.lock.json](upstream.lock.json) records the immutable integrated nightly and keeps detection separate from qualification. The recovered source is based on `d29a94f`, overlaid on `0be60f8` while retaining all later Rust work. Newer nightlies are separate integration work. A changed lockfile or a successful component suite is not proof of full application parity.
 
-For executable staging, unset the manually supplied sysroot flag and run `t3code-ls-tools build`. It selects the produced drivers, appends the selected sysroot while preserving caller flags, passes an explicit Rust target, and stages workspace executables plus a manifest under `<CARGO_TARGET_DIR>/deliverable/<target>/`. `T3_CODE_LS_SYSROOT` and `T3_CODE_LS_RUST_TARGET` select a matching cross-target payload. Missing sysroots fail before building; a target linker and native dependencies are also required. This is component staging, not an installer or a release archive.
+[Hybrid CI](.github/workflows/hybrid.yml) runs the produced-toolchain and application gates. [Recovery and acceptance](docs/porting/recovery.md) records the exact tested scope and remaining platform checks. Ordinary application CI downloads a pinned compiler artifact; compiler bootstrap belongs in the compiler repositories.
 
-The toolchain's Cargo is unmodified bootstrap Cargo. Full Rust through Lustr's BlueFe coordinator is distinct from executing unchanged source through the native Lust compiler. No matching Clippy driver is presently qualified. Component tests and Linux builds do not establish macOS, Windows, mobile, UI or release acceptance.
+## Upstream and licensing
 
-## Boundaries and provenance
+[upstream-README.md](upstream-README.md) preserves the immutable upstream README body. Its download and installation links describe upstream releases. Source and replacement mappings remain after retirement so future upstream edits cannot silently bypass translated code.
 
-Workspace-owned Rust forbids unsafe code, but dependencies and the OS remain outside that guarantee. Iroh's `ring` and `blake3` dependencies use upstream C/assembly and a native build toolchain; libc, networking, process and filesystem interfaces are platform dependencies. Optional helpers depend on OS/Wayland APIs. Provider commands are external programs, not Rust implementations owned by this fork. No whole-stack memory-safety or all-Rust dependency claim is made.
-
-Original behavior/source is pinned in [upstream.lock.json](upstream.lock.json). Read it with `git show <pinned-commit>:<path>` after fetching that exact commit, or at the pinned upstream GitHub revision. Do not copy upstream implementation/reference caches into this product checkout. Retired fork implementation and exact reference snapshots remain in Git history, with [reference pin metadata](reference-history.json). Removing them adds no Rust implementation.
-
-[upstream-README.md](upstream-README.md) preserves the immutable upstream README body and its installation links describe upstream software. [Design and divergence](docs/internals/t3-code-ls.md) records the current scope. The [MIT license](LICENSE), donor licenses and provenance remain. Repository identity and fork relationship are unchanged; there are no language-classification overrides added by this change.
+The [MIT license](LICENSE), upstream copyright, dependency notices, repository identity and fork relationship remain unchanged. Historical source and reference pins remain in Git history. Disposable reference checkouts belong outside the product tree.

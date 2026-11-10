@@ -572,7 +572,7 @@ if (
   process.argv[1] !== undefined &&
   import.meta.url === NodeURL.pathToFileURL(process.argv[1]).href
 ) {
-  NodeAssert.ok(process.argv[2], "Pass the Lust-built project_commands_matrix executable");
+  NodeAssert.ok(process.argv[2], "Pass the native project_commands_matrix executable");
   const cases = checkProjectMatrix(process.argv[2]);
   process.stdout.write(
     JSON.stringify({

@@ -39,6 +39,7 @@ import { codexAppServerArgs, resolveCodexLaunchArgs } from "./codexLaunchArgs.ts
 import {
   CodexAppServerProcessConfigurationError,
   selectCodexAppServerCommand,
+  selectCodexAppServerExecutable,
 } from "./CodexAppServerProcess.ts";
 import {
   buildServerProvider,
@@ -785,6 +786,9 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     });
   }
 
+  // Preserve the selected backend across failure handling; a failed native probe
+  // must not trigger a second process through the original implementation.
+  const nativeRuntimeSelected = (yield* selectCodexAppServerExecutable()) !== undefined;
   const probeResult = yield* probe({
     binaryPath: codexSettings.binaryPath,
     homePath: codexSettings.homePath,
@@ -803,9 +807,6 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     const error = probeResult.failure;
     const configurationFailed = isCodexAppServerProcessConfigurationError(error);
     const installed = !isCodexAppServerSpawnError(error) && !configurationFailed;
-    const nativeRuntimeSelected =
-      (yield* HostProcess.Platform) !== "win32" ||
-      (yield* HostProcess.Environment).T3_CODE_LS_PROVIDER_EXECUTABLE !== undefined;
     const version =
       installed && !nativeRuntimeSelected
         ? yield* probeCodexCliVersion({
