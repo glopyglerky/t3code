@@ -1,9 +1,14 @@
-name: Hybrid T3 Code recovery
+name: Rust port qualification
 
 on:
   push:
     branches: [main, "codex/t3code-ls-hybrid-*"]
   workflow_dispatch:
+    inputs:
+      full:
+        description: Run every fork gate without reusing qualification
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -13,14 +18,76 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  plan:
+    name: Select fork checks and porting work
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      native: ${{ steps.plan.outputs.native }}
+      adapters: ${{ steps.plan.outputs.adapters }}
+      application: ${{ steps.plan.outputs.application }}
+      stage_native: ${{ steps.plan.outputs.stage_native }}
+      source_guards: ${{ steps.plan.outputs.source_guards }}
+      rust_packages: ${{ steps.plan.outputs.rust_packages }}
+      adapter_ports: ${{ steps.plan.outputs.adapter_ports }}
+      component_tests: ${{ steps.plan.outputs.component_tests }}
+      mode: ${{ steps.plan.outputs.mode }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          filter: blob:none
+          fetch-depth: 0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 26.12.1
+      - name: Check qualification selection and immutable porting plans
+        run: |
+          python3 -m unittest discover -s tools -p 'test_ci*.py'
+          python3 -m unittest discover -s tools -p test_nightly.py
+          python3 -m unittest discover -s tools -p test_plan_porting.py
+          node --test tools/install-toolchain.test.mjs tools/native-packaging.test.mjs tools/fetch-migration-sources.test.mjs tools/hybrid-checks.test.mjs tools/check-acceptance.test.mjs
+      - name: Plan work against the trusted upstream default branch
+        run: python3 tools/plan-porting.py --repo-root "$GITHUB_WORKSPACE" --fetch-default --output "$RUNNER_TEMP/porting-plan.json" --summary "$GITHUB_STEP_SUMMARY"
+      - name: Select checks from verified qualification history
+        id: plan
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CI_FORCE_FULL: ${{ inputs.full || false }}
+        run: |
+          arguments=()
+          if [[ "$CI_FORCE_FULL" == true ]]; then arguments+=(--full); fi
+          python3 tools/ci_plan.py --output "$RUNNER_TEMP/ci-plan.json" --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY" "${arguments[@]}"
+      - name: Retain qualification and porting plans
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: ci-plan
+          path: |
+            ${{ runner.temp }}/ci-plan.json
+            ${{ runner.temp }}/porting-plan.json
+          if-no-files-found: error
+          retention-days: 30
+
   native:
+    name: Affected Rust packages and source guards
+    needs: plan
+    if: needs.plan.outputs.native == 'true'
     uses: ./.github/workflows/native.yml
+    with:
+      packages: ${{ needs.plan.outputs.rust_packages }}
+      component_tests: ${{ needs.plan.outputs.component_tests }}
+      source_guards: ${{ needs.plan.outputs.source_guards == 'true' }}
+      stage_native: ${{ needs.plan.outputs.stage_native == 'true' }}
 
   adapters:
-    name: Recovered production adapters
-    needs: native
+    name: Affected production adapters
+    needs: [plan, native]
+    if: needs.plan.outputs.adapters == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 15
     env:
       T3CODE_DEV_SEED: "0"
       VP_REMOTE_CACHE: "off"
@@ -32,13 +99,15 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 26.12.1
+          cache: npm
+          cache-dependency-path: tools/server-test-runtime/package-lock.json
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: hybrid-native-binaries
           path: bin
       - name: Verify exact-run native executables
         run: node tools/check-hybrid.mjs --verify-binaries
-      - name: Fetch the immutable upstream behavior reference
+      - name: Fetch the immutable upstream behavior oracle
         run: |
           upstream_commit="$(node -p 'JSON.parse(require("node:fs").readFileSync("upstream.lock.json", "utf8")).upstream.commit')"
           [[ "$upstream_commit" =~ ^[0-9a-f]{40}$ ]]
@@ -47,8 +116,10 @@ jobs:
         run: |
           echo "T3_CODE_LS_TEST_RUNTIME=$RUNNER_TEMP/hybrid-test-runtime" >> "$GITHUB_ENV"
           T3_CODE_LS_TEST_RUNTIME="$RUNNER_TEMP/hybrid-test-runtime" node tools/install-server-tests.mjs
-      - name: Exercise recovered services with controlled fixtures
-        run: node tools/check-hybrid.mjs --adapters "$RUNNER_TEMP/hybrid-proof"
+      - name: Check selected Rust adapters, parity and failure paths
+        env:
+          CI_ADAPTER_PORTS: ${{ needs.plan.outputs.adapter_ports }}
+        run: node tools/check-hybrid.mjs --adapters "$RUNNER_TEMP/hybrid-proof" --ports "$CI_ADAPTER_PORTS"
       - name: Retain adapter evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -59,10 +130,11 @@ jobs:
           retention-days: 14
 
   application:
-    name: Original application contracts and build
-    needs: native
+    name: Rust integration through the application
+    needs: [plan, native]
+    if: needs.plan.outputs.application == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 20
     env:
       T3CODE_DEV_SEED: "0"
       VP_REMOTE_CACHE: "off"
@@ -78,7 +150,15 @@ jobs:
           node-version: 26.12.1
       - name: Install the pinned workspace package manager
         run: npm install --global pnpm@12.14.0 --ignore-scripts --no-audit --no-fund
-      - name: Install the unchanged locked application dependencies
+      - name: Locate the dependency store
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - name: Cache locked dependency downloads
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-${{ runner.os }}-${{ runner.arch }}-12.14.0-${{ hashFiles('pnpm-lock.yaml') }}
+      - name: Install the locked application dependencies
         run: pnpm install --frozen-lockfile
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -86,14 +166,19 @@ jobs:
           path: bin
       - name: Verify exact-run native executables
         run: node tools/check-hybrid.mjs --verify-binaries
-      - name: Install Chromium for the original built client
+      - name: Cache the pinned browser payload
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pnpm-lock.yaml') }}
+      - name: Prepare Chromium for Rust client integration
         run: node apps/web/node_modules/playwright/cli.js install --with-deps --only-shell chromium
-      - name: Test client acceptance contract assertions
+      - name: Test fork client acceptance assertions
         run: node --test apps/web/scripts/hybrid-client-turn.test.ts
-      - name: Check contracts, recovery, server and web bundles
+      - name: Check native selection and build the integration bundles
         run: node tools/check-hybrid.mjs --application "$RUNNER_TEMP/hybrid-proof"
-      - name: Exercise the original client with original and Rust services
-        run: node apps/web/scripts/verify-hybrid-client.ts "$RUNNER_TEMP/hybrid-proof/client" both
+      - name: Exercise the client with Rust services and durable recovery
+        run: node apps/web/scripts/verify-hybrid-client.ts "$RUNNER_TEMP/hybrid-proof/client" native
       - name: Retain application evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -104,3 +189,31 @@ jobs:
             ${{ runner.temp }}/hybrid-proof/client/
           if-no-files-found: warn
           retention-days: 14
+
+  qualification:
+    name: Record verified qualification
+    needs: [plan, native, adapters, application]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ci-plan
+          path: ${{ runner.temp }}/qualification-plan
+      - name: Require every planned gate to pass
+        env:
+          CI_NEEDS: ${{ toJSON(needs) }}
+          CI_HEAD: ${{ github.sha }}
+          CI_RUN_ID: ${{ github.run_id }}
+        run: python3 tools/ci_receipt.py --plan "$RUNNER_TEMP/qualification-plan/ci-plan.json" --output "$RUNNER_TEMP/ci-qualification.json"
+      - name: Retain the reusable source qualification receipt
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: ci-qualification
+          path: ${{ runner.temp }}/ci-qualification.json
+          if-no-files-found: error
+          retention-days: 30

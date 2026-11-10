@@ -60,7 +60,9 @@ A candidate has component evidence. An integrated port has a real application co
 
 [upstream.lock.json](upstream.lock.json) records the immutable integrated nightly and keeps detection separate from qualification. The recovered source is based on `d29a94f`, overlaid on `0be60f8` while retaining all later Rust work. Newer nightlies are separate integration work. A changed lockfile or a successful component suite is not proof of full application parity.
 
-[Hybrid CI](.github/workflows/hybrid.yml) runs the produced-toolchain and application gates. [Recovery and acceptance](docs/porting/recovery.md) records the exact tested scope and remaining platform checks. Ordinary application CI downloads a pinned compiler artifact; compiler bootstrap belongs in the compiler repositories.
+[Fork CI](.github/workflows/hybrid.yml) selects affected Rust packages, adapters and client integration from a verified qualified ancestor. Upstream's default branch is trusted; its pristine test suites and original-only client flow are not repeated. Exact-source qualification receipts avoid duplicate builds when a tested commit reaches `main`. Each run also generates an immutable upstream comparison and prioritized porting queue. [CI and porting](docs/ci-and-porting.md) explains selection, evidence reuse and local commands.
+
+[Recovery and acceptance](docs/porting/recovery.md) records the exact tested scope and remaining platform checks. Ordinary application CI downloads a pinned compiler artifact; compiler bootstrap belongs in the compiler repositories.
 
 ## Upstream and licensing
 

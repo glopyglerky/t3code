@@ -1,0 +1,104 @@
+{
+  "tools/check-connection.mjs": {
+    "package": "t3-code-ls-core",
+    "executable": "examples/connection_matrix",
+    "extra_arguments": [],
+    "proof_argument": false
+  },
+  "tools/check-generation-runtime.mjs": {
+    "package": "t3-code-ls-core",
+    "executable": "t3-code-ls-generate",
+    "extra_arguments": [],
+    "proof_argument": true
+  },
+  "tools/check-generation.mjs": {
+    "package": "t3-code-ls-core",
+    "executable": "t3-code-ls-generate",
+    "extra_arguments": [],
+    "proof_argument": true
+  },
+  "tools/check-guest-share-runtime.mjs": {
+    "package": "t3-code-ls-core",
+    "executable": "t3-code-ls-guest-share",
+    "extra_arguments": [],
+    "proof_argument": false
+  },
+  "tools/check-guest-share.mjs": {
+    "package": "t3-code-ls-core",
+    "executable": "examples/guest_share_matrix",
+    "extra_arguments": [],
+    "proof_argument": false
+  },
+  "tools/check-maintenance-runtime.mjs": {
+    "package": "t3-code-ls-core",
+    "executable": "t3-code-ls-maintenance",
+    "extra_arguments": [],
+    "proof_argument": false
+  },
+  "tools/check-maintenance.mjs": {
+    "package": "t3-code-ls-core",
+    "executable": "t3-code-ls-maintenance",
+    "extra_arguments": [],
+    "proof_argument": true
+  },
+  "tools/check-native-database.mjs": {
+    "package": "t3-code-ls-storage",
+    "executable": null,
+    "extra_arguments": [],
+    "proof_argument": true
+  },
+  "tools/check-native-outbox-worker.mjs": {
+    "package": "t3-code-ls-storage",
+    "executable": "t3-code-ls-db",
+    "extra_arguments": [],
+    "proof_argument": true
+  },
+  "tools/check-outbox-claim-recovery.mjs": {
+    "package": "t3-code-ls-storage",
+    "executable": "t3-code-ls-db",
+    "extra_arguments": [],
+    "proof_argument": true
+  },
+  "tools/check-policy.mjs": {
+    "package": "t3-code-ls-core",
+    "executable": "t3-code-ls-policy",
+    "extra_arguments": [],
+    "proof_argument": false
+  },
+  "tools/check-project-commands.mjs": {
+    "package": "t3-code-ls-core",
+    "executable": "examples/project_commands_matrix",
+    "extra_arguments": [],
+    "proof_argument": false
+  },
+  "tools/check-project-persistence.mjs": {
+    "package": "t3-code-ls-core",
+    "executable": "t3-code-ls-project-store",
+    "extra_arguments": ["--single"],
+    "proof_argument": false
+  },
+  "tools/check-project-runtime.mjs": {
+    "package": "t3-code-ls-core",
+    "executable": "t3-code-ls-project",
+    "extra_arguments": [],
+    "proof_argument": false
+  },
+  "tools/check-provider-recovery.mjs": {
+    "package": "t3-code-ls-core",
+    "executable": "examples/provider_recovery_matrix",
+    "extra_arguments": [],
+    "proof_argument": false
+  },
+  "tools/check-provider.mjs": {
+    "package": "t3-code-ls-core",
+    "executable": "t3-code-ls-provider",
+    "extra_arguments": [],
+    "proof_argument": false
+  },
+  "tools/check-recovery-runtime.mjs": {
+    "package": "t3-code-ls-core",
+    "executable": "t3-code-ls-recovery",
+    "extra_arguments": [],
+    "proof_argument": false
+  }
+}

@@ -40,14 +40,27 @@ select the matching produced target sysroot. Keep Cargo --locked and pnpm's froz
 lockfile gate. Do not substitute unmatched Clippy or compiler drivers.
 Keep generated output outside canonical source and clean owned disposable output.
 
-Run workspace tests, `t3code-ls-tools check-source`, `check-upstream-readme` and
-the affected hybrid application gates before publishing. check-source enforces
+Use the generated CI plan to run affected Rust packages and reverse consumers,
+`t3code-ls-tools check-source`, `check-upstream-readme` and affected production
+adapters. Run the native client flow when our production execution boundary changes.
+Compiler, global dependency and CI-policy changes require full fork qualification.
+Select changes from a verified qualified ancestor, never an unqualified previous
+push. Reuse an identical commit only with a successful same-policy qualification
+receipt. Missing evidence widens qualification. check-source enforces
 migration accounting and source retention, not a language ban. Test real services
 and controlled provider fixtures. Do not recreate in-checkout reference caches.
 
+Upstream `pingdotgg/t3code`'s default branch is trusted as working. Do not rerun
+its pristine test suites or separately qualify its original client execution.
+Use its immutable source as the behavior oracle for Rust differential tests.
+Our translations, adapters, fork modifications and integration still need their
+affected checks. A trusted upstream revision does not qualify our Rust replacement.
+
 Original behavior is available from `pingdotgg/t3code` at the immutable commit
-and tree in `upstream.lock.json`. Published nightly releases are the integration
-baseline. Record detected, integrated and qualified revisions separately. Review
+and tree in `upstream.lock.json`. The current integrated pin remains explicit;
+the porting planner follows the trusted default branch at an immutable commit.
+Nightly release tracking remains available for release comparisons. Record
+detected, integrated and qualified revisions separately. Review
 changes against port-map.json, including translated files that Git cannot match.
 New upstream functionality may retain its original implementation. A changed pin
 alone does not establish synchronization or application parity. Use disposable

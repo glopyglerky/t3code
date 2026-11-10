@@ -7,15 +7,11 @@ import * as Path from "node:path";
 import * as ChildProcess from "node:child_process";
 import * as NodeURL from "node:url";
 import { nativeComponents, nativeFile, nativeHash, nativeTargets } from "./native-artifacts.mjs";
+import { applicationChecks, parseHybridArguments, planAdapterChecks } from "./hybrid-checks.mjs";
 
 const root = NodeURL.fileURLToPath(new URL("../", import.meta.url));
-const arguments_ = process.argv.slice(2);
-const mode = arguments_[0];
-Assert.ok(
-  ["--verify-binaries", "--adapters", "--application"].includes(mode),
-  "Usage: node tools/check-hybrid.mjs <--verify-binaries|--adapters|--application> [absolute-proof-directory]",
-);
-Assert.ok(arguments_.length <= 2, "Unexpected qualification arguments");
+const { mode, proofDirectory, selectedPorts } = parseHybridArguments(process.argv.slice(2));
+const adapterChecks = mode === "--adapters" ? planAdapterChecks(selectedPorts) : [];
 
 const bin = Path.join(root, "bin");
 const nativeManifest = JSON.parse(FS.readFileSync(Path.join(bin, "manifest.json"), "utf8"));
@@ -36,7 +32,7 @@ for (const component of nativeComponents) {
 if (mode === "--verify-binaries") {
   console.log(`Verified ${nativeComponents.length} native executables for ${target}`);
 } else {
-  const requested = arguments_[1] ?? process.env.T3_CODE_LS_HYBRID_PROOF_DIR;
+  const requested = proofDirectory ?? process.env.T3_CODE_LS_HYBRID_PROOF_DIR;
   Assert.ok(
     requested && Path.isAbsolute(requested),
     "Set an absolute proof directory outside the checkout",
@@ -64,16 +60,19 @@ if (mode === "--verify-binaries") {
       .upstream.commit,
     target,
     compiler_route: "bluefe-rustc-via-lustr",
-    baseline_selection: "T3_CODE_LS_IMPLEMENTATION=upstream before execution",
+    baseline_selection: mode === "--adapters"
+      ? "Trusted upstream behavior is used as the differential oracle for the selected Rust ports"
+      : "Native service bundle through the retained application build",
     toolchain_lock_sha256: digest(Path.join(root, "toolchain.lock.json")),
     native_manifest_sha256: digest(Path.join(bin, "manifest.json")),
     mode,
+    selected_ports: selectedPorts,
     status: "running",
     checks: [],
     scope:
       mode === "--adapters"
-        ? "Production services with controlled provider fixtures and the upstream SQLite event sink"
-        : "Contracts, shared client logic, WebSocket/replay/recovery tests, server/web bundles and browser boot",
+        ? "Selected fork adapter typechecks, Rust parity and failure paths with controlled provider fixtures and the upstream SQLite event sink"
+        : "Fork native-executable selection tests and the client/server integration builds; pristine upstream tests are trusted",
     remaining_acceptance: [
       "A complete interactive client project/thread/provider/approval/reconnect flow",
       "Native desktop and mobile lifecycle and distribution",
@@ -110,73 +109,26 @@ if (mode === "--verify-binaries") {
   try {
     save();
     if (mode === "--adapters") {
-      for (const [component, script] of [
-        ["policy", "check-policy-adapter.mjs"],
-        ["project", "check-project-adapter.mjs"],
-        ["recovery", "check-recovery-adapter.mjs"],
-        ["guest-share", "check-guest-share-adapter.mjs"],
-        ["provider", "check-provider-adapter.mjs"],
-        ["maintenance", "check-maintenance-adapter.mjs"],
-        ["generate", "check-generation-adapter.mjs"],
-      ]) {
-        node(`${component} production adapter`, `tools/${script}`, [
-          Path.join(bin, nativeFile(component, target)),
-          Path.join(proof, `${component}-adapter.json`),
+      const typechecker = Path.resolve(
+        process.env.T3_CODE_LS_TEST_RUNTIME ?? Path.join(root, "tools", "server-test-runtime"),
+        "node_modules", ".bin", "effect-tsgo",
+      );
+      for (const check of adapterChecks.filter((check) => check.typecheckProject)) {
+        run(`Typecheck ${check.port} adapter`, typechecker, [
+          "tsrs", "--noEmit", "--project", check.typecheckProject,
         ]);
       }
-      node("Production dispatch and goal policy", "tools/check-dispatch.mjs", [
-        Path.join(bin, nativeFile("policy", target)),
-        "--service",
-        Path.join(proof, "dispatch.json"),
-      ]);
+      for (const check of adapterChecks) {
+        node(check.name, check.script, [
+          Path.join(bin, nativeFile(check.component, target)),
+          ...check.extraArguments,
+          Path.join(proof, check.proofFile),
+        ]);
+      }
     } else {
-      for (const directory of [
-        "packages/contracts",
-        "packages/client-runtime",
-        "apps/server",
-        "apps/web",
-      ]) {
-        run(`Typecheck ${directory}`, "pnpm", [
-          "exec",
-          "effect-tsgo",
-          "tsrs",
-          "--noEmit",
-          "--project",
-          `${directory}/tsconfig.json`,
-        ]);
+      for (const check of applicationChecks()) {
+        run(check.name, check.program, check.arguments);
       }
-      run("WebSocket, replay, cancellation and durable recovery", "pnpm", [
-        "exec",
-        "vp",
-        "test",
-        "run",
-        "--maxWorkers",
-        "2",
-        "apps/server/src/ws.test.ts",
-        "apps/server/src/orchestration-v2/runtimeLayer.test.ts",
-        "apps/server/src/orchestration-v2/FoundationPersistence.test.ts",
-        "apps/server/src/orchestration-v2/RestartContinuation.test.ts",
-        "apps/server/src/orchestration-v2/ProjectCommands.test.ts",
-        "apps/server/src/orchestration-v2/SubagentProjection.test.ts",
-        "apps/server/src/orchestration-v2/CommandPolicy.test.ts",
-        "apps/server/src/orchestration-v2/BackgroundWorkStop.integration.test.ts",
-        "apps/server/src/orchestration-v2/testkit/CodexReplayFixtures.integration.test.ts",
-        "apps/server/src/orchestration-v2/testkit/OrchestratorReplayRecovery.integration.test.ts",
-        "packages/client-runtime/src/operations/projects.test.ts",
-        "packages/client-runtime/src/operations/commands.test.ts",
-        "packages/client-runtime/src/state/threadWorkflows.test.ts",
-        "packages/client-runtime/src/state/threads-sync.test.ts",
-        "packages/client-runtime/src/connection/supervisor.test.ts",
-        "packages/shared/src/nativeExecutable.test.ts",
-      ]);
-      run("Build the original web client", "pnpm", ["--dir", "apps/web", "run", "build"]);
-      run("Build the original server with native adapters", "pnpm", [
-        "--dir",
-        "apps/server",
-        "run",
-        "build:bundle",
-      ]);
-      node("Boot the built web client in Chromium", "apps/web/scripts/verify-built-boot.ts");
     }
     report.status = "passed";
     save();

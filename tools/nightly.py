@@ -220,9 +220,9 @@ def git(root: Path, *args: str) -> bytes:
     try:
         return subprocess.run(
             ["git", "-C", str(root), *args], check=True,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60,
         ).stdout
-    except (OSError, subprocess.CalledProcessError) as error:
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
         # Git stderr can contain remote credentials or local paths. Keep errors bounded.
         raise TrackingError(f"git {args[0]} failed.") from error
 
