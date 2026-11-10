@@ -139,6 +139,34 @@
     "proof_argument": true,
     "typecheck_project": "tools/redb-events-tsconfig.json"
   },
+  "tools/check-redb-receipts-positions.mjs": {
+    "package": "t3-code-ls-storage",
+    "executable": "t3-code-ls-db",
+    "extra_arguments": [],
+    "proof_argument": true,
+    "typecheck_project": "tools/redb-receipts-positions-tsconfig.json"
+  },
+  "tools/check-redb-projects.mjs": {
+    "package": "t3-code-ls-storage",
+    "executable": "t3-code-ls-db",
+    "extra_arguments": [],
+    "proof_argument": true,
+    "typecheck_project": "tools/redb-projects-tsconfig.json"
+  },
+  "tools/check-redb-application-outbox.mjs": {
+    "package": "t3-code-ls-storage",
+    "executable": "t3-code-ls-db",
+    "extra_arguments": [],
+    "proof_argument": true,
+    "typecheck_project": "tools/redb-application-outbox-tsconfig.json"
+  },
+  "tools/check-redb-event-sink.mjs": {
+    "package": "t3-code-ls-storage",
+    "executable": "t3-code-ls-db",
+    "extra_arguments": [],
+    "proof_argument": true,
+    "typecheck_project": "tools/redb-event-sink-tsconfig.json"
+  },
   "tools/check-redb-transactions.mjs": {
     "package": "t3-code-ls-storage",
     "executable": "t3-code-ls-db",

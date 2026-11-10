@@ -1108,6 +1108,38 @@
           "blob": "f39de342b552625bc51be4bae819e0cec468ce4c"
         },
         {
+          "path": "apps/server/src/persistence/OrchestrationCommandReceipts.ts",
+          "blob": "4a39061a00cb0e7ab1c10864fb400fc6795dbc48"
+        },
+        {
+          "path": "apps/server/src/orchestration-v2/TurnItemPositionStore.ts",
+          "blob": "03636b34153c9dc8ed62a4078f0444776a7b8777"
+        },
+        {
+          "path": "apps/server/src/orchestration-v2/ProjectStore.ts",
+          "blob": "2be0a765c784f779e1d7a1a14d0d89b7ed979a85"
+        },
+        {
+          "path": "apps/server/src/orchestration-v2/ProjectionStore.ts",
+          "blob": "3d33f76b7a4940e0917d984b4ae48ebcc83dd6c3"
+        },
+        {
+          "path": "apps/server/src/orchestration-v2/EventStore.ts",
+          "blob": "e2125508dee8f62322c2cba50fa7e08a400d9171"
+        },
+        {
+          "path": "apps/server/src/orchestration-v2/ProviderCommitBatch.ts",
+          "blob": "1a6ca8d28a609c9b82215368bac64c494c6a0b50"
+        },
+        {
+          "path": "apps/server/src/orchestration-v2/EffectWorker.ts",
+          "blob": "c5b5ea9b383a943bfe97ef1170791cd31473d09f"
+        },
+        {
+          "path": "apps/server/src/sourceControl/threadPullRequests.ts",
+          "blob": "8d9c72b1c6cdf917bcec2c33a175ebe2927353df"
+        },
+        {
           "path": "apps/server/src/persistence/OrchestrationEventStore.ts",
           "blob": "e55d82713871bce675d605da926da0514879b422"
         },
@@ -1119,7 +1151,9 @@
       "rust_paths": [
         "crates/storage/src/lib.rs",
         "crates/storage/src/backend.rs",
+        "crates/storage/src/bin/t3-code-ls-db.rs",
         "crates/storage/src/outbox.rs",
+        "crates/storage/src/outbox_tests.rs",
         "crates/storage/src/project_service.rs",
         "crates/storage/src/thread_service.rs",
         "crates/storage/src/sqlite_import.rs",
@@ -1128,12 +1162,44 @@
         "apps/server/src/persistence/redb_import.rs",
         "apps/server/src/persistence/redb_import_tests.rs",
         "apps/server/src/persistence/redb_event_rows.rs",
-        "apps/server/src/persistence/redb_event_rows_tests.rs"
+        "apps/server/src/persistence/redb_event_rows_tests.rs",
+        "apps/server/src/persistence/redb_application_rows.rs",
+        "apps/server/src/persistence/redb_json.rs",
+        "apps/server/src/persistence/redb_command_receipts.rs",
+        "apps/server/src/persistence/redb_command_receipts_tests.rs",
+        "apps/server/src/persistence/redb_projection_commit.rs",
+        "apps/server/src/persistence/redb_projection_commit_tests.rs",
+        "apps/server/src/orchestration-v2/redb_turn_item_positions.rs",
+        "apps/server/src/orchestration-v2/redb_turn_item_positions_tests.rs",
+        "apps/server/src/orchestration-v2/redb_project_rows.rs",
+        "apps/server/src/orchestration-v2/redb_project_rows_tests.rs",
+        "apps/server/src/orchestration-v2/redb_effect_outbox.rs",
+        "apps/server/src/orchestration-v2/redb_effect_outbox_tests.rs"
       ],
       "adapter_paths": [
         "apps/server/src/orchestration-v2/NativeDatabase.ts",
         "apps/server/src/orchestration-v2/NativeEffectOutbox.ts",
         "apps/server/src/orchestration-v2/EventSink.ts",
+        "apps/server/src/orchestration-v2/NativeEventSink.ts",
+        "apps/server/src/orchestration-v2/EventStore.ts",
+        "apps/server/src/orchestration-v2/ProviderCommitBatch.ts",
+        "apps/server/src/orchestration-v2/EffectOutbox.ts",
+        "apps/server/src/orchestration-v2/EffectWorker.ts",
+        "apps/server/src/orchestration-v2/NativeApplicationEffectOutbox.ts",
+        "apps/server/src/orchestration-v2/CommandReceiptStore.ts",
+        "apps/server/src/orchestration-v2/TurnItemPositionStore.ts",
+        "apps/server/src/orchestration-v2/NativeTurnItemPositionStore.ts",
+        "apps/server/src/orchestration-v2/ProjectStore.ts",
+        "apps/server/src/orchestration-v2/ProjectRows.ts",
+        "apps/server/src/orchestration-v2/SqliteProjectRows.ts",
+        "apps/server/src/orchestration-v2/NativeProjectRows.ts",
+        "apps/server/src/orchestration-v2/ProjectionCommitStore.ts",
+        "apps/server/src/persistence/SqliteProjectionCommitStore.ts",
+        "apps/server/src/persistence/NativeProjectionCommitStore.ts",
+        "apps/server/src/persistence/OrchestrationCommandReceipts.ts",
+        "apps/server/src/persistence/NativeCommandReceipts.ts",
+        "apps/server/src/persistence/PersistenceTransactions.ts",
+        "apps/server/src/sourceControl/threadPullRequests.ts",
         "apps/server/src/persistence/RedbClient.ts",
         "apps/server/src/persistence/OrchestrationEventStore.ts",
         "apps/server/src/persistence/EventRows.ts",
@@ -1160,10 +1226,14 @@
         "tools/check-outbox.mjs",
         "tools/check-redb-transactions.mjs",
         "tools/check-redb-import.mjs",
-        "tools/check-redb-events.mjs"
+        "tools/check-redb-events.mjs",
+        "tools/check-redb-receipts-positions.mjs",
+        "tools/check-redb-projects.mjs",
+        "tools/check-redb-application-outbox.mjs",
+        "tools/check-redb-event-sink.mjs"
       ],
       "retired_paths": [],
-      "notes": "Candidate only. Reserved-writer transactions, nested savepoints, typed SQLite hydration, and the complete shared event-log service have native qualification gates. Event indexes preserve imported sequence high-water marks, ordered filtering and replay budgets. Production still selects the SQLite event-row adapter; EventSink, projections, receipts, positions, outbox ownership and other persistence domains must share the native application transaction before authoritative cutover.",
+      "notes": "Candidate only; production server and CLI remain SQLite-authoritative. NativeEventSink composes the shared event log, command receipts, turn positions, complete ProjectStore, projection mutations and transactional guards, and all 17 application-outbox members under one RedbClient owner. Nested savepoints retain scoped afterCommit callbacks until acknowledged root commit. Managed domain indexes use imported tagged cells, with shared application normalization and native codecs. Mapped gates assert immutable-upstream parity, atomicity, publication order, recovery and ownership; registration is not acceptance evidence. Full projection read models, search, authentication, scheduling, other state, startup/maintenance and application/platform cutover remain incomplete.",
       "rust_crates": [
         "crates/core",
         "crates/storage"

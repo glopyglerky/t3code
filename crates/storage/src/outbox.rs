@@ -7,12 +7,33 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use t3_code_ls_core::outbox as policy;
 
+use crate::application::ApplicationCatalog;
 use crate::backend::Transaction;
 use crate::{Error, MAX_BATCH_BYTES, MAX_BATCH_RECORDS, MAX_COUNTER, Result, Store, store_key};
 
 const PREFIX: &str = "outbox/v1/";
 const PAGE_SIZE: usize = 128;
 const MAX_ERROR_BYTES: usize = 64 * 1024;
+
+/// The scheduling engine is shared; only authoritative rows and auxiliary keys differ.
+#[derive(Clone, Copy)]
+pub(crate) enum Repository<'a> {
+    Legacy,
+    Application(&'a ApplicationCatalog),
+}
+
+impl Repository<'_> {
+    fn key(self, path: &str) -> Vec<u8> {
+        match self {
+            Self::Legacy => store_key(&format!("{PREFIX}{path}")),
+            Self::Application(catalog) => crate::application_outbox::index_key(catalog, path),
+        }
+    }
+
+    fn validate(self, row: &OutboxEffect) -> Result<()> {
+        validate_row_with_lease(row, matches!(self, Self::Application(_)))
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum EffectType {
@@ -112,7 +133,7 @@ impl EffectStatus {
         }
     }
 
-    fn from_wire(value: &str) -> Option<Self> {
+    pub(crate) fn from_wire(value: &str) -> Option<Self> {
         Some(match value {
             "pending" => Self::Pending,
             "running" => Self::Running,
@@ -316,7 +337,7 @@ fn validate_error(value: &str) -> Result<()> {
     }
 }
 
-fn request_type(request: &Value) -> Result<EffectType> {
+pub(crate) fn request_type(request: &Value) -> Result<EffectType> {
     request
         .get("type")
         .and_then(Value::as_str)
@@ -369,7 +390,7 @@ fn trim_request_id(record: &mut Value, field: &str) -> Result<()> {
 
 /// Effect Schema encodes only the selected union variant, including its nested records.
 /// Preserve unknown user answer values, but never persist transport extras as request fields.
-fn normalize_request(request: &Value) -> Result<Value> {
+pub(crate) fn normalize_request(request: &Value) -> Result<Value> {
     let fields: &[&str] = match request_type(request)? {
         EffectType::ProviderRuntimeContinue => &["type", "sourceRunId"],
         EffectType::ProviderSessionDetach => {
@@ -615,23 +636,23 @@ fn component(value: &str) -> String {
     result
 }
 
-fn key(path: &str) -> Vec<u8> {
-    store_key(&format!("{PREFIX}{path}"))
+fn key(repo: Repository<'_>, path: &str) -> Vec<u8> {
+    repo.key(path)
 }
 
-fn range(path: &str) -> (Vec<u8>, Vec<u8>) {
-    let start = key(path);
+fn range(repo: Repository<'_>, path: &str) -> (Vec<u8>, Vec<u8>) {
+    let start = key(repo, path);
     let mut end = start.clone();
     end.push(255);
     (start, end)
 }
 
-fn row_key(id: &str) -> Vec<u8> {
-    key(&format!("row/{}", component(id)))
+fn row_key(repo: Repository<'_>, id: &str) -> Vec<u8> {
+    key(repo, &format!("row/{}", component(id)))
 }
 
-fn claim_stream_key(id: &str) -> Vec<u8> {
-    key(&format!("claim-stream/{}", component(id)))
+fn claim_stream_key(repo: Repository<'_>, id: &str) -> Vec<u8> {
+    key(repo, &format!("claim-stream/{}", component(id)))
 }
 
 fn validate_claim(input: &Claim) -> Result<()> {
@@ -682,40 +703,43 @@ fn lane(effect: &OutboxEffect) -> Result<String> {
     ))
 }
 
-fn index_keys(effect: &OutboxEffect) -> Result<BTreeSet<Vec<u8>>> {
+fn index_keys(repo: Repository<'_>, effect: &OutboxEffect) -> Result<BTreeSet<Vec<u8>>> {
     let id = component(&effect.id);
     let order = format!("{:016x}/{id}", effect.insertion_ordinal);
     let lane = lane(effect)?;
-    let mut indexes = BTreeSet::from([key(&format!(
-        "command/{}/{}/{id}",
-        component(&effect.command_id),
-        effect.created_at
-    ))]);
+    let mut indexes = BTreeSet::from([key(
+        repo,
+        &format!(
+            "command/{}/{}/{id}",
+            component(&effect.command_id),
+            effect.created_at
+        ),
+    )]);
     match effect.status {
         EffectStatus::Pending => {
-            indexes.insert(key(&format!(
-                "pending/{}/{}/{id}",
-                effect.available_at, effect.created_at
-            )));
-            indexes.insert(key(&format!("lane-pending/{lane}/{order}")));
+            indexes.insert(key(
+                repo,
+                &format!("pending/{}/{}/{id}", effect.available_at, effect.created_at),
+            ));
+            indexes.insert(key(repo, &format!("lane-pending/{lane}/{order}")));
             if request_type(&effect.request)? != EffectType::ProviderRuntimeContinue {
-                indexes.insert(key(&format!("lane-pending-ordinary/{lane}/{order}")));
+                indexes.insert(key(repo, &format!("lane-pending-ordinary/{lane}/{order}")));
             }
-            indexes.insert(key(&format!("unsettled/{order}")));
+            indexes.insert(key(repo, &format!("unsettled/{order}")));
         }
         EffectStatus::Running => {
-            indexes.insert(key(&format!("lane-running/{lane}/{order}")));
-            indexes.insert(key(&format!("unsettled/{order}")));
+            indexes.insert(key(repo, &format!("lane-running/{lane}/{order}")));
+            indexes.insert(key(repo, &format!("unsettled/{order}")));
         }
         EffectStatus::Succeeded | EffectStatus::Cancelled => {
-            indexes.insert(key(&format!("settled/{order}")));
+            indexes.insert(key(repo, &format!("settled/{order}")));
         }
         EffectStatus::Failed => {}
     }
     Ok(indexes)
 }
 
-fn validate_row(row: &OutboxEffect) -> Result<()> {
+fn validate_row_with_lease(row: &OutboxEffect, retain_lease_expiry: bool) -> Result<()> {
     crate::validate_id(&row.id)?;
     crate::validate_id(&row.command_id)?;
     crate::validate_id(&row.thread_id)?;
@@ -737,7 +761,7 @@ fn validate_row(row: &OutboxEffect) -> Result<()> {
     if row.insertion_ordinal == 0
         || row.insertion_ordinal > MAX_COUNTER
         || row.attempt_count > MAX_COUNTER
-        || row.lease_expires_at.is_some()
+        || (!retain_lease_expiry && row.lease_expires_at.is_some())
         || (row.status == EffectStatus::Running) != row.lease_owner.is_some()
         || matches!(row.status, EffectStatus::Pending | EffectStatus::Running)
             == row.completed_at.is_some()
@@ -755,19 +779,29 @@ struct ReadBudget {
 
 async fn read_row(
     tx: &mut Transaction,
+    repo: Repository<'_>,
     id: &str,
     budget: &mut ReadBudget,
 ) -> Result<Option<OutboxEffect>> {
-    let Some(bytes) = tx.get(&row_key(id)).await? else {
+    let loaded = match repo {
+        Repository::Legacy => tx
+            .get(&row_key(repo, id))
+            .await?
+            .map(|bytes| crate::decode(&bytes).map(|row| (row, bytes.len())))
+            .transpose()?,
+        Repository::Application(catalog) => {
+            crate::application_outbox::load_row(tx, catalog, id).await?
+        }
+    };
+    let Some((row, bytes)) = loaded else {
         return Ok(None);
     };
-    budget.bytes = budget.bytes.saturating_add(bytes.len());
+    budget.bytes = budget.bytes.saturating_add(bytes);
     budget.rows += 1;
     if budget.bytes > MAX_BATCH_BYTES || budget.rows > MAX_BATCH_RECORDS {
         return Err(invalid("outbox operation exceeds its read budget"));
     }
-    let row: OutboxEffect = crate::decode(&bytes)?;
-    validate_row(&row).map_err(|_| Error::IncompatibleStore)?;
+    repo.validate(&row).map_err(|_| Error::IncompatibleStore)?;
     if row.id != id {
         return Err(Error::IncompatibleStore);
     }
@@ -776,15 +810,16 @@ async fn read_row(
 
 async fn indexed_row(
     tx: &mut Transaction,
+    repo: Repository<'_>,
     entry: &(Vec<u8>, Vec<u8>),
     budget: &mut ReadBudget,
 ) -> Result<OutboxEffect> {
     let id = std::str::from_utf8(&entry.1).map_err(|_| Error::IncompatibleStore)?;
     crate::validate_id(id).map_err(|_| Error::IncompatibleStore)?;
-    let row = read_row(tx, id, budget)
+    let row = read_row(tx, repo, id, budget)
         .await?
         .ok_or(Error::IncompatibleStore)?;
-    if !index_keys(&row)?.contains(&entry.0) {
+    if !index_keys(repo, &row)?.contains(&entry.0) {
         return Err(Error::IncompatibleStore);
     }
     Ok(row)
@@ -792,19 +827,57 @@ async fn indexed_row(
 
 async fn save_row(
     tx: &mut Transaction,
+    repo: Repository<'_>,
     previous: Option<&OutboxEffect>,
     next: &OutboxEffect,
 ) -> Result<()> {
-    validate_row(next)?;
-    let old = previous.map(index_keys).transpose()?.unwrap_or_default();
-    let new = index_keys(next)?;
+    repo.validate(next)?;
+    let old = previous
+        .map(|row| index_keys(repo, row))
+        .transpose()?
+        .unwrap_or_default();
+    let new = index_keys(repo, next)?;
     for key in old.difference(&new) {
         tx.delete(key.clone()).await?;
     }
     for key in new.difference(&old) {
         tx.insert(key.clone(), next.id.as_bytes().to_vec()).await?;
     }
-    tx.put(row_key(&next.id), crate::encode(next)?).await
+    match repo {
+        Repository::Legacy => tx.put(row_key(repo, &next.id), crate::encode(next)?).await,
+        Repository::Application(catalog) => {
+            crate::application_outbox::save_row(tx, catalog, next).await
+        }
+    }
+}
+
+/// Bootstrap only auxiliary data. Imported application row bytes remain untouched.
+pub(crate) async fn index_imported(
+    tx: &mut Transaction,
+    catalog: &ApplicationCatalog,
+    row: &OutboxEffect,
+) -> Result<()> {
+    let repo = Repository::Application(catalog);
+    repo.validate(row).map_err(|_| Error::IncompatibleStore)?;
+    for key in index_keys(repo, row)? {
+        tx.insert(key, row.id.as_bytes().to_vec()).await?;
+    }
+    let counter_key = key(repo, "counter");
+    let previous = tx
+        .get(&counter_key)
+        .await?
+        .as_deref()
+        .map(crate::decode::<u64>)
+        .transpose()?
+        .unwrap_or(0);
+    if previous > MAX_COUNTER {
+        return Err(Error::IncompatibleStore);
+    }
+    if row.insertion_ordinal > previous {
+        tx.put(counter_key, crate::encode(&row.insertion_ordinal)?)
+            .await?;
+    }
+    Ok(())
 }
 
 fn policy_row(row: &OutboxEffect) -> Result<policy::Row> {
@@ -828,6 +901,7 @@ fn policy_row(row: &OutboxEffect) -> Result<policy::Row> {
 
 async fn transition(
     tx: &mut Transaction,
+    repo: Repository<'_>,
     row: &OutboxEffect,
     action: policy::Action,
     now: &str,
@@ -851,12 +925,13 @@ async fn transition(
     if next == *row {
         return Ok(None);
     }
-    save_row(tx, Some(row), &next).await?;
+    save_row(tx, repo, Some(row), &next).await?;
     Ok(Some(next))
 }
 
-pub(crate) async fn stage_enqueue(
+pub(crate) async fn stage_enqueue_in(
     tx: &mut Transaction,
+    repo: Repository<'_>,
     effects: &[EnqueueEffect],
     now: &str,
 ) -> Result<usize> {
@@ -865,12 +940,12 @@ pub(crate) async fn stage_enqueue(
     let mut counter = None;
     let mut inserted = 0;
     for effect in effects {
-        if read_row(tx, &effect.id, &mut budget).await?.is_some() {
+        if read_row(tx, repo, &effect.id, &mut budget).await?.is_some() {
             continue;
         }
         let last = match counter {
             Some(last) => last,
-            None => match tx.get(&key("counter")).await? {
+            None => match tx.get(&key(repo, "counter")).await? {
                 Some(bytes) => crate::decode::<u64>(&bytes)?,
                 None => 0,
             },
@@ -897,23 +972,25 @@ pub(crate) async fn stage_enqueue(
             last_error: None,
             insertion_ordinal: last + 1,
         };
-        save_row(tx, None, &row).await?;
+        save_row(tx, repo, None, &row).await?;
         counter = Some(last + 1);
         inserted += 1;
     }
     if let Some(counter) = counter {
-        tx.put(key("counter"), crate::encode(&counter)?).await?;
+        tx.put(key(repo, "counter"), crate::encode(&counter)?)
+            .await?;
     }
     Ok(inserted)
 }
 
 async fn page(
     tx: &mut Transaction,
+    repo: Repository<'_>,
     path: &str,
     after: Option<&Vec<u8>>,
     limit: usize,
 ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-    let (mut start, end) = range(path);
+    let (mut start, end) = range(repo, path);
     if let Some(after) = after {
         start = after.clone();
         start.push(0);
@@ -923,6 +1000,7 @@ async fn page(
 
 async fn lane_blockers(
     tx: &mut Transaction,
+    repo: Repository<'_>,
     row: &OutboxEffect,
     exclude: bool,
     budget: &mut ReadBudget,
@@ -938,14 +1016,14 @@ async fn lane_blockers(
         format!("{pending}/{lane}/"),
         format!("lane-running/{lane}/"),
     ] {
-        for entry in page(tx, &path, None, 1).await? {
+        for entry in page(tx, repo, &path, None, 1).await? {
             if entry.1 == row.id.as_bytes() {
-                if !index_keys(row)?.contains(&entry.0) {
+                if !index_keys(repo, row)?.contains(&entry.0) {
                     return Err(Error::IncompatibleStore);
                 }
                 rows.push(policy_row(row)?);
             } else {
-                rows.push(policy_row(&indexed_row(tx, &entry, budget).await?)?);
+                rows.push(policy_row(&indexed_row(tx, repo, &entry, budget).await?)?);
             }
         }
     }
@@ -954,22 +1032,23 @@ async fn lane_blockers(
 
 async fn candidate(
     tx: &mut Transaction,
+    repo: Repository<'_>,
     now: Option<&str>,
     exclude: bool,
 ) -> Result<Option<OutboxEffect>> {
     let mut after = None;
     let mut budget = ReadBudget::default();
     loop {
-        let entries = page(tx, "pending/", after.as_ref(), PAGE_SIZE).await?;
+        let entries = page(tx, repo, "pending/", after.as_ref(), PAGE_SIZE).await?;
         for entry in &entries {
-            let row = indexed_row(tx, entry, &mut budget).await?;
+            let row = indexed_row(tx, repo, entry, &mut budget).await?;
             if now.is_some_and(|now| row.available_at.as_str() > now) {
                 return Ok(None);
             }
             if exclude && request_type(&row.request)? == EffectType::ProviderRuntimeContinue {
                 continue;
             }
-            let blockers = lane_blockers(tx, &row, exclude, &mut budget).await?;
+            let blockers = lane_blockers(tx, repo, &row, exclude, &mut budget).await?;
             if policy::claimable(&policy_row(&row)?, &blockers, now, exclude) {
                 return Ok(Some(row));
             }
@@ -981,11 +1060,24 @@ async fn candidate(
     }
 }
 
-async fn stage_claim(tx: &mut Transaction, input: &Claim) -> Result<Option<OutboxEffect>> {
-    match candidate(tx, Some(&input.now), input.exclude_restart_continuations).await? {
+pub(crate) async fn stage_claim_in(
+    tx: &mut Transaction,
+    repo: Repository<'_>,
+    input: &Claim,
+) -> Result<Option<OutboxEffect>> {
+    validate_claim(input)?;
+    match candidate(
+        tx,
+        repo,
+        Some(&input.now),
+        input.exclude_restart_continuations,
+    )
+    .await?
+    {
         Some(row) => {
             transition(
                 tx,
+                repo,
                 &row,
                 policy::Action::Claim {
                     worker_id: input.worker_id.clone(),
@@ -998,7 +1090,11 @@ async fn stage_claim(tx: &mut Transaction, input: &Claim) -> Result<Option<Outbo
     }
 }
 
-async fn replay_claim(tx: &mut Transaction, cursor: &ClaimCursor) -> Result<ClaimOutcome> {
+async fn replay_claim(
+    tx: &mut Transaction,
+    repo: Repository<'_>,
+    cursor: &ClaimCursor,
+) -> Result<ClaimOutcome> {
     let Some(identity) = &cursor.effect else {
         return Ok(ClaimOutcome {
             state: ClaimState::Empty,
@@ -1006,7 +1102,7 @@ async fn replay_claim(tx: &mut Transaction, cursor: &ClaimCursor) -> Result<Clai
             effect: None,
         });
     };
-    let effect = read_row(tx, &identity.effect_id, &mut ReadBudget::default())
+    let effect = read_row(tx, repo, &identity.effect_id, &mut ReadBudget::default())
         .await?
         .filter(|row| {
             row.status == EffectStatus::Running
@@ -1025,16 +1121,20 @@ async fn replay_claim(tx: &mut Transaction, cursor: &ClaimCursor) -> Result<Clai
     })
 }
 
-async fn stage_claim_once(tx: &mut Transaction, input: &ClaimOnce) -> Result<ClaimOutcome> {
+pub(crate) async fn stage_claim_once_in(
+    tx: &mut Transaction,
+    repo: Repository<'_>,
+    input: &ClaimOnce,
+) -> Result<ClaimOutcome> {
     validate_claim_once(input)?;
-    let cursor_key = claim_stream_key(&input.stream_id);
+    let cursor_key = claim_stream_key(repo, &input.stream_id);
     if let Some(bytes) = tx.get(&cursor_key).await? {
         let cursor = decode_claim_cursor(&bytes, &input.stream_id)?;
         if input.sequence == cursor.sequence {
             if input.claim != cursor.claim {
                 return Err(invalid("outbox claim sequence belongs to another request"));
             }
-            return replay_claim(tx, &cursor).await;
+            return replay_claim(tx, repo, &cursor).await;
         }
         if input.sequence != cursor.sequence + 1 {
             return Err(invalid(
@@ -1047,7 +1147,7 @@ async fn stage_claim_once(tx: &mut Transaction, input: &ClaimOnce) -> Result<Cla
     } else if input.sequence != 1 {
         return Err(invalid("outbox claim stream must start at sequence one"));
     }
-    let effect = stage_claim(tx, &input.claim).await?;
+    let effect = stage_claim_in(tx, repo, &input.claim).await?;
     let cursor = ClaimCursor {
         stream_id: input.stream_id.clone(),
         sequence: input.sequence,
@@ -1070,8 +1170,9 @@ async fn stage_claim_once(tx: &mut Transaction, input: &ClaimOnce) -> Result<Cla
     })
 }
 
-pub(crate) async fn stage_cancel_unsettled(
+pub(crate) async fn stage_cancel_unsettled_in(
     tx: &mut Transaction,
+    repo: Repository<'_>,
     input: &CancelUnsettled,
 ) -> Result<Vec<String>> {
     validate_cancel(input)?;
@@ -1085,9 +1186,9 @@ pub(crate) async fn stage_cancel_unsettled(
             let path = format!("{status}/{}/{lane}/", component(&input.thread_id));
             let mut after = None;
             loop {
-                let entries = page(tx, &path, after.as_ref(), PAGE_SIZE).await?;
+                let entries = page(tx, repo, &path, after.as_ref(), PAGE_SIZE).await?;
                 for entry in &entries {
-                    let row = indexed_row(tx, entry, &mut budget).await?;
+                    let row = indexed_row(tx, repo, entry, &mut budget).await?;
                     if input.effect_types.contains(&request_type(&row.request)?) {
                         matches.insert(row.insertion_ordinal, row);
                     }
@@ -1103,6 +1204,7 @@ pub(crate) async fn stage_cancel_unsettled(
     for row in matches.into_values() {
         if transition(
             tx,
+            repo,
             &row,
             policy::Action::Cancel {
                 reason: input.reason.clone(),
@@ -1135,49 +1237,233 @@ async fn finish<T>(tx: Transaction, result: Result<T>, changed: bool) -> Result<
     }
 }
 
+// The component entry points and application sessions share these transaction-local operations.
+pub(crate) async fn stage_enqueue(
+    tx: &mut Transaction,
+    effects: &[EnqueueEffect],
+    now: &str,
+) -> Result<usize> {
+    stage_enqueue_in(tx, Repository::Legacy, effects, now).await
+}
+
+pub(crate) async fn stage_cancel_unsettled(
+    tx: &mut Transaction,
+    input: &CancelUnsettled,
+) -> Result<Vec<String>> {
+    stage_cancel_unsettled_in(tx, Repository::Legacy, input).await
+}
+
+pub(crate) async fn stage_get_in(
+    tx: &mut Transaction,
+    repo: Repository<'_>,
+    id: &str,
+) -> Result<Option<OutboxEffect>> {
+    crate::validate_id(id)?;
+    let row = read_row(tx, repo, id, &mut ReadBudget::default()).await?;
+    crate::validate_response_bytes(&row)?;
+    Ok(row)
+}
+
+pub(crate) async fn stage_list_in(
+    tx: &mut Transaction,
+    repo: Repository<'_>,
+    command_id: &str,
+) -> Result<Vec<OutboxEffect>> {
+    crate::validate_id(command_id)?;
+    let path = format!("command/{}/", component(command_id));
+    let mut rows = Vec::new();
+    let mut after = None;
+    let mut budget = ReadBudget::default();
+    loop {
+        let entries = page(tx, repo, &path, after.as_ref(), PAGE_SIZE).await?;
+        for entry in &entries {
+            rows.push(indexed_row(tx, repo, entry, &mut budget).await?);
+        }
+        if entries.len() < PAGE_SIZE {
+            crate::validate_response_bytes(&rows)?;
+            return Ok(rows);
+        }
+        after = entries.last().map(|entry| entry.0.clone());
+    }
+}
+
+pub(crate) async fn stage_next_in(
+    tx: &mut Transaction,
+    repo: Repository<'_>,
+) -> Result<Option<String>> {
+    candidate(tx, repo, None, false)
+        .await
+        .map(|row| row.map(|row| row.available_at))
+}
+
+async fn stage_settle_in(
+    tx: &mut Transaction,
+    repo: Repository<'_>,
+    input: &Settle,
+    action: policy::Action,
+) -> Result<bool> {
+    crate::validate_id(&input.effect_id)?;
+    crate::validate_id(&input.worker_id)?;
+    validate_timestamp(&input.now)?;
+    let Some(row) = read_row(tx, repo, &input.effect_id, &mut ReadBudget::default()).await? else {
+        return Ok(false);
+    };
+    transition(tx, repo, &row, action, &input.now)
+        .await
+        .map(|row| row.is_some())
+}
+
+pub(crate) async fn stage_succeed_in(
+    tx: &mut Transaction,
+    repo: Repository<'_>,
+    input: &Settle,
+) -> Result<bool> {
+    stage_settle_in(
+        tx,
+        repo,
+        input,
+        policy::Action::Succeed {
+            worker_id: input.worker_id.clone(),
+        },
+    )
+    .await
+}
+
+pub(crate) async fn stage_retry_in(
+    tx: &mut Transaction,
+    repo: Repository<'_>,
+    input: &Retry,
+) -> Result<bool> {
+    validate_timestamp(&input.available_at)?;
+    validate_error(&input.error)?;
+    if input.available_at < input.now {
+        return Err(invalid("outbox retry deadline precedes now"));
+    }
+    stage_settle_in(
+        tx,
+        repo,
+        &Settle {
+            effect_id: input.effect_id.clone(),
+            worker_id: input.worker_id.clone(),
+            now: input.now.clone(),
+        },
+        policy::Action::Retry {
+            worker_id: input.worker_id.clone(),
+            error: input.error.clone(),
+            available_at: input.available_at.clone(),
+        },
+    )
+    .await
+}
+
+pub(crate) async fn stage_fail_in(
+    tx: &mut Transaction,
+    repo: Repository<'_>,
+    input: &Failure,
+) -> Result<bool> {
+    validate_error(&input.error)?;
+    stage_settle_in(
+        tx,
+        repo,
+        &Settle {
+            effect_id: input.effect_id.clone(),
+            worker_id: input.worker_id.clone(),
+            now: input.now.clone(),
+        },
+        policy::Action::Fail {
+            worker_id: input.worker_id.clone(),
+            error: input.error.clone(),
+        },
+    )
+    .await
+}
+
+pub(crate) async fn stage_reconcile_in(
+    tx: &mut Transaction,
+    repo: Repository<'_>,
+    input: &Reconcile,
+) -> Result<ReconcileOutcome> {
+    validate_timestamp(&input.now)?;
+    let mut counts = ReconcileOutcome {
+        requeued: 0,
+        cancelled: 0,
+    };
+    let mut after = None;
+    let mut budget = ReadBudget::default();
+    loop {
+        let entries = page(tx, repo, "unsettled/", after.as_ref(), PAGE_SIZE).await?;
+        for entry in &entries {
+            let row = indexed_row(tx, repo, entry, &mut budget).await?;
+            if let Some(next) =
+                transition(tx, repo, &row, policy::Action::Reconcile, &input.now).await?
+            {
+                match next.status {
+                    EffectStatus::Pending => counts.requeued += 1,
+                    EffectStatus::Cancelled => counts.cancelled += 1,
+                    _ => return Err(Error::IncompatibleStore),
+                }
+            }
+        }
+        if entries.len() < PAGE_SIZE {
+            return Ok(counts);
+        }
+        after = entries.last().map(|entry| entry.0.clone());
+    }
+}
+
+pub(crate) async fn stage_prune_in(
+    tx: &mut Transaction,
+    repo: Repository<'_>,
+    input: &Prune,
+) -> Result<usize> {
+    validate_timestamp(&input.before)?;
+    if input.limit == 0 || input.limit as usize > policy::PRUNE_BATCH_SIZE {
+        return Err(invalid("outbox prune limit must be between 1 and 500"));
+    }
+    let mut removed = 0;
+    let mut after = None;
+    let mut budget = ReadBudget::default();
+    loop {
+        let entries = page(tx, repo, "settled/", after.as_ref(), PAGE_SIZE).await?;
+        for entry in &entries {
+            let row = indexed_row(tx, repo, entry, &mut budget).await?;
+            if policy::prunable(&policy_row(&row)?, &input.before) {
+                for key in index_keys(repo, &row)? {
+                    tx.delete(key).await?;
+                }
+                match repo {
+                    Repository::Legacy => tx.delete(row_key(repo, &row.id)).await?,
+                    Repository::Application(catalog) => {
+                        crate::application_outbox::delete_row(tx, catalog, &row).await?
+                    }
+                }
+                removed += 1;
+                if removed == input.limit as usize {
+                    return Ok(removed);
+                }
+            }
+        }
+        if entries.len() < PAGE_SIZE {
+            return Ok(removed);
+        }
+        after = entries.last().map(|entry| entry.0.clone());
+    }
+}
+
 impl Store {
     pub async fn outbox_get(&self, id: &str) -> Result<Option<OutboxEffect>> {
-        crate::validate_id(id)?;
         let mut tx = self.db.begin().await?;
-        let result = read_row(&mut tx, id, &mut ReadBudget::default())
-            .await
-            .and_then(|row| {
-                if crate::encode(&row)?.len() > MAX_BATCH_BYTES {
-                    return Err(invalid("outbox response exceeds 16 MiB"));
-                }
-                Ok(row)
-            });
+        let result = stage_get_in(&mut tx, Repository::Legacy, id).await;
         finish(tx, result, false).await
     }
 
     pub async fn outbox_list_by_command(&self, command_id: &str) -> Result<Vec<OutboxEffect>> {
-        crate::validate_id(command_id)?;
         let mut tx = self.db.begin().await?;
-        let result = async {
-            let path = format!("command/{}/", component(command_id));
-            let mut rows = Vec::new();
-            let mut after = None;
-            let mut budget = ReadBudget::default();
-            loop {
-                let entries = page(&mut tx, &path, after.as_ref(), PAGE_SIZE).await?;
-                for entry in &entries {
-                    rows.push(indexed_row(&mut tx, entry, &mut budget).await?);
-                }
-                if entries.len() < PAGE_SIZE {
-                    if crate::encode(&rows)?.len() > MAX_BATCH_BYTES {
-                        return Err(invalid("outbox response exceeds 16 MiB"));
-                    }
-                    return Ok(rows);
-                }
-                after = entries.last().map(|entry| entry.0.clone());
-            }
-        }
-        .await;
+        let result = stage_list_in(&mut tx, Repository::Legacy, command_id).await;
         finish(tx, result, false).await
     }
 
     pub async fn outbox_enqueue(&self, effects: &[EnqueueEffect], now: &str) -> Result<usize> {
-        validate_enqueue(effects, now)?;
         let mut tx = self.db.begin().await?;
         let result = stage_enqueue(&mut tx, effects, now).await;
         let changed = result.as_ref().is_ok_and(|count| *count > 0);
@@ -1187,7 +1473,7 @@ impl Store {
     pub async fn outbox_claim_next(&self, input: &Claim) -> Result<Option<OutboxEffect>> {
         validate_claim(input)?;
         let mut tx = self.db.begin().await?;
-        let result = stage_claim(&mut tx, input).await;
+        let result = stage_claim_in(&mut tx, Repository::Legacy, input).await;
         let changed = result.as_ref().is_ok_and(Option::is_some);
         finish(tx, result, changed).await
     }
@@ -1196,90 +1482,44 @@ impl Store {
     /// Use a new stream per worker incarnation; database reconnects retain the original stream.
     pub async fn outbox_claim_once(&self, input: &ClaimOnce) -> Result<ClaimOutcome> {
         let mut tx = self.db.begin().await?;
-        let result = stage_claim_once(&mut tx, input).await.and_then(|outcome| {
-            crate::validate_response_bytes(&outcome)?;
-            Ok(outcome)
-        });
+        let result = stage_claim_once_in(&mut tx, Repository::Legacy, input)
+            .await
+            .and_then(|outcome| {
+                crate::validate_response_bytes(&outcome)?;
+                Ok(outcome)
+            });
         let changed = result.as_ref().is_ok_and(|outcome| !outcome.replayed);
         finish(tx, result, changed).await
     }
 
     pub async fn outbox_next_claimable_at(&self) -> Result<Option<String>> {
         let mut tx = self.db.begin().await?;
-        let result = candidate(&mut tx, None, false)
-            .await
-            .map(|row| row.map(|row| row.available_at));
+        let result = stage_next_in(&mut tx, Repository::Legacy).await;
         finish(tx, result, false).await
     }
 
-    async fn outbox_settle(&self, input: &Settle, action: policy::Action) -> Result<bool> {
-        crate::validate_id(&input.effect_id)?;
-        crate::validate_id(&input.worker_id)?;
-        validate_timestamp(&input.now)?;
+    pub async fn outbox_succeed(&self, input: &Settle) -> Result<bool> {
         let mut tx = self.db.begin().await?;
-        let result = async {
-            let Some(row) = read_row(&mut tx, &input.effect_id, &mut ReadBudget::default()).await?
-            else {
-                return Ok(false);
-            };
-            transition(&mut tx, &row, action, &input.now)
-                .await
-                .map(|value| value.is_some())
-        }
-        .await;
+        let result = stage_succeed_in(&mut tx, Repository::Legacy, input).await;
         let changed = result.as_ref().is_ok_and(|value| *value);
         finish(tx, result, changed).await
     }
 
-    pub async fn outbox_succeed(&self, input: &Settle) -> Result<bool> {
-        self.outbox_settle(
-            input,
-            policy::Action::Succeed {
-                worker_id: input.worker_id.clone(),
-            },
-        )
-        .await
-    }
-
     pub async fn outbox_retry(&self, input: &Retry) -> Result<bool> {
-        validate_timestamp(&input.available_at)?;
-        validate_error(&input.error)?;
-        if input.available_at < input.now {
-            return Err(invalid("outbox retry deadline precedes now"));
-        }
-        self.outbox_settle(
-            &Settle {
-                effect_id: input.effect_id.clone(),
-                worker_id: input.worker_id.clone(),
-                now: input.now.clone(),
-            },
-            policy::Action::Retry {
-                worker_id: input.worker_id.clone(),
-                error: input.error.clone(),
-                available_at: input.available_at.clone(),
-            },
-        )
-        .await
+        let mut tx = self.db.begin().await?;
+        let result = stage_retry_in(&mut tx, Repository::Legacy, input).await;
+        let changed = result.as_ref().is_ok_and(|value| *value);
+        finish(tx, result, changed).await
     }
 
     pub async fn outbox_fail(&self, input: &Failure) -> Result<bool> {
-        validate_error(&input.error)?;
-        self.outbox_settle(
-            &Settle {
-                effect_id: input.effect_id.clone(),
-                worker_id: input.worker_id.clone(),
-                now: input.now.clone(),
-            },
-            policy::Action::Fail {
-                worker_id: input.worker_id.clone(),
-                error: input.error.clone(),
-            },
-        )
-        .await
+        let mut tx = self.db.begin().await?;
+        let result = stage_fail_in(&mut tx, Repository::Legacy, input).await;
+        let changed = result.as_ref().is_ok_and(|value| *value);
+        finish(tx, result, changed).await
     }
 
     pub async fn outbox_cancel_unsettled(&self, input: &CancelUnsettled) -> Result<Vec<String>> {
-        validate_cancel(input)?;
         let mut tx = self.db.begin().await?;
         let result = stage_cancel_unsettled(&mut tx, input).await;
         let changed = result.as_ref().is_ok_and(|ids| !ids.is_empty());
@@ -1287,36 +1527,8 @@ impl Store {
     }
 
     pub async fn outbox_reconcile(&self, input: &Reconcile) -> Result<ReconcileOutcome> {
-        validate_timestamp(&input.now)?;
         let mut tx = self.db.begin().await?;
-        let result = async {
-            let mut counts = ReconcileOutcome {
-                requeued: 0,
-                cancelled: 0,
-            };
-            let mut after = None;
-            let mut budget = ReadBudget::default();
-            loop {
-                let entries = page(&mut tx, "unsettled/", after.as_ref(), PAGE_SIZE).await?;
-                for entry in &entries {
-                    let row = indexed_row(&mut tx, entry, &mut budget).await?;
-                    if let Some(next) =
-                        transition(&mut tx, &row, policy::Action::Reconcile, &input.now).await?
-                    {
-                        match next.status {
-                            EffectStatus::Pending => counts.requeued += 1,
-                            EffectStatus::Cancelled => counts.cancelled += 1,
-                            _ => return Err(Error::IncompatibleStore),
-                        }
-                    }
-                }
-                if entries.len() < PAGE_SIZE {
-                    return Ok(counts);
-                }
-                after = entries.last().map(|entry| entry.0.clone());
-            }
-        }
-        .await;
+        let result = stage_reconcile_in(&mut tx, Repository::Legacy, input).await;
         let changed = result
             .as_ref()
             .is_ok_and(|counts| counts.requeued + counts.cancelled > 0);
@@ -1324,37 +1536,8 @@ impl Store {
     }
 
     pub async fn outbox_prune(&self, input: &Prune) -> Result<usize> {
-        validate_timestamp(&input.before)?;
-        if input.limit == 0 || input.limit as usize > policy::PRUNE_BATCH_SIZE {
-            return Err(invalid("outbox prune limit must be between 1 and 500"));
-        }
         let mut tx = self.db.begin().await?;
-        let result = async {
-            let mut removed = 0;
-            let mut after = None;
-            let mut budget = ReadBudget::default();
-            loop {
-                let entries = page(&mut tx, "settled/", after.as_ref(), PAGE_SIZE).await?;
-                for entry in &entries {
-                    let row = indexed_row(&mut tx, entry, &mut budget).await?;
-                    if policy::prunable(&policy_row(&row)?, &input.before) {
-                        for key in index_keys(&row)? {
-                            tx.delete(key).await?;
-                        }
-                        tx.delete(row_key(&row.id)).await?;
-                        removed += 1;
-                        if removed == input.limit as usize {
-                            return Ok(removed);
-                        }
-                    }
-                }
-                if entries.len() < PAGE_SIZE {
-                    return Ok(removed);
-                }
-                after = entries.last().map(|entry| entry.0.clone());
-            }
-        }
-        .await;
+        let result = stage_prune_in(&mut tx, Repository::Legacy, input).await;
         let changed = result.as_ref().is_ok_and(|count| *count > 0);
         finish(tx, result, changed).await
     }

@@ -192,6 +192,179 @@ async function run(body) {
   );
 }
 
+function afterCommitHistory(client, secondClient) {
+  return Effect.gen(function* () {
+    const published = [];
+    const publish = (name) => Effect.sync(() => { published.push(name); });
+    const durable = row("hook-durable", { committed: true });
+    yield* client.withTransaction(Effect.gen(function* () {
+      yield* client.put("accounts", [durable.id], durable);
+      yield* client.afterCommit(Effect.gen(function* () {
+        Assert.equal(yield* client.isInTransaction, false);
+        Assert.deepEqual(yield* client.get("accounts", [durable.id]).pipe(Effect.orDie), durable);
+        yield* publish("durable");
+      }));
+      Assert.deepEqual(published, []);
+    }));
+    Assert.deepEqual(published, ["durable"]);
+    checked("Post-commit callbacks run after the root acknowledgement and session release, with a real durable read and no inherited transaction");
+
+    yield* client.withTransaction(Effect.gen(function* () {
+      yield* client.afterCommit(publish("parent-before"));
+      const rejected = yield* client.withTransaction(Effect.gen(function* () {
+        yield* client.afterCommit(publish("discarded-child"));
+        yield* client.withTransaction(client.afterCommit(publish("discarded-grandchild")));
+        return yield* Effect.fail("discard-hook-scope");
+      })).pipe(Effect.catch(Effect.succeed));
+      Assert.equal(rejected, "discard-hook-scope");
+      const defect = yield* client.withTransaction(
+        client.afterCommit(publish("discarded-defect")).pipe(Effect.andThen(Effect.die("hook-defect"))),
+      ).pipe(Effect.exit);
+      Assert.ok(Exit.isFailure(defect));
+      const interrupted = yield* client.withTransaction(
+        client.afterCommit(publish("discarded-interrupted")).pipe(Effect.andThen(Effect.interrupt)),
+      ).pipe(Effect.exit, Effect.uninterruptible);
+      Assert.ok(Exit.isFailure(interrupted));
+      yield* client.withTransaction(client.afterCommit(publish("released-child")));
+      yield* client.afterCommit(publish("parent-after"));
+      Assert.deepEqual(published, ["durable"]);
+    }));
+    Assert.deepEqual(published, ["durable", "parent-before", "released-child", "parent-after"]);
+    checked("Successful savepoints preserve callback order; rolled-back children discard their own released grandchildren, defects and interrupted callbacks");
+
+    for (const [name, end] of [
+      ["failure", Effect.fail("hook-outer-failure")],
+      ["defect", Effect.die("hook-outer-defect")],
+    ]) {
+      const result = yield* client.withTransaction(Effect.gen(function* () {
+        yield* client.put("accounts", [`hook-${name}`], row(`hook-${name}`));
+        yield* client.afterCommit(publish(`discarded-${name}-parent`));
+        yield* client.withTransaction(client.afterCommit(publish(`discarded-${name}-released-child`)));
+        return yield* end;
+      })).pipe(Effect.exit);
+      Assert.ok(Exit.isFailure(result));
+      Assert.equal(yield* client.get("accounts", [`hook-${name}`]), null);
+    }
+    const interruptedReady = yield* Deferred.make();
+    const interrupted = yield* client.withTransaction(Effect.gen(function* () {
+      yield* client.put("accounts", ["hook-interrupted"], row("hook-interrupted"));
+      yield* client.afterCommit(publish("discarded-interrupted-parent"));
+      yield* client.withTransaction(client.afterCommit(publish("discarded-interrupted-released-child")));
+      yield* Deferred.succeed(interruptedReady, undefined);
+      yield* Effect.never;
+    })).pipe(Effect.forkChild);
+    yield* Deferred.await(interruptedReady);
+    yield* Fiber.interrupt(interrupted);
+    Assert.equal(yield* client.get("accounts", ["hook-interrupted"]), null);
+    Assert.deepEqual(published, ["durable", "parent-before", "released-child", "parent-after"]);
+    checked("Outer failure, defect and external interruption discard parent and released-child callbacks together with their writes");
+
+    const beforeMissing = requests.length;
+    yield* failure(client.afterCommit(publish("missing")), "RedbTransactionError", "missing-transaction");
+    Assert.equal(requests.length, beforeMissing);
+    let closedRoot;
+    let closedChild;
+    yield* client.withTransaction(Effect.gen(function* () {
+      closedRoot = yield* Effect.context();
+      const before = requests.length;
+      yield* failure(secondClient.afterCommit(publish("different-client")), "RedbTransactionError", "different-client");
+      const child = yield* failure(
+        client.afterCommit(publish("different-fiber")), "RedbTransactionError", "different-fiber",
+      ).pipe(Effect.forkChild);
+      yield* Fiber.join(child);
+      Assert.equal(requests.length, before);
+      closedChild = yield* client.withTransaction(Effect.gen(function* () {
+        yield* failure(
+          client.afterCommit(publish("different-scope")).pipe(Effect.provide(closedRoot)),
+          "RedbTransactionError", "different-scope",
+        );
+        return yield* Effect.context();
+      }));
+      yield* failure(
+        client.afterCommit(publish("closed-child")).pipe(Effect.provide(closedChild)),
+        "RedbTransactionError", "closed-transaction",
+      );
+    }));
+    const afterRoot = requests.length;
+    yield* failure(
+      client.afterCommit(publish("closed-root")).pipe(Effect.provide(closedRoot)),
+      "RedbTransactionError", "closed-transaction",
+    );
+    Assert.equal(requests.length, afterRoot);
+    Assert.deepEqual(published, ["durable", "parent-before", "released-child", "parent-after"]);
+    checked("Callback registration rejects missing ownership, different clients or fibers, displaced parent scopes and closed root or savepoint contexts before any request");
+
+    yield* client.withTransaction(client.afterCommit(Effect.gen(function* () {
+      const before = requests.length;
+      yield* failure(
+        client.put("accounts", ["hook-reentry"], row("hook-reentry")),
+        "RedbTransactionError", "publication-write-reentry",
+      );
+      Assert.equal(requests.length, before);
+      Assert.deepEqual(yield* client.get("accounts", [durable.id]).pipe(Effect.orDie), durable);
+    })));
+    Assert.equal(yield* client.get("accounts", ["hook-reentry"]), null);
+    checked("A callback can read committed rows and rejects write reentry before acquiring its own publication lane");
+
+    let nestedPublication = false;
+    yield* client.withTransaction(client.afterCommit(
+      secondClient.withTransaction(Effect.gen(function* () {
+        yield* secondClient.put("accounts", ["hook-other-client"], row("hook-other-client"));
+        yield* secondClient.afterCommit(Effect.gen(function* () {
+          const before = requests.length;
+          yield* failure(
+            client.put("accounts", ["hook-publication-cycle"], row("hook-publication-cycle")),
+            "RedbTransactionError", "publication-write-reentry",
+          );
+          Assert.equal(requests.length, before);
+          Assert.deepEqual(yield* client.get("accounts", ["hook-other-client"]).pipe(Effect.orDie), row("hook-other-client"));
+          nestedPublication = true;
+        }));
+      })).pipe(Effect.orDie),
+    ));
+    Assert.equal(nestedPublication, true);
+    Assert.equal(yield* client.get("accounts", ["hook-publication-cycle"]), null);
+    Assert.deepEqual(yield* client.get("accounts", ["hook-other-client"]), row("hook-other-client"));
+    checked("Cross-client publication may commit another client's write, but its nested callback retains ancestor ownership and rejects a cycle back to the first writer");
+
+    const publicationOrder = [];
+    const firstPublishing = yield* Deferred.make();
+    const releaseFirst = yield* Deferred.make();
+    const secondStarted = yield* Deferred.make();
+    const secondCompleted = yield* Deferred.make();
+    const first = yield* client.withTransaction(Effect.gen(function* () {
+      yield* client.put("accounts", ["hook-first"], row("hook-first"));
+      yield* client.afterCommit(Effect.gen(function* () {
+        publicationOrder.push("first-start");
+        yield* Deferred.succeed(firstPublishing, undefined);
+        yield* Deferred.await(releaseFirst);
+        Assert.deepEqual(yield* client.get("accounts", ["hook-first"]).pipe(Effect.orDie), row("hook-first"));
+        publicationOrder.push("first-end");
+      }));
+    })).pipe(Effect.forkChild);
+    yield* Deferred.await(firstPublishing);
+    const second = yield* Deferred.succeed(secondStarted, undefined).pipe(
+      Effect.andThen(client.withTransaction(Effect.gen(function* () {
+        yield* client.put("accounts", ["hook-second"], row("hook-second"));
+        yield* client.afterCommit(Effect.sync(() => { publicationOrder.push("second"); }));
+      }))),
+      Effect.andThen(Deferred.succeed(secondCompleted, undefined)),
+      Effect.forkChild,
+    );
+    yield* Effect.gen(function* () {
+      yield* Deferred.await(secondStarted);
+      yield* Effect.promise(() => new Promise((resolve) => setImmediate(resolve)));
+      Assert.equal(yield* Deferred.isDone(secondCompleted), false);
+      Assert.deepEqual(publicationOrder, ["first-start"]);
+    }).pipe(Effect.ensuring(Deferred.succeed(releaseFirst, undefined)));
+    yield* Fiber.join(first);
+    yield* Fiber.join(second);
+    Assert.deepEqual(publicationOrder, ["first-start", "first-end", "second"]);
+    Assert.deepEqual(yield* client.get("accounts", ["hook-second"]), row("hook-second"));
+    checked("A later writer waits for prior publication, while the publishing callback can still read durably without a session or publication-lane deadlock");
+  });
+}
+
 try {
   const sqliteHistory = await sqliteSavepointHistory();
   const initialized = ChildProcess.spawnSync(executable, fixture.cliArgs("initialize"), {
@@ -290,6 +463,7 @@ try {
       const secondClient = yield* RedbClient.make.pipe(
         Effect.provideService(NativeDatabase.NativeDatabase, database),
       );
+      yield* afterCommitHistory(client, secondClient);
       yield* client.withTransaction(
         failure(secondClient.get("accounts", ["first"]), "RedbTransactionError", "different-client").pipe(
           Effect.andThen(failure(secondClient.withTransaction(Effect.void), "RedbTransactionError", "different-client")),
@@ -605,10 +779,16 @@ try {
       checked("Closing the helper before commit drops uncommitted state without reconnecting within the transaction");
 
       const beforeUnknown = requests.length;
+      let unknownPublished = 0;
       fault.dropCommit = true;
       const unknown = yield* failure(client.withTransaction(
         client.put("accounts", ["unknown-commit"], row("unknown-commit")).pipe(
-          Effect.andThen(client.withTransaction(client.put("accounts", ["unknown-commit-inner"], row("unknown-commit-inner")))),
+          Effect.andThen(client.afterCommit(Effect.sync(() => { unknownPublished += 1; }))),
+          Effect.andThen(client.withTransaction(
+            client.put("accounts", ["unknown-commit-inner"], row("unknown-commit-inner")).pipe(
+              Effect.andThen(client.afterCommit(Effect.sync(() => { unknownPublished += 1; }))),
+            ),
+          )),
         ),
       ), "NativeDatabaseOutcomeUnknown");
       Assert.equal(unknown.stage, "response");
@@ -617,7 +797,8 @@ try {
       ]);
       Assert.deepEqual(yield* client.get("accounts", ["unknown-commit"]), row("unknown-commit"));
       Assert.deepEqual(yield* client.get("accounts", ["unknown-commit-inner"]), row("unknown-commit-inner"));
-      checked("A lost acknowledgement after a real commit stays unknown with exactly one commit and no retry");
+      Assert.equal(unknownPublished, 0);
+      checked("A lost acknowledgement after a real commit stays unknown with exactly one commit, durable parent and child rows, no retry and no post-commit callbacks");
 
       const ids = new Set();
       let after = null;

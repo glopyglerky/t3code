@@ -1,0 +1,13 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "lib": ["ESNext", "esnext.disposable"]
+  },
+  "files": [
+    "../apps/server/src/persistence/NativeCommandReceipts.ts",
+    "../apps/server/src/orchestration-v2/CommandReceiptStore.ts",
+    "../apps/server/src/orchestration-v2/TurnItemPositionStore.ts",
+    "../apps/server/src/orchestration-v2/NativeTurnItemPositionStore.ts"
+  ]
+}

@@ -9,6 +9,12 @@ use t3_code_ls_storage::application::{
     ApplicationSchema, ApplicationTransactionMode, ApplicationTransactions,
 };
 use t3_code_ls_storage::application_events::{EventAppendRow, EventLatest, EventRead, EventStats};
+use t3_code_ls_storage::application_positions::PositionAllocate;
+use t3_code_ls_storage::application_projections::{
+    ProjectionApply, ProjectionGuard, ProjectionRead,
+};
+use t3_code_ls_storage::application_projects::{ProjectRecord, ProjectSelection};
+use t3_code_ls_storage::application_receipts::ReceiptRow;
 use t3_code_ls_storage::outbox::{self, EnqueueEffect};
 use t3_code_ls_storage::project_service::{ProjectRequest, execute_project};
 use t3_code_ls_storage::sqlite_import::ImportLimits;
@@ -98,6 +104,130 @@ enum Request {
     },
     ApplicationEventsPrunedThrough {
         transaction_id: String,
+    },
+    ApplicationReceiptsPrepare {},
+    ApplicationReceiptsInsert {
+        transaction_id: String,
+        receipt: ReceiptRow,
+    },
+    ApplicationReceiptsUpsert {
+        transaction_id: String,
+        receipt: ReceiptRow,
+    },
+    ApplicationReceiptsGet {
+        transaction_id: String,
+        command_id: String,
+    },
+    ApplicationPositionsPrepare {},
+    ApplicationPositionsAllocate {
+        transaction_id: String,
+        thread_id: String,
+        turn_item_id: String,
+        run_id: Option<String>,
+        run_ordinal: Option<i64>,
+    },
+    ApplicationProjectsPrepare {},
+    ApplicationProjectsSelect {
+        transaction_id: String,
+        project_id: Option<String>,
+        project_ids: Option<Vec<String>>,
+        workspace_root: Option<String>,
+        include_deleted: bool,
+    },
+    ApplicationProjectsUpsert {
+        transaction_id: String,
+        row: ProjectRecord,
+    },
+    ApplicationProjectionsPrepare {},
+    ApplicationProjectionsApply {
+        transaction_id: String,
+        event: ProjectionApply,
+    },
+    ApplicationProjectionsNormalization {
+        transaction_id: String,
+        event: ProjectionApply,
+    },
+    ApplicationProjectionsRead {
+        transaction_id: String,
+        read: ProjectionRead,
+    },
+    ApplicationProjectionsGuard {
+        transaction_id: String,
+        guard: ProjectionGuard,
+    },
+    ApplicationProjectionsMarkApplied {
+        transaction_id: String,
+        sequence: u64,
+        updated_at: String,
+    },
+    ApplicationOutboxPrepare {},
+    ApplicationOutboxEnqueue {
+        transaction_id: String,
+        effects: Vec<EnqueueEffect>,
+        now: String,
+    },
+    ApplicationOutboxGet {
+        transaction_id: String,
+        effect_id: String,
+    },
+    ApplicationOutboxList {
+        transaction_id: String,
+        command_id: String,
+    },
+    ApplicationOutboxCancel {
+        transaction_id: String,
+        thread_id: String,
+        effect_types: Vec<outbox::EffectType>,
+        reason: String,
+        now: String,
+    },
+    ApplicationOutboxReconcile {
+        transaction_id: String,
+        now: String,
+    },
+    ApplicationOutboxClaim {
+        transaction_id: String,
+        worker_id: String,
+        now: String,
+        #[serde(default)]
+        exclude_restart_continuations: bool,
+    },
+    ApplicationOutboxClaimOnce {
+        transaction_id: String,
+        stream_id: String,
+        sequence: u64,
+        worker_id: String,
+        now: String,
+        exclude_restart_continuations: bool,
+    },
+    ApplicationOutboxNextClaimableAt {
+        transaction_id: String,
+    },
+    ApplicationOutboxSucceed {
+        transaction_id: String,
+        effect_id: String,
+        worker_id: String,
+        now: String,
+    },
+    ApplicationOutboxRetry {
+        transaction_id: String,
+        effect_id: String,
+        worker_id: String,
+        now: String,
+        available_at: String,
+        error: String,
+    },
+    ApplicationOutboxFail {
+        transaction_id: String,
+        effect_id: String,
+        worker_id: String,
+        now: String,
+        error: String,
+    },
+    ApplicationOutboxPrune {
+        transaction_id: String,
+        before: String,
+        limit: u32,
     },
     ImportSqliteApplication {
         path: PathBuf,
@@ -198,6 +328,11 @@ impl Request {
         match self {
             Self::ApplicationInit { .. }
             | Self::ApplicationEventsPrepare { .. }
+            | Self::ApplicationReceiptsPrepare { .. }
+            | Self::ApplicationPositionsPrepare { .. }
+            | Self::ApplicationProjectsPrepare { .. }
+            | Self::ApplicationProjectionsPrepare { .. }
+            | Self::ApplicationOutboxPrepare { .. }
             | Self::ImportSqliteApplication { .. }
             | Self::Commit { .. }
             | Self::CommitOutbox { .. }
@@ -228,6 +363,29 @@ impl Request {
             | Self::ApplicationEventsStats { .. }
             | Self::ApplicationEventsLatest { .. }
             | Self::ApplicationEventsPrunedThrough { .. }
+            | Self::ApplicationReceiptsInsert { .. }
+            | Self::ApplicationReceiptsUpsert { .. }
+            | Self::ApplicationReceiptsGet { .. }
+            | Self::ApplicationPositionsAllocate { .. }
+            | Self::ApplicationProjectsSelect { .. }
+            | Self::ApplicationProjectsUpsert { .. }
+            | Self::ApplicationProjectionsApply { .. }
+            | Self::ApplicationProjectionsNormalization { .. }
+            | Self::ApplicationProjectionsRead { .. }
+            | Self::ApplicationProjectionsGuard { .. }
+            | Self::ApplicationProjectionsMarkApplied { .. }
+            | Self::ApplicationOutboxEnqueue { .. }
+            | Self::ApplicationOutboxGet { .. }
+            | Self::ApplicationOutboxList { .. }
+            | Self::ApplicationOutboxCancel { .. }
+            | Self::ApplicationOutboxReconcile { .. }
+            | Self::ApplicationOutboxClaim { .. }
+            | Self::ApplicationOutboxClaimOnce { .. }
+            | Self::ApplicationOutboxNextClaimableAt { .. }
+            | Self::ApplicationOutboxSucceed { .. }
+            | Self::ApplicationOutboxRetry { .. }
+            | Self::ApplicationOutboxFail { .. }
+            | Self::ApplicationOutboxPrune { .. }
             | Self::ApplicationImport { .. }
             | Self::Snapshot { .. }
             | Self::Receipt { .. }
@@ -399,6 +557,285 @@ async fn evaluate(
         Request::ApplicationEventsPrunedThrough { transaction_id } => {
             serde_json::to_value(transactions.events_pruned_through(&transaction_id).await?)
         }
+        Request::ApplicationReceiptsPrepare {} => {
+            serde_json::to_value(store.prepare_application_receipts().await?)
+        }
+        Request::ApplicationReceiptsInsert {
+            transaction_id,
+            receipt,
+        } => Ok(json!({"inserted": transactions.receipts_insert(&transaction_id, receipt).await?})),
+        Request::ApplicationReceiptsUpsert {
+            transaction_id,
+            receipt,
+        } => {
+            transactions
+                .receipts_upsert(&transaction_id, receipt)
+                .await?;
+            Ok(json!({"written":true}))
+        }
+        Request::ApplicationReceiptsGet {
+            transaction_id,
+            command_id,
+        } => serde_json::to_value(
+            transactions
+                .receipts_get(&transaction_id, &command_id)
+                .await?,
+        ),
+        Request::ApplicationPositionsPrepare {} => {
+            serde_json::to_value(store.prepare_application_positions().await?)
+        }
+        Request::ApplicationPositionsAllocate {
+            transaction_id,
+            thread_id,
+            turn_item_id,
+            run_id,
+            run_ordinal,
+        } => serde_json::to_value(
+            transactions
+                .positions_allocate(
+                    &transaction_id,
+                    PositionAllocate {
+                        thread_id,
+                        turn_item_id,
+                        run_id,
+                        run_ordinal,
+                    },
+                )
+                .await?,
+        ),
+        Request::ApplicationProjectsPrepare {} => {
+            serde_json::to_value(store.prepare_application_projects().await?)
+        }
+        Request::ApplicationProjectsSelect {
+            transaction_id,
+            project_id,
+            project_ids,
+            workspace_root,
+            include_deleted,
+        } => serde_json::to_value(
+            transactions
+                .projects_select(
+                    &transaction_id,
+                    ProjectSelection {
+                        project_id,
+                        project_ids,
+                        workspace_root,
+                        include_deleted,
+                    },
+                )
+                .await?,
+        ),
+        Request::ApplicationProjectsUpsert {
+            transaction_id,
+            row,
+        } => {
+            transactions.projects_upsert(&transaction_id, row).await?;
+            Ok(json!({"written":true}))
+        }
+        Request::ApplicationProjectionsPrepare {} => {
+            serde_json::to_value(store.prepare_application_projections().await?)
+        }
+        Request::ApplicationProjectionsNormalization {
+            transaction_id,
+            event,
+        } => serde_json::to_value(
+            transactions
+                .projections_normalization(&transaction_id, event)
+                .await?,
+        ),
+        Request::ApplicationProjectionsApply {
+            transaction_id,
+            event,
+        } => {
+            transactions
+                .projections_apply(&transaction_id, event)
+                .await?;
+            Ok(Value::Null)
+        }
+        Request::ApplicationProjectionsRead {
+            transaction_id,
+            read,
+        } => serde_json::to_value(transactions.projections_read(&transaction_id, read).await?),
+        Request::ApplicationProjectionsGuard {
+            transaction_id,
+            guard,
+        } => serde_json::to_value(
+            transactions
+                .projections_guard(&transaction_id, guard)
+                .await?,
+        ),
+        Request::ApplicationProjectionsMarkApplied {
+            transaction_id,
+            sequence,
+            updated_at,
+        } => {
+            transactions
+                .projections_mark_applied(&transaction_id, sequence, updated_at)
+                .await?;
+            Ok(Value::Null)
+        }
+        Request::ApplicationOutboxPrepare {} => {
+            serde_json::to_value(store.prepare_application_outbox().await?)
+        }
+        Request::ApplicationOutboxEnqueue {
+            transaction_id,
+            effects,
+            now,
+        } => serde_json::to_value(
+            transactions
+                .outbox_enqueue(&transaction_id, &effects, &now)
+                .await?,
+        ),
+        Request::ApplicationOutboxGet {
+            transaction_id,
+            effect_id,
+        } => serde_json::to_value(transactions.outbox_get(&transaction_id, &effect_id).await?),
+        Request::ApplicationOutboxList {
+            transaction_id,
+            command_id,
+        } => serde_json::to_value(
+            transactions
+                .outbox_list(&transaction_id, &command_id)
+                .await?,
+        ),
+        Request::ApplicationOutboxCancel {
+            transaction_id,
+            thread_id,
+            effect_types,
+            reason,
+            now,
+        } => serde_json::to_value(
+            transactions
+                .outbox_cancel(
+                    &transaction_id,
+                    &outbox::CancelUnsettled {
+                        thread_id,
+                        effect_types,
+                        reason,
+                        now,
+                    },
+                )
+                .await?,
+        ),
+        Request::ApplicationOutboxReconcile {
+            transaction_id,
+            now,
+        } => serde_json::to_value(
+            transactions
+                .outbox_reconcile(&transaction_id, &outbox::Reconcile { now })
+                .await?,
+        ),
+        Request::ApplicationOutboxClaim {
+            transaction_id,
+            worker_id,
+            now,
+            exclude_restart_continuations,
+        } => serde_json::to_value(
+            transactions
+                .outbox_claim(
+                    &transaction_id,
+                    &outbox::Claim {
+                        worker_id,
+                        now,
+                        exclude_restart_continuations,
+                    },
+                )
+                .await?,
+        ),
+        Request::ApplicationOutboxClaimOnce {
+            transaction_id,
+            stream_id,
+            sequence,
+            worker_id,
+            now,
+            exclude_restart_continuations,
+        } => serde_json::to_value(
+            transactions
+                .outbox_claim_once(
+                    &transaction_id,
+                    &outbox::ClaimOnce {
+                        stream_id,
+                        sequence,
+                        claim: outbox::Claim {
+                            worker_id,
+                            now,
+                            exclude_restart_continuations,
+                        },
+                    },
+                )
+                .await?,
+        ),
+        Request::ApplicationOutboxNextClaimableAt { transaction_id } => serde_json::to_value(
+            transactions
+                .outbox_next_claimable_at(&transaction_id)
+                .await?,
+        ),
+        Request::ApplicationOutboxSucceed {
+            transaction_id,
+            effect_id,
+            worker_id,
+            now,
+        } => serde_json::to_value(
+            transactions
+                .outbox_succeed(
+                    &transaction_id,
+                    &outbox::Settle {
+                        effect_id,
+                        worker_id,
+                        now,
+                    },
+                )
+                .await?,
+        ),
+        Request::ApplicationOutboxRetry {
+            transaction_id,
+            effect_id,
+            worker_id,
+            now,
+            available_at,
+            error,
+        } => serde_json::to_value(
+            transactions
+                .outbox_retry(
+                    &transaction_id,
+                    &outbox::Retry {
+                        effect_id,
+                        worker_id,
+                        now,
+                        available_at,
+                        error,
+                    },
+                )
+                .await?,
+        ),
+        Request::ApplicationOutboxFail {
+            transaction_id,
+            effect_id,
+            worker_id,
+            now,
+            error,
+        } => serde_json::to_value(
+            transactions
+                .outbox_fail(
+                    &transaction_id,
+                    &outbox::Failure {
+                        effect_id,
+                        worker_id,
+                        now,
+                        error,
+                    },
+                )
+                .await?,
+        ),
+        Request::ApplicationOutboxPrune {
+            transaction_id,
+            before,
+            limit,
+        } => serde_json::to_value(
+            transactions
+                .outbox_prune(&transaction_id, &outbox::Prune { before, limit })
+                .await?,
+        ),
         Request::ImportSqliteApplication { path } => serde_json::to_value(
             store
                 .import_sqlite_application(path, ImportLimits::default())

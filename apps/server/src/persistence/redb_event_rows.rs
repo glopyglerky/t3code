@@ -12,6 +12,8 @@ use crate::application::{
     ApplicationCatalog, ApplicationRow, ApplicationTransactions, Session, decode_catalog,
     decode_row, encode_row, row_key, row_prefix, schema_key, table, validate_row,
 };
+use crate::application_json::{compact_json, field, object_fields, render_fields, set_field};
+use crate::application_rows::{integer, nullable, text, text_cell};
 use crate::backend::Transaction;
 use crate::{Error, MAX_BATCH_BYTES, Result, Store, request_digest, store_key};
 
@@ -176,49 +178,8 @@ fn marker(catalog: &ApplicationCatalog) -> Vec<u8> {
 fn int_cell(value: impl ToString) -> Value {
     json!({"type":"integer","value":value.to_string()})
 }
-fn text_cell(value: &str) -> Value {
-    json!({"type":"text","value":value})
-}
 fn nullable_cell(value: &Option<String>) -> Value {
-    value
-        .as_ref()
-        .map_or_else(|| json!({"type":"null"}), |value| text_cell(value))
-}
-fn text(row: &Map<String, Value>, name: &str) -> Result<String> {
-    let value = row.get(name).ok_or(Error::IncompatibleStore)?;
-    if value.as_object().is_none_or(|cell| cell.len() != 2)
-        || value.get("type").and_then(Value::as_str) != Some("text")
-    {
-        return Err(Error::IncompatibleStore);
-    }
-    value
-        .get("value")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .ok_or(Error::IncompatibleStore)
-}
-fn nullable(row: &Map<String, Value>, name: &str) -> Result<Option<String>> {
-    if row.get(name) == Some(&json!({"type":"null"})) {
-        return Ok(None);
-    }
-    text(row, name).map(Some)
-}
-fn integer(row: &Map<String, Value>, name: &str) -> Result<i64> {
-    let value = row.get(name).ok_or(Error::IncompatibleStore)?;
-    if value.as_object().is_none_or(|cell| cell.len() != 2)
-        || value.get("type").and_then(Value::as_str) != Some("integer")
-    {
-        return Err(Error::IncompatibleStore);
-    }
-    let value = value
-        .get("value")
-        .and_then(Value::as_str)
-        .ok_or(Error::IncompatibleStore)?;
-    let number: i64 = value.parse().map_err(|_| Error::IncompatibleStore)?;
-    if number.to_string() != value {
-        return Err(Error::IncompatibleStore);
-    }
-    Ok(number)
+    crate::application_rows::nullable_cell(value.as_deref())
 }
 fn safe_sequence(value: u64) -> Result<u64> {
     if value > MAX_SEQUENCE {
@@ -350,135 +311,6 @@ async fn event_at(
     Ok(Some(event))
 }
 
-// Keep JSON number/string lexemes and object order when reproducing SQLite's
-// json_remove/json_set. Parsing and reserializing the whole value would alter
-// escaped strings, floating-point notation and therefore replay byte budgets.
-#[derive(Clone)]
-struct JsonField {
-    name: String,
-    encoded_name: String,
-    value: String,
-}
-
-fn compact_json(text: &str) -> String {
-    let mut output = String::with_capacity(text.len());
-    let mut quoted = false;
-    let mut escaped = false;
-    for ch in text.chars() {
-        if quoted {
-            output.push(ch);
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                quoted = false;
-            }
-        } else if ch == '"' {
-            quoted = true;
-            output.push(ch);
-        } else if !matches!(ch, ' ' | '\r' | '\n' | '\t') {
-            output.push(ch);
-        }
-    }
-    output
-}
-
-fn object_fields(text: &str) -> Result<Option<Vec<JsonField>>> {
-    let parsed: Value = serde_json::from_str(text).map_err(|_| Error::IncompatibleStore)?;
-    if !parsed.is_object() {
-        return Ok(None);
-    }
-    let source = compact_json(text);
-    let bytes = source.as_bytes();
-    let mut position = 1;
-    let mut fields = Vec::new();
-    while position < bytes.len() - 1 {
-        let start = position;
-        position += 1;
-        let mut escaped = false;
-        while position < bytes.len() {
-            let byte = bytes[position];
-            position += 1;
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == b'"' {
-                break;
-            }
-        }
-        let encoded_name = source[start..position].to_owned();
-        let name = serde_json::from_str(&encoded_name).map_err(|_| Error::IncompatibleStore)?;
-        if bytes.get(position) != Some(&b':') {
-            return Err(Error::IncompatibleStore);
-        }
-        position += 1;
-        let start = position;
-        let mut depth = 0usize;
-        let mut quoted = false;
-        let mut escaped = false;
-        while position < bytes.len() {
-            let byte = bytes[position];
-            if quoted {
-                if escaped {
-                    escaped = false;
-                } else if byte == b'\\' {
-                    escaped = true;
-                } else if byte == b'"' {
-                    quoted = false;
-                }
-            } else {
-                match byte {
-                    b'"' => quoted = true,
-                    b'{' | b'[' => depth += 1,
-                    b'}' if depth == 0 => break,
-                    b'}' | b']' => depth -= 1,
-                    b',' if depth == 0 => break,
-                    _ => {}
-                }
-            }
-            position += 1;
-        }
-        fields.push(JsonField {
-            name,
-            encoded_name,
-            value: source[start..position].to_owned(),
-        });
-        if bytes.get(position) == Some(&b',') {
-            position += 1;
-        }
-    }
-    Ok(Some(fields))
-}
-fn field<'a>(fields: &'a [JsonField], name: &str) -> Option<&'a str> {
-    fields
-        .iter()
-        .find(|field| field.name == name)
-        .map(|field| field.value.as_str())
-}
-fn set_field(fields: &mut Vec<JsonField>, name: &str, value: String) {
-    if let Some(found) = fields.iter_mut().find(|field| field.name == name) {
-        found.value = value;
-    } else {
-        fields.push(JsonField {
-            name: name.into(),
-            encoded_name: format!("\"{name}\""),
-            value,
-        });
-    }
-}
-fn render_fields(fields: &[JsonField]) -> String {
-    format!(
-        "{{{}}}",
-        fields
-            .iter()
-            .map(|field| format!("{}:{}", field.encoded_name, field.value))
-            .collect::<Vec<_>>()
-            .join(",")
-    )
-}
-
 async fn restored_payload(
     tx: &mut Transaction,
     catalog: &ApplicationCatalog,
@@ -503,7 +335,9 @@ async fn restored_payload(
         return Ok(event.row.payload_json.clone());
     }
     let anchor = match raw_sequence.parse::<u64>().ok() {
-        Some(sequence) if sequence > 0 && sequence <= MAX_SEQUENCE => event_at(tx, catalog, sequence).await?,
+        Some(sequence) if sequence > 0 && sequence <= MAX_SEQUENCE => {
+            event_at(tx, catalog, sequence).await?
+        }
         _ => None,
     };
     let prompt = match anchor {

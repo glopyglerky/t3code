@@ -1,0 +1,15 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "lib": ["ESNext", "esnext.disposable"]
+  },
+  "files": [
+    "../apps/server/src/orchestration-v2/EventSink.ts",
+    "../apps/server/src/orchestration-v2/NativeEventSink.ts",
+    "../apps/server/src/orchestration-v2/ProjectionCommitStore.ts",
+    "../apps/server/src/persistence/SqliteProjectionCommitStore.ts",
+    "../apps/server/src/persistence/NativeProjectionCommitStore.ts",
+    "../apps/server/src/persistence/PersistenceTransactions.ts"
+  ]
+}

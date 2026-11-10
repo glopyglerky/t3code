@@ -1,9 +1,11 @@
 # redb cutover
 
-The production server and CLI still use SQLite. The native implementation now
-includes application transactions, SQLite row import and the complete shared
-event-log service. Production selects the SQLite event-row adapter. No SQL
-repository or upstream source is retired by this candidate.
+The production server and CLI still use SQLite. The native candidate now includes
+SQLite row import and an injectable `NativeEventSink` composition: events,
+receipts, positions, projects, projection mutations and the application outbox
+share one redb transaction. Production still selects the SQLite services. Full
+projection read models and the other server persistence domains remain unported;
+no SQL repository or upstream source is retired by this candidate.
 
 ## Implemented boundary
 
@@ -56,8 +58,84 @@ recovery before opening a read-only snapshot. Once the initial writer lock is he
 opening preserves redb's internal header-lock waits and recovery protocol.
 
 The existing component event/outbox store and the application table namespace are
-separate. Their transaction APIs must not be treated as interchangeable. The next
-repository ports must commit all related application rows through one owner.
+separate. `NativeEventSink` uses only application repositories through its supplied
+`RedbClient`; it does not combine independent component commits with an application
+transaction.
+
+## Atomic EventSink composition
+
+`NativeEventSink.ts` supplies the complete existing `EventSink` service without a
+`SqlClient`. `PersistenceTransactions` and `ProjectionCommitStore` expose the
+transaction and projection operations needed by the existing orchestration
+algorithm. The retained SQLite layers implement the same boundaries and keep the
+production composition unchanged.
+
+The native composition joins the following work to the caller's reserved writer:
+
+| Repository | Native scope |
+| --- | --- |
+| Shared event log | Application and agent events, sequence/version allocation, replay and live publication through the existing service |
+| Command receipts | All application receipt operations and all four V2 receipt methods, including accepted/rejected replay and the global project/thread command namespace |
+| Turn-item positions | Both public methods, stable existing-item lookup, supplied/run-derived ordinal selection and unique per-thread allocation |
+| Projects | All six `ProjectStore` members, including selection, event application and shell views |
+| Projection commit store | Mutations for all 16 entity families, provider-session bindings, applied cursor, transactional thread/run/request reads and ownership/version guards |
+| Application outbox | All 17 `EffectOutbox` members, including enqueue, cancellation, claims, settlement, retries, recovery, pruning and worker notifications |
+
+Provider snapshots retain a savepoint for each nested commit. A failed snapshot
+rolls back its events, receipts, positions, projects, projections and outbox work,
+while a successful sibling remains part of the outer transaction. Guard reads
+and their resulting writes run under the same writer reservation. The
+`ProjectionCommitStore` boundary is the mutation side and the reads required by
+`EventSink`; it does not replace the complete `ProjectionStore` read API.
+
+`RedbClient.afterCommit` attaches callbacks to the current transaction scope.
+Successful savepoint release transfers them to the parent in registration order;
+rollback, defects and interruption discard that scope's callbacks. Only an
+acknowledged root commit runs them, after releasing the database session. An
+unknown commit outcome does not publish. The same client's write/commit lane stays
+held until its callbacks finish, preserving publication order while permitting
+callbacks to read committed rows. A callback cannot reenter that client's writer.
+Consequently, an `EventSink` call inside an existing native transaction defers live
+events and outbox signals until the actual owner commits. SQLite callers retain
+their existing publication behavior.
+
+### Managed domains and shared normalization
+
+Domain preparation validates exact source schemas and builds required indexes in
+bounded, resumable transactions. A managed-table marker prevents generic row
+mutations from bypassing domain constraints from the first preparation batch.
+Repositories require completed preparation; a failed attempt can resume from its
+durable cursor. Index entries retain and check the row identity behind their hash.
+Rows, indexes and allocation metadata roll back together at a savepoint or root
+transaction boundary.
+
+Receipts keep the original command primary key and all receipt fields. Positions
+maintain ordinal uniqueness and per-run allocation ranges. Project indexes cover
+creation order, workspace equality and active/deleted selection, including queries
+larger than one index page. Projection indexes implement the uniqueness and native
+provider ownership checks needed during event commits. The application outbox
+retains imported FIFO order, payloads and lease cells; its existing Rust state
+machine operates over the application repository. It does not substitute the
+separate component outbox. An uncertain standalone claim can be resolved through
+its durable claim receipt; a claim inside an application transaction cannot recover
+by starting a second owner.
+
+`redb_application_rows.rs` shares tagged-cell encoding, exact schema validation and
+witnessed row access across the new repositories. `redb_json.rs` shares the JSON
+edits that preserve existing number/string lexemes and object order. Application
+normalization remains shared: project defaults and omitted/null updates stay in
+`ProjectStore`, turn-item normalization stays in `TurnItemPositionStore`, and pull
+request identity normalization uses the existing source-control implementation.
+For provider updates that require a domain codec round trip, Rust selects the old
+row, the adapter applies the existing codec, and Rust checks the raw preimage before
+applying the mutation. Mutation and index algorithms remain in Rust.
+
+These repositories implement their typed application contracts, not arbitrary SQL
+coercion. In particular, a new position requires a nonnegative safe integer run
+ordinal, checked after the existing-item lookup. Fractional transport values and
+REAL-valued imported positions are not accepted as integer domain values. The
+immutable import still preserves those cells exactly; preparation rejects an
+unsupported domain representation instead of changing it.
 
 ## Shared application event log
 
@@ -98,8 +176,8 @@ so malformed prompts cannot turn into valid text during restoration.
 The event repository does not prune event rows or manage prompt-anchor retention.
 Those operations must update its indexes in the future native maintenance port.
 The existing 16 MiB protocol/read/write limits still apply to individual operations;
-an oversized request or replay page fails explicitly. Event-log integration alone
-does not port EventSink's projection, receipt, position and outbox transaction.
+an oversized request or replay page fails explicitly. The event repository now
+participates in the native EventSink transaction described above.
 
 ## Active row import
 
@@ -132,8 +210,9 @@ JSON coercion. Repository adapters must use the explicit representation for
 imported rows; ordinary untagged values are not equal keys. Column defaults,
 constraints, indexes, triggers, source migration records and sequence metadata are
 preserved in the archive and generation metadata. Preserving them does not execute
-their SQL behavior. The event repository implements its sequence and uniqueness
-rules; the other domains still need their own native constraint implementations.
+their SQL behavior. The managed EventSink repositories implement the constraints
+and indexes needed by their operations. Unported domains still require explicit
+native behavior before they can become authoritative.
 
 Tables without a primary key and rows with a null primary-key component require
 an explicit identity mapping and fail before publication. Known derived FTS tables
@@ -157,6 +236,12 @@ The existing bounded JSON-lines protocol now includes:
 | `application_events_prepare` | Build one resumable batch of event indexes outside an application session |
 | `application_events_append` | Append a shared-log event and its indexes within the caller's transaction |
 | `application_events_read`, `application_events_stats`, `application_events_latest`, `application_events_pruned_through` | Query the indexed event log through the same transaction owner |
+| `application_receipts_prepare`, `application_positions_prepare`, `application_projects_prepare`, `application_projections_prepare`, `application_outbox_prepare` | Validate and prepare one resumable domain batch outside an application session |
+| `application_receipts_insert`, `application_receipts_upsert`, `application_receipts_get` | Read and write the shared command receipt namespace |
+| `application_positions_allocate` | Reuse or allocate a witnessed turn-item position |
+| `application_projects_select`, `application_projects_upsert` | Select indexed project records and replace rows with their indexes |
+| `application_projections_apply`, `application_projections_normalization`, `application_projections_read`, `application_projections_guard`, `application_projections_mark_applied` | Apply projection mutations, obtain codec input, read guarded state and advance the cursor inside the owner |
+| `application_outbox_*` session operations | Run the complete outbox repository inside the application owner, including durable standalone claim-recovery receipts |
 | `import_sqlite_application` | Stage an export and atomically publish its native row catalog |
 | `application_import` | Resolve a completed import through its durable receipt |
 
@@ -168,13 +253,13 @@ scope still applies; this change adds no macOS or Windows database acceptance.
 
 | Boundary | Required work |
 | --- | --- |
-| Atomic event execution | Connect the native event-log service to `EventSink`, then port its direct SQL guards, `CommandReceiptStore`, `TurnItemPositionStore`, `ProjectStore`, `ProjectionStore` mutations and `EffectOutbox` into that same transaction. Preserve rejected command receipts, per-snapshot savepoints, deferred publications and commit-before-publication. |
-| Read models | Replace the remaining projection queries, joins, pagination, provider ownership, timeline windows, summaries and recovery queries. Use explicit indexes rather than loading a whole database snapshot. |
+| Whole-server ownership | Integrate the candidate EventSink composition only when its surrounding readers, services and maintenance operations use the same selected store. Production must not split related application authority between SQLite and redb. |
+| Read models | Replace the remaining full `ProjectionStore` queries, joins, pagination, provider discovery, timeline windows, summaries and recovery queries. The transaction guards already ported do not implement these broader APIs. Use explicit indexes rather than loading a whole database snapshot. |
 | Authentication | Port sessions and pairing links together; pairing consumption and session creation must stay atomic. |
 | Scheduling and webhooks | Port task claims, compare-and-set updates, dispatch state, run counters, delivery queues and deduplication. |
 | Other state | Port provider runtime, peer links, review guides, viewed files, MCP app context, usage history, workspace discovery, settings and cleanup consumers. |
 | Search | Replace trigram FTS, JSON predicates and related ordering behavior, and rebuild derived indexes from imported message rows. |
-| Startup and maintenance | Select one store for server and CLI, migrate before accepting new writes, replace SQLite maintenance/storage reporting and the separate server-ownership lock. |
+| Startup and maintenance | Select one store for server and CLI, prepare managed domains before accepting writes, replace SQLite maintenance/storage reporting and the separate server-ownership lock, and port event pruning and prompt-anchor retention with their indexes. |
 | Legacy import and rollback | Keep lazy V1 transcript import working and define backup/restore and rollback after redb has accepted writes. The immutable original export alone is not a current backup. |
 | Application/platform acceptance | Run fresh and migrated databases through the real client/provider fixtures, CLI concurrency, crash/restart and packaging gates on every supported target. Assert the database engine and that new application SQLite/WAL files are absent. |
 
@@ -192,7 +277,10 @@ transaction's budget.
 The real Effect adapter gate compares nested commit/rollback behavior with SQLite
 and checks failures, interruption, client/fiber/scope isolation, concurrent writer
 ownership, read-only snapshots, pagination, invalid JSON and deliberately lost
-savepoint, release, rollback and commit acknowledgements.
+savepoint, release, rollback and commit acknowledgements. Its callback cases assert
+root and nested rollback behavior, registration order, delayed publication,
+committed reads during publication, write-reentry rejection and no callbacks after
+an unknown commit.
 The import gate checks exact cells, composite keys, migration/sequence preservation,
 the checked-in application SQLite fixture, receipt recovery after restart,
 unsupported sources, concurrent importers and post-import writes.
@@ -206,10 +294,28 @@ publication, live filtering and reopen. Native tests cover resumable index
 preparation, typed identities, sparse sequence ranges, all filter combinations,
 savepoint rollback of event indexes and history exceeding one transaction budget.
 
-`tools/acceptance-checks.json` also now schedules the existing full database
-durability and differential outbox gates. Multiple native executable arguments
-are built and hash-recorded in order. Changes to a candidate's runtime select its
-mapped acceptance checks, even when the test script itself is unchanged.
+The additional registered gates specify these application-boundary checks:
+
+| Gate | Assertions |
+| --- | --- |
+| `check-redb-receipts-positions.mjs` | All receipt and position methods against immutable upstream SQLite; imported null/empty fields and global command identity; run ownership and ordinal precedence; existing-item reuse; nested/root rollback; range overflow; restart; integer-domain rejection; lost commit acknowledgement |
+| `check-redb-projects.mjs` | All six public members against immutable upstream and retained SQLite; more than one index page; ordering and filters; raw JSON and legacy decoding; omitted/null/default updates; index replacement, rollback and reopen |
+| `check-redb-application-outbox.mjs` | All 17 members against immutable upstream SQLite; all effect types and statuses; imported FIFO, payload and lease preservation; transactional cancellation/enqueue; worker ownership, backoff, recovery, pruning, uncertain acknowledgements and the real EffectWorker |
+| `check-redb-event-sink.mjs` | The complete shared service against immutable upstream and retained SQLite; all 16 projection families and bindings; command replay and guards; shared normalization; atomic provider-batch rollback; ordered publication; the actual provider snapshot coordinator; replay, live streams and reopen |
+
+The receipt/position, project and EventSink fixtures run the actual application
+migrations before exporting/importing their SQLite source. Native compositions
+receive no `SqlClient`; retained SQLite and immutable upstream implementations
+remain separate oracles. Fixtures and proofs record source and helper hashes.
+Registration and the assertions described here are not a declaration that a
+particular committed head has passed. Qualification must run the mapped checks
+against that exact head and its packaged helpers.
+
+`tools/acceptance-checks.json` schedules these four gates and their scoped
+typechecks, together with the existing transaction, import, event-log, database
+durability and differential component-outbox gates. Multiple native executable
+arguments are built and hash-recorded in order. Changes to a candidate's runtime
+select its mapped acceptance checks, even when the test script itself is unchanged.
 
 All of this is component evidence. The native client flow still exercises the
 application's current SQLite database and does not establish redb cutover.

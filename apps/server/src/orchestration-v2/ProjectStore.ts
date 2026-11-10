@@ -9,13 +9,12 @@ import {
   ThreadEnvMode,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
-import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import * as SqlClient from "effect/sql/SqlClient";
-import * as SqlSchema from "effect/sql/SqlSchema";
+import { ProjectRows, type ProjectSelection } from "./ProjectRows.ts";
+import * as SqliteProjectRows from "./SqliteProjectRows.ts";
 
 export class ProjectStoreV2Error extends Schema.TaggedError<ProjectStoreV2Error>()(
   "ProjectStoreV2Error",
@@ -100,102 +99,13 @@ export class ProjectStoreV2 extends Context.Service<
   }
 >()("t3/orchestration-v2/ProjectStore/ProjectStoreV2") {}
 
-/** @public */
-export const make = Effect.gen(function* () {
-  const sql = yield* SqlClient.SqlClient;
+/** Shared project defaults, event application and shell mapping for either row repository. */
+export const makeWithRows = Effect.gen(function* () {
+  const rows = yield* ProjectRows;
   const encodeRow = Schema.encodeEffect(ProjectDbRow);
-
-  const selectRows = SqlSchema.findAll({
-    Request: Schema.Struct({
-      projectId: Schema.optional(ProjectId),
-      projectIds: Schema.optional(Schema.Array(ProjectId)),
-      workspaceRoot: Schema.optional(Schema.String),
-      includeDeleted: Schema.Boolean,
-    }),
-    Result: ProjectDbRow,
-    execute: (request) => sql`
-      SELECT
-        project_id AS "projectId",
-        title,
-        workspace_root AS "workspaceRoot",
-        default_model_selection_json AS "defaultModelSelection",
-        default_thread_env_mode AS "defaultThreadEnvMode",
-        auto_pull AS "autoPull",
-        favicon_path AS "faviconPath",
-        project_icon_json AS "projectIcon",
-        scripts_json AS "scripts",
-        pinned_at AS "pinnedAt",
-        archived_at AS "archivedAt",
-        created_at AS "createdAt",
-        updated_at AS "updatedAt",
-        deleted_at AS "deletedAt"
-      FROM projection_projects
-      WHERE ${sql.and([
-        ...(request.includeDeleted ? [] : [sql`deleted_at IS NULL`]),
-        ...(request.projectId === undefined ? [] : [sql`project_id = ${request.projectId}`]),
-        ...(request.projectIds === undefined ? [] : [sql.in("project_id", request.projectIds)]),
-        ...(request.workspaceRoot === undefined
-          ? []
-          : [sql`workspace_root = ${request.workspaceRoot}`]),
-      ])}
-      ORDER BY created_at ASC, project_id ASC
-    `,
-  });
-
-  const upsertRow = (row: ProjectRow) =>
-    encodeRow(row).pipe(
-      Effect.flatMap(
-        (encoded) => sql`
-          INSERT INTO projection_projects (
-            project_id,
-            title,
-            workspace_root,
-            default_model_selection_json,
-            default_thread_env_mode,
-            auto_pull,
-            favicon_path,
-            project_icon_json,
-            scripts_json,
-            pinned_at,
-            archived_at,
-            created_at,
-            updated_at,
-            deleted_at
-          )
-          VALUES (
-            ${encoded.projectId},
-            ${encoded.title},
-            ${encoded.workspaceRoot},
-            ${encoded.defaultModelSelection},
-            ${encoded.defaultThreadEnvMode},
-            ${encoded.autoPull},
-            ${encoded.faviconPath},
-            ${encoded.projectIcon},
-            ${encoded.scripts},
-            ${encoded.pinnedAt},
-            ${encoded.archivedAt},
-            ${encoded.createdAt},
-            ${encoded.updatedAt},
-            ${encoded.deletedAt}
-          )
-          ON CONFLICT (project_id)
-          DO UPDATE SET
-            title = excluded.title,
-            workspace_root = excluded.workspace_root,
-            default_model_selection_json = excluded.default_model_selection_json,
-            default_thread_env_mode = excluded.default_thread_env_mode,
-            auto_pull = excluded.auto_pull,
-            favicon_path = excluded.favicon_path,
-            project_icon_json = excluded.project_icon_json,
-            scripts_json = excluded.scripts_json,
-            pinned_at = excluded.pinned_at,
-            archived_at = excluded.archived_at,
-            created_at = excluded.created_at,
-            updated_at = excluded.updated_at,
-            deleted_at = excluded.deleted_at
-        `,
-      ),
-    );
+  const decodeRows = Schema.decodeUnknownEffect(Schema.Array(ProjectDbRow));
+  const selectRows = (input: ProjectSelection) => rows.select(input).pipe(Effect.flatMap(decodeRows));
+  const upsertRow = (row: ProjectRow) => encodeRow(row).pipe(Effect.flatMap(rows.upsert));
 
   const mapError =
     (operation: string) =>
@@ -204,7 +114,6 @@ export const make = Effect.gen(function* () {
 
   const get: ProjectStoreV2["Service"]["get"] = (projectId, options) =>
     selectRows({ projectId, includeDeleted: options?.includeDeleted === true }).pipe(
-      NodeSqliteClient.readOnly,
       Effect.map((rows) => Option.fromUndefinedOr(rows[0])),
       mapError("get"),
     );
@@ -213,13 +122,12 @@ export const make = Effect.gen(function* () {
     selectRows({
       ...(options?.projectIds === undefined ? {} : { projectIds: options.projectIds }),
       includeDeleted: options?.includeDeleted === true,
-    }).pipe(NodeSqliteClient.readOnly, mapError("list"));
+    }).pipe(mapError("list"));
 
   const findActiveByWorkspaceRoot: ProjectStoreV2["Service"]["findActiveByWorkspaceRoot"] = (
     workspaceRoot,
   ) =>
     selectRows({ workspaceRoot, includeDeleted: false }).pipe(
-      NodeSqliteClient.readOnly,
       Effect.map((rows) => Option.fromUndefinedOr(rows[0])),
       mapError("findActiveByWorkspaceRoot"),
     );
@@ -293,4 +201,8 @@ export const make = Effect.gen(function* () {
   });
 });
 
+/** @public The existing construction path retains the SQLite repository. */
+export const make = makeWithRows.pipe(Effect.provide(SqliteProjectRows.layer));
+
+export const layerWithRows = Layer.effect(ProjectStoreV2, makeWithRows);
 export const layer = Layer.effect(ProjectStoreV2, make);

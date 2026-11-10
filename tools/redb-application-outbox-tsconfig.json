@@ -1,0 +1,11 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "lib": ["ESNext", "esnext.disposable"]
+  },
+  "files": [
+    "../apps/server/src/orchestration-v2/NativeApplicationEffectOutbox.ts",
+    "../apps/server/src/orchestration-v2/NativeEffectOutbox.ts"
+  ]
+}

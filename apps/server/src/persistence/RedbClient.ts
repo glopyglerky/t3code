@@ -4,6 +4,7 @@ import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as NativeDatabase from "../orchestration-v2/NativeDatabase.ts";
@@ -30,15 +31,38 @@ export const RowPage = Schema.Struct({
 });
 export type RowPage = typeof RowPage.Type;
 
-const applicationOperations = [
-  "application_events_append",
-  "application_events_read",
-  "application_events_stats",
-  "application_events_latest",
-  "application_events_pruned_through",
-] as const;
-export type ApplicationOperation = (typeof applicationOperations)[number];
-const allowedOperations = new Set<string>(applicationOperations);
+const applicationOperations = {
+  application_events_append: "write",
+  application_events_read: "read",
+  application_events_stats: "read",
+  application_events_latest: "read",
+  application_events_pruned_through: "read",
+  application_receipts_insert: "write",
+  application_receipts_upsert: "write",
+  application_receipts_get: "read",
+  application_positions_allocate: "write",
+  application_projects_select: "read",
+  application_projects_upsert: "write",
+  application_projections_apply: "write",
+  application_projections_normalization: "read",
+  application_projections_read: "read",
+  application_projections_guard: "read",
+  application_projections_mark_applied: "write",
+  application_outbox_enqueue: "write",
+  application_outbox_get: "read",
+  application_outbox_list: "read",
+  application_outbox_cancel: "write",
+  application_outbox_reconcile: "write",
+  application_outbox_claim: "write",
+  application_outbox_claim_once: "write",
+  application_outbox_next_claimable_at: "read",
+  application_outbox_succeed: "write",
+  application_outbox_retry: "write",
+  application_outbox_fail: "write",
+  application_outbox_prune: "write",
+} as const;
+export type ApplicationOperation = keyof typeof applicationOperations;
+const allowedOperations = new Set<string>(Object.keys(applicationOperations));
 
 export class RedbTransactionError extends Schema.TaggedError<RedbTransactionError>()(
   "RedbTransactionError",
@@ -50,6 +74,8 @@ export class RedbTransactionError extends Schema.TaggedError<RedbTransactionErro
       "different-fiber",
       "different-scope",
       "closed-transaction",
+      "missing-transaction",
+      "publication-write-reentry",
       "transaction-id-exhausted",
       "savepoint-id-exhausted",
     ]),
@@ -63,6 +89,8 @@ export class RedbTransactionError extends Schema.TaggedError<RedbTransactionErro
 export type RedbClientError = NativeDatabase.NativeDatabaseError | RedbTransactionError;
 
 export interface RedbClientShape {
+  /** Scope presence includes failed scopes; it never authorizes a request or replay. */
+  readonly isInTransaction: Effect.Effect<boolean>;
   readonly initialize: (
     schema: ApplicationSchema,
   ) => Effect.Effect<{ readonly initialized: boolean }, RedbClientError>;
@@ -70,6 +98,8 @@ export interface RedbClientShape {
   readonly withTransaction: <A, E, R>(
     effect: Effect.Effect<A, E, R>,
   ) => Effect.Effect<A, E | RedbClientError, R>;
+  /** Run once after this scope's root commit is acknowledged; rollback discards the callback. */
+  readonly afterCommit: (effect: Effect.Effect<void>) => Effect.Effect<void, RedbClientError>;
   /** Operations reuse this client's current transaction, or create one when called alone. */
   readonly get: (table: string, key: RowKey) => Effect.Effect<Row | null, RedbClientError>;
   readonly put: (table: string, key: RowKey, row: Row) => Effect.Effect<void, RedbClientError>;
@@ -90,6 +120,16 @@ export interface RedbClientShape {
     { readonly prepared: boolean; readonly indexed_rows: number },
     RedbClientError
   >;
+  readonly prepareReceipts: Effect.Effect<PreparationResult, RedbClientError>;
+  readonly preparePositions: Effect.Effect<PreparationResult, RedbClientError>;
+  readonly prepareProjects: Effect.Effect<PreparationResult, RedbClientError>;
+  readonly prepareProjections: Effect.Effect<PreparationResult, RedbClientError>;
+  readonly prepareOutbox: Effect.Effect<PreparationResult, RedbClientError>;
+}
+
+export interface PreparationResult {
+  readonly prepared: boolean;
+  readonly indexed_rows: number;
 }
 
 export class RedbClient extends Context.Service<RedbClient, RedbClientShape>()(
@@ -111,11 +151,20 @@ interface TransactionScope {
   readonly transaction: Transaction;
   active: boolean;
   failure: RedbClientError | undefined;
+  readonly afterCommit: Array<Effect.Effect<void>>;
 }
 
 const CurrentTransaction = Context.Reference<TransactionScope | undefined>(
   "t3/persistence/RedbClient/CurrentTransaction",
   { defaultValue: () => undefined },
+);
+const CurrentCommitPublication = Context.Reference<ReadonlyArray<object>>(
+  "t3/persistence/RedbClient/CurrentCommitPublication",
+  { defaultValue: () => [] },
+);
+/** Let another transaction coordinator reject mixed ownership before opening its store. */
+export const isInRedbTransaction = CurrentTransaction.pipe(
+  Effect.map((scope) => scope !== undefined),
 );
 const Begun = Schema.Struct({ transaction_id: Schema.String });
 const Saved = Schema.Struct({ savepoint_id: Schema.String });
@@ -152,6 +201,9 @@ export const make = Effect.gen(function* () {
   const constructionSql = yield* Effect.serviceOption(SqlClient.SqlClient);
   const clientIdentity = {};
   let transactionSequence = 0;
+  // A later writer may begin as soon as redb acknowledges the previous commit.
+  // Keep that writer's commit behind the previous owner's publications as well.
+  const commitLane = yield* Semaphore.make(1);
 
   const outsideSqlTransaction = Effect.gen(function* () {
     const runtimeSql = yield* Effect.serviceOption(SqlClient.SqlClient);
@@ -225,7 +277,7 @@ export const make = Effect.gen(function* () {
           yield* transaction.session.discard;
           return yield* transaction.failure;
         }
-        const scope: TransactionScope = { transaction, active: true, failure: undefined };
+        const scope: TransactionScope = { transaction, active: true, failure: undefined, afterCommit: [] };
         transaction.currentScope = scope;
         const exit = yield* Effect.exit(
           restore(effect).pipe(Effect.provideService(CurrentTransaction, scope)),
@@ -252,6 +304,7 @@ export const make = Effect.gen(function* () {
         );
         if (Exit.isFailure(exit)) return yield* Effect.failCause(exit.cause);
         if (scope.failure !== undefined) return yield* scope.failure;
+        parent.afterCommit.push(...scope.afterCommit);
         return exit.value;
       }),
     );
@@ -262,8 +315,13 @@ export const make = Effect.gen(function* () {
   ): Effect.Effect<A, E | RedbClientError, R> =>
     Effect.gen(function* () {
       yield* outsideSqlTransaction;
-      return yield* database.withSession((session) =>
-        Effect.uninterruptibleMask((restore) =>
+      const activePublications = yield* CurrentCommitPublication;
+      if (mode === "write" && activePublications.includes(clientIdentity)) {
+        return yield* new RedbTransactionError({ reason: "publication-write-reentry" });
+      }
+      const publications: Array<Effect.Effect<void>> = [];
+      const operation = Effect.uninterruptibleMask((restore) =>
+        database.withSession((session) =>
           Effect.gen(function* () {
             if (transactionSequence >= Number.MAX_SAFE_INTEGER)
               return yield* new RedbTransactionError({ reason: "transaction-id-exhausted" });
@@ -285,7 +343,7 @@ export const make = Effect.gen(function* () {
               savepointSequence: 0,
               currentScope: undefined,
             };
-            const scope: TransactionScope = { transaction, active: true, failure: undefined };
+            const scope: TransactionScope = { transaction, active: true, failure: undefined, afterCommit: [] };
             transaction.currentScope = scope;
             const exit = yield* Effect.exit(
               restore(effect).pipe(Effect.provideService(CurrentTransaction, scope)),
@@ -313,10 +371,18 @@ export const make = Effect.gen(function* () {
               { operation: "application_commit", transaction_id: id },
               Committed,
             );
+            publications.push(...scope.afterCommit);
             return exit.value;
           }),
-        ),
+        ).pipe(Effect.tap(() =>
+          Effect.forEach(publications, (publish) => publish, { discard: true }).pipe(
+            Effect.provideService(CurrentCommitPublication, [...activePublications, clientIdentity]),
+          ),
+        )),
       );
+      // Acquire before the session: a waiting writer must not hold the connection
+      // that an acknowledged owner's publication uses for a durable read.
+      return yield* mode === "write" ? operation.pipe(commitLane.withPermit) : operation;
     });
 
   const withTransaction: RedbClientShape["withTransaction"] = Effect.fn("RedbClient.withTransaction")(
@@ -378,6 +444,14 @@ export const make = Effect.gen(function* () {
   });
 
   return RedbClient.of({
+    isInTransaction: isInRedbTransaction,
+    afterCommit: Effect.fn("RedbClient.afterCommit")(function* (effect) {
+      const scope = yield* CurrentTransaction;
+      if (scope === undefined) return yield* new RedbTransactionError({ reason: "missing-transaction" });
+      yield* authorize(scope);
+      yield* outsideSqlTransaction;
+      scope.afterCommit.push(effect);
+    }),
     initialize: Effect.fn("RedbClient.initialize")(function* (schema) {
       yield* outsideTransaction;
       return yield* database.request({ operation: "application_init", schema }, Initialized);
@@ -385,6 +459,26 @@ export const make = Effect.gen(function* () {
     prepareEvents: Effect.gen(function* () {
       yield* outsideTransaction;
       return yield* database.request({ operation: "application_events_prepare" }, Prepared);
+    }),
+    prepareReceipts: Effect.gen(function* () {
+      yield* outsideTransaction;
+      return yield* database.request({ operation: "application_receipts_prepare" }, Prepared);
+    }),
+    preparePositions: Effect.gen(function* () {
+      yield* outsideTransaction;
+      return yield* database.request({ operation: "application_positions_prepare" }, Prepared);
+    }),
+    prepareProjects: Effect.gen(function* () {
+      yield* outsideTransaction;
+      return yield* database.request({ operation: "application_projects_prepare" }, Prepared);
+    }),
+    prepareProjections: Effect.gen(function* () {
+      yield* outsideTransaction;
+      return yield* database.request({ operation: "application_projections_prepare" }, Prepared);
+    }),
+    prepareOutbox: Effect.gen(function* () {
+      yield* outsideTransaction;
+      return yield* database.request({ operation: "application_outbox_prepare" }, Prepared);
     }),
     withTransaction,
     get: Effect.fn("RedbClient.get")((table, key) =>
@@ -417,7 +511,7 @@ export const make = Effect.gen(function* () {
               return yield* new NativeDatabase.NativeDatabaseInputError({ stage: "request" });
             return yield* send(transaction, { ...input, operation }, response);
           }),
-        operation === "application_events_append" ? "write" : "read",
+        applicationOperations[operation] ?? "read",
       );
     }),
   });

@@ -209,7 +209,9 @@ async fn empty_claims_pin_their_result_and_one_cursor_rejects_reuse_and_sequence
         );
     }
     let mut tx = store.db.begin().await.unwrap();
-    let entries = page(&mut tx, "claim-stream/", None, 100).await.unwrap();
+    let entries = page(&mut tx, Repository::Legacy, "claim-stream/", None, 100)
+        .await
+        .unwrap();
     assert_eq!(entries.len(), 1);
     assert!(entries[0].1.len() < 1024);
     tx.rollback().await.unwrap();
@@ -394,8 +396,15 @@ async fn claim_cursor_and_transition_commit_together_under_concurrent_identical_
     let request = claim_once("stream", 1, "owner", NOW);
     let mut a = store.db.begin().await.unwrap();
     let mut b = other.db.begin().await.unwrap();
-    let first = stage_claim_once(&mut a, &request).await.unwrap();
-    assert_eq!(stage_claim_once(&mut b, &request).await.unwrap(), first);
+    let first = stage_claim_once_in(&mut a, Repository::Legacy, &request)
+        .await
+        .unwrap();
+    assert_eq!(
+        stage_claim_once_in(&mut b, Repository::Legacy, &request)
+            .await
+            .unwrap(),
+        first
+    );
     a.commit().await.unwrap();
     assert!(matches!(b.commit().await, Err(Error::TransactionConflict)));
     let replay = other.outbox_claim_once(&request).await.unwrap();
@@ -416,14 +425,17 @@ async fn claim_cursor_and_transition_commit_together_under_concurrent_identical_
         .unwrap();
     let mut tx = store.db.begin().await.unwrap();
     assert_eq!(
-        stage_claim_once(&mut tx, &aborted).await.unwrap().state,
+        stage_claim_once_in(&mut tx, Repository::Legacy, &aborted)
+            .await
+            .unwrap()
+            .state,
         ClaimState::Claimed
     );
     tx.rollback().await.unwrap();
     assert!(
         store
             .db
-            .read(&claim_stream_key("aborted"))
+            .read(&claim_stream_key(Repository::Legacy, "aborted"))
             .await
             .unwrap()
             .is_none()
@@ -457,7 +469,7 @@ async fn claim_cursor_validates_identifiers_counters_and_stored_metadata() {
     store.outbox_claim_once(&request).await.unwrap();
     let original = store
         .db
-        .read(&claim_stream_key("stream"))
+        .read(&claim_stream_key(Repository::Legacy, "stream"))
         .await
         .unwrap()
         .unwrap();
@@ -486,7 +498,7 @@ async fn claim_cursor_validates_identifiers_counters_and_stored_metadata() {
     ] {
         let mut tx = store.db.begin().await.unwrap();
         tx.put(
-            claim_stream_key("stream"),
+            claim_stream_key(Repository::Legacy, "stream"),
             crate::encode(&corrupted).unwrap(),
         )
         .await
@@ -499,7 +511,7 @@ async fn claim_cursor_validates_identifiers_counters_and_stored_metadata() {
     }
     let mut tx = store.db.begin().await.unwrap();
     tx.put(
-        claim_stream_key("stream"),
+        claim_stream_key(Repository::Legacy, "stream"),
         crate::encode(&ClaimCursor {
             sequence: MAX_COUNTER,
             ..cursor
@@ -1101,10 +1113,17 @@ async fn independent_writers_cannot_claim_the_same_snapshot_effect() {
     let other = fixture.connect().await;
     let mut a = store.db.begin().await.unwrap();
     let mut b = other.db.begin().await.unwrap();
-    let a_row = candidate(&mut a, Some(NOW), false).await.unwrap().unwrap();
-    let b_row = candidate(&mut b, Some(NOW), false).await.unwrap().unwrap();
+    let a_row = candidate(&mut a, Repository::Legacy, Some(NOW), false)
+        .await
+        .unwrap()
+        .unwrap();
+    let b_row = candidate(&mut b, Repository::Legacy, Some(NOW), false)
+        .await
+        .unwrap()
+        .unwrap();
     transition(
         &mut a,
+        Repository::Legacy,
         &a_row,
         policy::Action::Claim {
             worker_id: "a".into(),
@@ -1115,6 +1134,7 @@ async fn independent_writers_cannot_claim_the_same_snapshot_effect() {
     .unwrap();
     transition(
         &mut b,
+        Repository::Legacy,
         &b_row,
         policy::Action::Claim {
             worker_id: "b".into(),
@@ -1139,12 +1159,13 @@ async fn a_concurrent_enqueue_changes_the_claim_range_and_conflicts() {
         .await
         .unwrap();
     let mut transaction = store.db.begin().await.unwrap();
-    let selected = candidate(&mut transaction, Some(NOW), false)
+    let selected = candidate(&mut transaction, Repository::Legacy, Some(NOW), false)
         .await
         .unwrap()
         .unwrap();
     transition(
         &mut transaction,
+        Repository::Legacy,
         &selected,
         policy::Action::Claim {
             worker_id: "stale".into(),
@@ -1224,9 +1245,12 @@ async fn late_outbox_exhaustion_rolls_back_events_projections_receipts_and_first
     let fixture = TestFixture::start().await;
     let store = fixture.initialize().await;
     let mut tx = store.db.begin().await.unwrap();
-    tx.put(key("counter"), crate::encode(&(MAX_COUNTER - 1)).unwrap())
-        .await
-        .unwrap();
+    tx.put(
+        key(Repository::Legacy, "counter"),
+        crate::encode(&(MAX_COUNTER - 1)).unwrap(),
+    )
+    .await
+    .unwrap();
     tx.commit().await.unwrap();
     let batch = crate::CommitBatch {
         command_id: "atomic-overflow".into(),
@@ -1277,7 +1301,15 @@ async fn late_outbox_exhaustion_rolls_back_events_projections_receipts_and_first
     assert!(store.outbox_get("first").await.unwrap().is_none());
     assert!(store.outbox_get("overflow").await.unwrap().is_none());
     assert_eq!(
-        crate::decode::<u64>(&store.db.read(&key("counter")).await.unwrap().unwrap()).unwrap(),
+        crate::decode::<u64>(
+            &store
+                .db
+                .read(&key(Repository::Legacy, "counter"))
+                .await
+                .unwrap()
+                .unwrap()
+        )
+        .unwrap(),
         MAX_COUNTER - 1
     );
     store.shutdown().await.unwrap();
@@ -1445,7 +1477,9 @@ async fn corrupt_index_rows_and_attempt_exhaustion_fail_without_partial_mutation
     let mut at_limit = original.clone();
     at_limit.attempt_count = MAX_COUNTER;
     let mut tx = store.db.begin().await.unwrap();
-    save_row(&mut tx, Some(&original), &at_limit).await.unwrap();
+    save_row(&mut tx, Repository::Legacy, Some(&original), &at_limit)
+        .await
+        .unwrap();
     tx.commit().await.unwrap();
     assert!(matches!(
         store.outbox_claim_next(&claim("worker", NOW)).await,
@@ -1453,10 +1487,10 @@ async fn corrupt_index_rows_and_attempt_exhaustion_fail_without_partial_mutation
     ));
     assert_eq!(row(&store, "effect").await, at_limit);
     let mut tx = store.db.begin().await.unwrap();
-    let pending_key = index_keys(&at_limit)
+    let pending_key = index_keys(Repository::Legacy, &at_limit)
         .unwrap()
         .into_iter()
-        .find(|key| key.starts_with(&super::key("pending/")))
+        .find(|key| key.starts_with(&super::key(Repository::Legacy, "pending/")))
         .unwrap();
     tx.put(pending_key, b"missing".to_vec()).await.unwrap();
     tx.commit().await.unwrap();
@@ -1546,7 +1580,14 @@ async fn malformed_payloads_and_bounded_inputs_leave_database_unchanged() {
             .is_err()
     );
     assert!(store.outbox_get("effect").await.unwrap().is_none());
-    assert!(store.db.read(&key("counter")).await.unwrap().is_none());
+    assert!(
+        store
+            .db
+            .read(&key(Repository::Legacy, "counter"))
+            .await
+            .unwrap()
+            .is_none()
+    );
     store.shutdown().await.unwrap();
 }
 
@@ -1825,7 +1866,7 @@ async fn one_large_valid_effect_can_be_scheduled_and_claimed() {
     assert_eq!(replay.effect, first.effect);
     let receipt = store
         .db
-        .read(&claim_stream_key("large-stream"))
+        .read(&claim_stream_key(Repository::Legacy, "large-stream"))
         .await
         .unwrap()
         .unwrap();

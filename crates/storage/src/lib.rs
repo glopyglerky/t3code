@@ -4,18 +4,32 @@ mod backend;
 
 #[path = "../../../apps/server/src/persistence/redb_transactions.rs"]
 pub mod application;
-#[path = "../../../apps/server/src/persistence/redb_import.rs"]
-pub mod application_import;
 #[path = "../../../apps/server/src/persistence/redb_event_rows.rs"]
 pub mod application_events;
+#[path = "../../../apps/server/src/persistence/redb_import.rs"]
+pub mod application_import;
+#[path = "../../../apps/server/src/persistence/redb_json.rs"]
+pub(crate) mod application_json;
+#[path = "../../../apps/server/src/orchestration-v2/redb_effect_outbox.rs"]
+pub mod application_outbox;
+#[path = "../../../apps/server/src/orchestration-v2/redb_turn_item_positions.rs"]
+pub mod application_positions;
+#[path = "../../../apps/server/src/persistence/redb_projection_commit.rs"]
+pub mod application_projections;
+#[path = "../../../apps/server/src/orchestration-v2/redb_project_rows.rs"]
+pub mod application_projects;
+#[path = "../../../apps/server/src/persistence/redb_command_receipts.rs"]
+pub mod application_receipts;
+#[path = "../../../apps/server/src/persistence/redb_application_rows.rs"]
+pub(crate) mod application_rows;
 
 pub mod outbox;
 pub mod project_service;
 pub mod project_validation;
 pub mod sqlite_import;
-pub mod thread_service;
 #[cfg(test)]
 mod test_support;
+pub mod thread_service;
 
 use std::collections::HashSet;
 use std::fmt;

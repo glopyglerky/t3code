@@ -22,8 +22,10 @@ import * as PubSub from "effect/PubSub";
 import * as Semaphore from "effect/Semaphore";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import * as SqlClient from "effect/sql/SqlClient";
-import * as SqlError from "effect/sql/SqlError";
+import type * as SqlClient from "effect/sql/SqlClient";
+import * as PersistenceTransactions from "../persistence/PersistenceTransactions.ts";
+import * as SqliteProjectionCommitStore from "../persistence/SqliteProjectionCommitStore.ts";
+import * as ProjectionCommitStore from "./ProjectionCommitStore.ts";
 
 import { replayAndBufferProjectedLiveEvents } from "./LiveStreamBudget.ts";
 import type { UnsequencedProjectEvent } from "../persistence/OrchestrationEventStore.ts";
@@ -71,6 +73,7 @@ export type EventSinkV2Error = typeof EventSinkV2Error.Type;
 interface ProviderBatchPublication {
   readonly publish: Array<Effect.Effect<void>>;
   eventCount: number;
+  nativePublishedWrites: number;
 }
 const CurrentProviderBatch = Context.Reference<ProviderBatchPublication | undefined>(
   "t3/orchestration-v2/EventSink/CurrentProviderBatch",
@@ -234,18 +237,18 @@ const layerBase: Layer.Layer<
   | CommandReceiptStore.CommandReceiptStoreV2
   | EffectOutbox.EffectOutboxV2
   | EventStore.EventStoreV2
-  | ProjectionStore.ProjectionStoreV2
+  | ProjectionCommitStore.ProjectionCommitStore
   | ProjectStore.ProjectStoreV2
-  | SqlClient.SqlClient
+  | PersistenceTransactions.PersistenceTransactions
   | TurnItemPositionStore.TurnItemPositionStoreV2
 > = Layer.effect(
   EventSinkV2,
   Effect.gen(function* () {
-    const sql = yield* SqlClient.SqlClient;
+    const transactions = yield* PersistenceTransactions.PersistenceTransactions;
     const commandReceipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
     const effectOutbox = yield* EffectOutbox.EffectOutboxV2;
     const eventStore = yield* EventStore.EventStoreV2;
-    const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+    const projectionStore = yield* ProjectionCommitStore.ProjectionCommitStore;
     const projectStore = yield* ProjectStore.ProjectStoreV2;
     const turnItemPositions = yield* TurnItemPositionStore.TurnItemPositionStoreV2;
     const liveEvents = yield* PubSub.unbounded<OrchestrationV2StoredEvent>();
@@ -268,7 +271,7 @@ const layerBase: Layer.Layer<
       // One payload row; unlike the shell, it still resolves a deleted child thread.
       projectionStore
         .getThread(threadId)
-        .pipe(Effect.map((thread) => thread.lineage.relationshipToParent === "subagent")),
+        .pipe(Effect.map((thread) => thread?.lineage.relationshipToParent === "subagent")),
     );
     // Recorded before publication, so an interrupted publish cannot lose a committed outcome.
     const publishStoredEvents = (
@@ -289,6 +292,14 @@ const layerBase: Layer.Layer<
       publish: (committed: A) => Effect.Effect<void>,
     ) =>
       Effect.uninterruptibleMask((restore) => {
+        const afterCommit = transactions.afterCommit;
+        if (afterCommit !== undefined) {
+          // Releasing a savepoint does not commit an ambient owner's transaction.
+          // The native owner serializes its commit and all deferred publications.
+          return transactions.withTransaction(
+            restore(transaction).pipe(Effect.tap((committed) => afterCommit(publish(committed)))),
+          );
+        }
         let holdsLane = false;
         const takeLane = publishLane.take(1).pipe(
           Effect.andThen(
@@ -301,7 +312,7 @@ const layerBase: Layer.Layer<
         // Cancellation may roll back the transaction's work. Once it commits,
         // every subscriber must hear about it before this writer can exit.
         // Otherwise a failed child run can leave its parent's task running.
-        return sql
+        return transactions
           .withTransaction(Effect.tap(restore(transaction), () => takeLane))
           .pipe(
             Effect.tap(publish),
@@ -388,26 +399,7 @@ const layerBase: Layer.Layer<
         });
         const sequence = storedEvents.at(-1)?.sequence;
         if (sequence !== undefined) {
-          const now = DateTime.formatIso(yield* DateTime.now);
-          yield* sql`
-            INSERT INTO orchestration_v2_projection_metadata (
-              projection_name,
-              schema_version,
-              last_sequence,
-              updated_at
-            )
-            VALUES (
-              'thread-projections',
-              ${ProjectionStore.ORCHESTRATION_V2_PROJECTION_SCHEMA_VERSION},
-              ${sequence},
-              ${now}
-            )
-            ON CONFLICT(projection_name)
-            DO UPDATE SET
-              schema_version = excluded.schema_version,
-              last_sequence = excluded.last_sequence,
-              updated_at = excluded.updated_at
-          `;
+          yield* projectionStore.markApplied(sequence, yield* DateTime.now);
         }
         // Read lineage here, on the connection this transaction holds; see makeRunOutcomeRecorder.
         return yield* runOutcomes.prepare(storedEvents);
@@ -421,10 +413,7 @@ const layerBase: Layer.Layer<
       return yield* Effect.forEach(events, (event) =>
         Effect.gen(function* () {
           if (event.type !== "run.updated" || !includesRun(event.payload.id)) return event;
-          const { runs } = yield* projectionStore.getThreadRecords(event.threadId, ["runs"], {
-            runIds: [event.payload.id],
-          });
-          const current = runs[0];
+          const current = yield* projectionStore.getRun(event.threadId, event.payload.id);
           return current === undefined
             ? event
             : {
@@ -451,16 +440,9 @@ const layerBase: Layer.Layer<
           // Check ownership in the same transaction that claims the native session.
           const imported = input.unlessNativeThreadOwned;
           if (imported?.nativeThreadRef != null) {
-            const owners = yield* sql`
-              SELECT provider_thread_id
-              FROM orchestration_v2_projection_provider_threads
-              WHERE driver = ${imported.driver}
-                AND provider_instance_id = ${imported.providerInstanceId}
-                AND thread_id IS NOT ${imported.appThreadId}
-                AND json_extract(payload_json, '$.nativeThreadRef.nativeId') = ${imported.nativeThreadRef.nativeId}
-              LIMIT 1
-            `;
-            if (owners.length > 0) return { committed: [], outcomes: [] };
+            if (yield* projectionStore.nativeThreadOwned(imported)) {
+              return { committed: [], outcomes: [] };
+            }
           }
           // Checkpoint capture can finish after a cohort writer reads its parent run.
           // Merge in this transaction so the event log and projection keep that completion.
@@ -502,24 +484,7 @@ const layerBase: Layer.Layer<
 
         return yield* commitThenPublish(
           Effect.gen(function* () {
-            const rows = yield* sql<{
-              readonly status: string;
-              readonly active_attempt_id: string | null;
-            }>`
-            SELECT
-              status,
-              json_extract(payload_json, '$.activeAttemptId') AS active_attempt_id
-            FROM orchestration_v2_projection_runs
-            WHERE run_id = ${input.runId}
-              AND thread_id = ${input.threadId}
-            LIMIT 1
-          `;
-            const current = rows[0];
-            if (
-              current === undefined ||
-              current.status !== input.expectedStatus ||
-              current.active_attempt_id !== input.activeAttemptId
-            ) {
+            if (!(yield* projectionStore.runCurrent(input))) {
               return {
                 committed: false as const,
                 storedEvents: [] as ReadonlyArray<OrchestrationV2StoredEvent>,
@@ -565,26 +530,7 @@ const layerBase: Layer.Layer<
 
       return yield* commitThenPublish(
         Effect.gen(function* () {
-          const rows = yield* sql<{
-            readonly active_attempt_id: string | null;
-            readonly last_run_ordinal: number | null;
-          }>`
-            SELECT
-              json_extract(r.payload_json, '$.activeAttemptId') AS active_attempt_id,
-              p.last_run_ordinal
-            FROM orchestration_v2_projection_provider_threads p
-            JOIN orchestration_v2_projection_runs r
-              ON r.run_id = ${input.runId}
-             AND r.thread_id = p.thread_id
-            WHERE p.provider_thread_id = ${input.providerThreadId}
-            LIMIT 1
-          `;
-          const current = rows[0];
-          if (
-            current === undefined ||
-            current.active_attempt_id !== input.activeAttemptId ||
-            current.last_run_ordinal !== input.expectedLastRunOrdinal
-          ) {
+          if (!(yield* projectionStore.providerThreadOwner(input))) {
             return {
               committed: false as const,
               storedEvents: [] as ReadonlyArray<OrchestrationV2StoredEvent>,
@@ -621,13 +567,7 @@ const layerBase: Layer.Layer<
 
       return yield* commitThenPublish(
         Effect.gen(function* () {
-          const rows = yield* sql<{ readonly payload_json: string }>`
-            SELECT payload_json
-            FROM orchestration_v2_projection_provider_threads
-            WHERE provider_thread_id = ${input.expected.id}
-            LIMIT 1
-          `;
-          if (rows[0]?.payload_json !== expectedJson) {
+          if (!(yield* projectionStore.providerThreadUnchanged(input.expected.id, expectedJson))) {
             return {
               committed: false as const,
               storedEvents: [] as ReadonlyArray<OrchestrationV2StoredEvent>,
@@ -743,7 +683,7 @@ const layerBase: Layer.Layer<
     const commitRejectedCommandEffect = Effect.fn(
       "orchestrationV2.EventSink.commitRejectedCommand",
     )(function* (input: Parameters<EventSinkV2Shape["commitRejectedCommand"]>[0]) {
-      return yield* sql.withTransaction(
+      return yield* transactions.withTransaction(
         Effect.gen(function* () {
           const sequence = yield* eventStore.latestSequence({ threadId: input.threadId });
           const receipt: CommandReceiptStore.CommandReceiptV2 = {
@@ -808,7 +748,7 @@ const layerBase: Layer.Layer<
     const commitRejectedProjectCommandEffect = Effect.fn(
       "orchestrationV2.EventSink.commitRejectedProjectCommand",
     )(function* (input: Parameters<EventSinkV2Shape["commitRejectedProjectCommand"]>[0]) {
-      return yield* sql.withTransaction(
+      return yield* transactions.withTransaction(
         Effect.gen(function* () {
           const receipt: CommandReceiptStore.ProjectCommandReceiptV2 = {
             commandId: input.commandId,
@@ -913,16 +853,20 @@ const layerBase: Layer.Layer<
     ) =>
       Effect.flatMap(CurrentProviderBatch, (batch) =>
         batch === undefined
-          ? Effect.flatMap(Effect.serviceOption(sql.transactionService), (existing) =>
-              Option.isSome(existing)
+          ? Effect.flatMap(transactions.isInTransaction, (existing) =>
+              existing
                 ? commitThenPublishNow(transaction, publish)
                 : coordinator.barrier(commitThenPublishNow(transaction, publish)),
             )
           : transaction.pipe(
               Effect.tap((committed) =>
-                Effect.sync(() => {
-                  batch.publish.push(publish(committed));
-                }),
+                transactions.afterCommit === undefined
+                  ? Effect.sync(() => {
+                      batch.publish.push(publish(committed));
+                    })
+                  : transactions.afterCommit(publish(committed).pipe(
+                      Effect.tap(() => Effect.sync(() => { batch.nativePublishedWrites += 1; })),
+                    )),
               ),
             ),
       );
@@ -931,7 +875,7 @@ const layerBase: Layer.Layer<
       "orchestrationV2.EventSink.providerBatch",
     )(function* <A, E, R>(effect: Effect.Effect<A, E, R>) {
       if ((yield* CurrentProviderBatch) !== undefined) return yield* effect;
-      const batch: ProviderBatchPublication = { publish: [], eventCount: 0 };
+      const batch: ProviderBatchPublication = { publish: [], eventCount: 0, nativePublishedWrites: 0 };
       let started = false;
       const result = yield* commitThenPublishNow(
         Effect.sync(() => {
@@ -942,18 +886,18 @@ const layerBase: Layer.Layer<
         // Normalization mutates run-local state, so only retry before its transaction body starts.
         Effect.retry({
           while: (cause) =>
-            !started && SqlError.isSqlError(cause) && cause.reason._tag === "LockTimeoutError",
+            !started && PersistenceTransactions.isLockTimeout(cause),
           times: 2,
         }),
         Effect.mapError((cause) =>
-          SqlError.isSqlError(cause)
+          PersistenceTransactions.isPersistenceTransactionError(cause)
             ? new EventSinkWriteError({ eventCount: batch.eventCount, cause })
             : cause,
         ),
       );
       yield* Effect.annotateCurrentSpan({
         "orchestration_v2.event_count": batch.eventCount,
-        "orchestration_v2.batch_writes": batch.publish.length,
+        "orchestration_v2.batch_writes": batch.publish.length + batch.nativePublishedWrites,
       });
       return result;
     });
@@ -975,7 +919,7 @@ const layerBase: Layer.Layer<
         const batch = yield* CurrentProviderBatch;
         const publicationCount = batch?.publish.length ?? 0;
         const eventCount = batch?.eventCount ?? 0;
-        return yield* sql.withTransaction(work).pipe(
+        return yield* transactions.withTransaction(work).pipe(
           Effect.onError(() =>
             Effect.sync(() => {
               if (batch !== undefined) {
@@ -1119,13 +1063,20 @@ const layerBase: Layer.Layer<
 );
 
 /** Share the worker's outbox instance: enqueue wakeups are in-memory. */
-export const layerFromStores = layerBase;
+export const layerFromPersistence = layerBase;
+
+export const layerFromStores = layerBase.pipe(
+  Layer.provide(Layer.mergeAll(
+    PersistenceTransactions.sqliteLayer,
+    SqliteProjectionCommitStore.layer,
+  )),
+);
 
 export const layer: Layer.Layer<
   EventSinkV2,
   never,
   EventStore.EventStoreV2 | ProjectionStore.ProjectionStoreV2 | SqlClient.SqlClient
-> = layerBase.pipe(
+> = layerFromStores.pipe(
   Layer.provide(
     Layer.mergeAll(
       CommandReceiptStore.layer,
