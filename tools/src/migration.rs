@@ -4,6 +4,7 @@ use serde_json::Value;
 use std::{collections::BTreeMap, collections::BTreeSet, fs, path::Path, process::Command};
 
 const RECOVERY_COMMIT: &str = "d29a94f3a175eac1f26c548023fedd8695cedfaf";
+const RECOVERY_UPSTREAM: &str = "521ac7c218b3faa74281fb72fc36ce74a0951fb3";
 const TARGETS: &[&str] = &[
     "linux-x64",
     "linux-arm64",
@@ -139,13 +140,21 @@ fn crate_inputs<'a>(tracked: &'a BTreeSet<String>, roots: &[&str]) -> Result<Vec
     }
     Ok(tracked
         .iter()
-        .filter(|path| roots.iter().any(|root| path.starts_with(&format!("{root}/"))))
+        .filter(|path| {
+            roots
+                .iter()
+                .any(|root| path.starts_with(&format!("{root}/")))
+        })
         .map(String::as_str)
         .collect())
 }
 
-fn source_tree(root: &Path) -> Result<BTreeMap<String, String>> {
-    let mut args = vec!["ls-tree", "-r", "-z", RECOVERY_COMMIT, "--"];
+fn source_tree(root: &Path, revision: &str) -> Result<BTreeMap<String, String>> {
+    identity(revision)?;
+    if git(root, &["cat-file", "-t", revision])? != b"commit\n" {
+        return Err(format!("source history object is not a commit: {revision}").into());
+    }
+    let mut args = vec!["ls-tree", "-r", "-z", revision, "--"];
     args.extend(PROTECTED_ROOTS);
     let bytes = git(root, &args)?;
     let mut files = BTreeMap::new();
@@ -156,17 +165,231 @@ fn source_tree(root: &Path) -> Result<BTreeMap<String, String>> {
         let entry = std::str::from_utf8(entry)?;
         let (header, path) = entry
             .split_once('\t')
-            .ok_or("invalid recovery tree entry")?;
+            .ok_or("invalid protected source tree entry")?;
         let fields: Vec<_> = header.split_whitespace().collect();
         if fields.len() != 3 || fields[1] != "blob" {
-            return Err(format!("unsupported recovery tree entry: {path}").into());
+            return Err(format!("unsupported protected source tree entry: {path}").into());
         }
+        relative(path)?;
         files.insert(path.to_owned(), fields[2].to_owned());
     }
     if files.is_empty() {
-        return Err("immutable recovery source is unavailable; fetch its exact commit".into());
+        return Err("immutable protected source is unavailable; fetch its exact commit".into());
     }
     Ok(files)
+}
+
+struct SourceHistory {
+    recovery: BTreeMap<String, String>,
+    snapshots: Vec<(String, BTreeMap<String, String>)>,
+    protected: BTreeMap<String, String>,
+}
+
+impl SourceHistory {
+    fn new(
+        recovery: BTreeMap<String, String>,
+        snapshots: Vec<(String, BTreeMap<String, String>)>,
+    ) -> Self {
+        let mut protected = recovery.clone();
+        for (_, tree) in &snapshots {
+            protected.extend(tree.clone());
+        }
+        Self {
+            recovery,
+            snapshots,
+            protected,
+        }
+    }
+
+    fn current(&self) -> &BTreeMap<String, String> {
+        &self
+            .snapshots
+            .last()
+            .expect("validated nonempty source history")
+            .1
+    }
+
+    fn latest_source(&self, path: &str) -> Option<(usize, &str, &str)> {
+        self.snapshots
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, (revision, tree))| {
+                tree.get(path)
+                    .map(|blob| (index, revision.as_str(), blob.as_str()))
+            })
+    }
+
+    fn blob(&self, revision: &str, path: &str) -> Option<&str> {
+        if revision == RECOVERY_COMMIT {
+            return self.recovery.get(path).map(String::as_str);
+        }
+        self.snapshots
+            .iter()
+            .find(|(commit, _)| commit == revision)
+            .and_then(|(_, tree)| tree.get(path))
+            .map(String::as_str)
+    }
+}
+
+fn history_revisions(map: &Value) -> Result<Vec<&str>> {
+    let revisions = paths(map, "source_history")?;
+    if revisions.first().copied() != Some(RECOVERY_UPSTREAM)
+        || revisions.last().copied() != Some(text(map, "integrated_upstream_commit")?)
+    {
+        return Err(
+            "source history must start at the recovery upstream and end at the integrated revision"
+                .into(),
+        );
+    }
+    let mut seen = BTreeSet::new();
+    for revision in &revisions {
+        identity(revision)?;
+        if !seen.insert(*revision) {
+            return Err("source history contains a duplicate integration".into());
+        }
+    }
+    Ok(revisions)
+}
+
+fn source_history(root: &Path, map: &Value) -> Result<SourceHistory> {
+    let recovery = source_tree(root, RECOVERY_COMMIT)?;
+    let snapshots = history_revisions(map)?
+        .into_iter()
+        .map(|revision| Ok((revision.to_owned(), source_tree(root, revision)?)))
+        .collect::<Result<_>>()?;
+    Ok(SourceHistory::new(recovery, snapshots))
+}
+
+fn authorize_upstream_removals(
+    map: &Value,
+    history: &SourceHistory,
+    present: &BTreeSet<String>,
+    retired: &BTreeSet<String>,
+) -> Result<BTreeSet<String>> {
+    let mut removed = BTreeSet::new();
+    for removal in array(map, "upstream_removals")? {
+        let path = text(removal, "path")?;
+        relative(path)?;
+        let source = text(removal, "source_commit")?;
+        let blob = text(removal, "source_blob")?;
+        let removed_in = text(removal, "removed_in")?;
+        for value in [source, blob, removed_in] {
+            identity(value)?;
+        }
+        text(removal, "reason")?;
+        text(removal, "fork_disposition")?;
+        let (index, actual_source, actual_blob) = history.latest_source(path).ok_or_else(|| {
+            format!("upstream removal cannot remove a fork-only or unknown file: {path}")
+        })?;
+        if source != actual_source
+            || blob != actual_blob
+            || history
+                .snapshots
+                .get(index + 1)
+                .map(|(revision, _)| revision.as_str())
+                != Some(removed_in)
+            || history.current().contains_key(path)
+        {
+            return Err(format!("upstream removal is stale or does not identify the actual source transition: {path}").into());
+        }
+        // Acknowledging upstream's deletion does not account for the fork's edits.
+        // Preserve their recovery identity and require a separate disposition review.
+        if let Some(recovered) = history.recovery.get(path) {
+            if removal["recovery_blob"].as_str() != Some(recovered.as_str()) {
+                return Err(format!(
+                    "upstream removal omits the recovered fork source identity: {path}"
+                )
+                .into());
+            }
+        }
+        for replacement in paths(removal, "replacement_paths")? {
+            if !history.current().contains_key(replacement)
+                || (!present.contains(replacement) && !retired.contains(replacement))
+            {
+                return Err(format!(
+                    "upstream replacement must be integrated or accepted as retired: {replacement}"
+                )
+                .into());
+            }
+        }
+        if !removed.insert(path.to_owned()) {
+            return Err(format!("duplicate upstream source removal: {path}").into());
+        }
+    }
+    Ok(removed)
+}
+
+fn upstream_source(
+    source: &Value,
+    integrated: &str,
+    history: &SourceHistory,
+    removed: &BTreeSet<String>,
+) -> Result<()> {
+    let path = text(source, "path")?;
+    relative(path)?;
+    let blob = text(source, "blob")?;
+    identity(blob)?;
+    let revision = if source.get("source_commit").is_some() {
+        text(source, "source_commit")?
+    } else {
+        integrated
+    };
+    identity(revision)?;
+    if history.blob(revision, path) != Some(blob) {
+        return Err(format!("upstream source identity mismatch: {path}").into());
+    }
+    if revision != integrated {
+        let latest = history.latest_source(path);
+        if !removed.contains(path)
+            || latest.map(|(_, commit, source_blob)| (commit, source_blob))
+                != Some((revision, blob))
+        {
+            return Err(
+                format!("historical mapping needs a reviewed upstream removal: {path}").into(),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn check_upstream_sources(
+    port: &Value,
+    map: &Value,
+    integrated: &str,
+    history: &SourceHistory,
+    removed: &BTreeSet<String>,
+) -> Result<()> {
+    let sources = array(port, "upstream_sources")?;
+    for source in sources {
+        upstream_source(source, integrated, history, removed)?;
+        let Some(revision) = source["source_commit"].as_str() else {
+            continue;
+        };
+        if revision == integrated {
+            continue;
+        }
+        let path = text(source, "path")?;
+        let removal = array(map, "upstream_removals")?
+            .iter()
+            .find(|entry| entry["path"].as_str() == Some(path))
+            .ok_or("historical source has no upstream removal record")?;
+        for replacement in paths(removal, "replacement_paths")? {
+            if !sources.iter().any(|entry| {
+                entry["path"].as_str() == Some(replacement)
+                    && entry
+                        .get("source_commit")
+                        .is_none_or(|value| value.as_str() == Some(integrated))
+            }) {
+                return Err(format!(
+                    "port {} must map upstream replacement {replacement} as a current source",
+                    text(port, "id")?
+                )
+                .into());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn evidence(
@@ -248,10 +471,7 @@ fn retirement_targets(port: &Value) -> Result<BTreeSet<&str>> {
     Ok(targets)
 }
 
-fn authorize_retirements(
-    map: &Value,
-    baseline: &BTreeMap<String, String>,
-) -> Result<BTreeSet<String>> {
+fn authorize_retirements(map: &Value, history: &SourceHistory) -> Result<BTreeSet<String>> {
     let mut retired = BTreeSet::new();
     let all_targets: BTreeSet<_> = TARGETS.iter().copied().collect();
     for port in array(map, "ports")? {
@@ -266,9 +486,13 @@ fn authorize_retirements(
                 )
                 .into());
             }
-            if baseline.get(path).map(String::as_str) != Some(text(entry, "source_blob")?) {
+            let source = text(entry, "source_commit")?;
+            let blob = text(entry, "source_blob")?;
+            identity(source)?;
+            identity(blob)?;
+            if history.blob(source, path) != Some(blob) {
                 return Err(format!(
-                    "retirement does not identify the recovery source blob: {path}"
+                    "retirement does not identify a protected historical source blob: {path}"
                 )
                 .into());
             }
@@ -280,6 +504,25 @@ fn authorize_retirements(
             }
             if !retired.insert(path.to_owned()) {
                 return Err(format!("duplicate source retirement: {path}").into());
+            }
+        }
+    }
+    // Shared adapters and sources cannot inherit another owner's acceptance.
+    // check() validates each owner's current receipts after this authorization.
+    for path in &retired {
+        for port in array(map, "ports")? {
+            let owns_source = array(port, "upstream_sources")?
+                .iter()
+                .any(|source| source["path"].as_str() == Some(path.as_str()));
+            if (owns_source || paths(port, "adapter_paths")?.contains(&path.as_str()))
+                && (!matches!(text(port, "state")?, "retired" | "synced")
+                    || retirement_targets(port)? != all_targets)
+            {
+                return Err(format!(
+                    "shared retirement of {path} lacks acceptance for owner {}",
+                    text(port, "id")?
+                )
+                .into());
             }
         }
     }
@@ -297,7 +540,7 @@ fn require_preserved(
         .collect();
     if !missing.is_empty() {
         return Err(format!(
-            "{} recovery source files disappeared without accepted replacements; first paths: {}",
+            "{} protected source files disappeared without accepted replacements or reviewed upstream removals; first paths: {}",
             missing.len(),
             missing
                 .iter()
@@ -341,14 +584,16 @@ pub fn check(root: &Path) -> Result<()> {
     if upstream["upstream"]["commit"].as_str() != Some(integrated) {
         return Err("port map and integrated upstream source disagree".into());
     }
-    let baseline = source_tree(root)?;
-    let retired = authorize_retirements(&map, &baseline)?;
+    let history = source_history(root, &map)?;
+    let retired = authorize_retirements(&map, &history)?;
     let present: BTreeSet<_> = tracked
         .iter()
         .filter(|path| root.join(path).is_file())
         .cloned()
         .collect();
-    require_preserved(&baseline, &present, &retired)?;
+    let removed = authorize_upstream_removals(&map, &history, &present, &retired)?;
+    let accounted = retired.union(&removed).cloned().collect();
+    require_preserved(&history.protected, &present, &accounted)?;
     let mut ids = BTreeSet::new();
     for port in array(&map, "ports")? {
         let id = text(port, "id")?;
@@ -364,17 +609,7 @@ pub fn check(root: &Path) -> Result<()> {
                 format!("port {id} has not reviewed the integrated upstream revision").into(),
             );
         }
-        for source in array(port, "upstream_sources")? {
-            let path = text(source, "path")?;
-            relative(path)?;
-            let blob = text(source, "blob")?;
-            identity(blob)?;
-            let actual =
-                String::from_utf8(git(root, &["rev-parse", &format!("{reviewed}:{path}")])?)?;
-            if actual.trim() != blob {
-                return Err(format!("upstream source identity mismatch: {path}").into());
-            }
-        }
+        check_upstream_sources(port, &map, integrated, &history, &removed)?;
         let rust = paths(port, "rust_paths")?;
         if rust.is_empty() {
             return Err(format!("port {id} has no Rust implementation paths").into());
@@ -440,8 +675,10 @@ pub fn check(root: &Path) -> Result<()> {
         }
     }
     println!(
-        "Checked {} protected recovery files and {} mapped ports; application source is retained until target acceptance. This is a structure check, not application qualification.",
-        baseline.len(),
+        "Checked {} protected files across recovery and {} integrated upstream revisions, {} reviewed upstream removals and {} mapped ports. This is a structure check, not application qualification.",
+        history.protected.len(),
+        history.snapshots.len(),
+        removed.len(),
         ids.len()
     );
     Ok(())
@@ -451,6 +688,286 @@ pub fn check(root: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    const NEXT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const LATER: &str = "cccccccccccccccccccccccccccccccccccccccc";
+    const BLOB: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const OLD: &str = "apps/server/src/old.ts";
+    const NEW: &str = "apps/server/src/new.ts";
+
+    fn files(paths: &[&str]) -> BTreeMap<String, String> {
+        paths
+            .iter()
+            .map(|path| ((*path).to_owned(), BLOB.to_owned()))
+            .collect()
+    }
+
+    fn removal() -> Value {
+        json!({
+            "path": OLD,
+            "source_commit": RECOVERY_UPSTREAM,
+            "source_blob": BLOB,
+            "removed_in": NEXT,
+            "recovery_blob": BLOB,
+            "reason": "Upstream moved the implementation to new.ts.",
+            "fork_disposition": "The fork adapter remains required and now calls new.ts.",
+            "replacement_paths": [NEW]
+        })
+    }
+
+    fn removed_history() -> SourceHistory {
+        SourceHistory::new(
+            files(&[OLD]),
+            vec![
+                (RECOVERY_UPSTREAM.into(), files(&[OLD])),
+                (NEXT.into(), files(&[NEW])),
+            ],
+        )
+    }
+
+    #[test]
+    fn integration_history_is_anchored_complete_and_unique() {
+        let mut map = json!({
+            "integrated_upstream_commit": NEXT,
+            "source_history": [RECOVERY_UPSTREAM, NEXT],
+        });
+        assert_eq!(history_revisions(&map).unwrap(), [RECOVERY_UPSTREAM, NEXT]);
+        for revisions in [
+            json!([]),
+            json!([NEXT]),
+            json!([RECOVERY_UPSTREAM]),
+            json!([RECOVERY_UPSTREAM, NEXT, NEXT]),
+            json!([RECOVERY_UPSTREAM, "main", NEXT]),
+        ] {
+            map["source_history"] = revisions;
+            assert!(history_revisions(&map).is_err());
+        }
+    }
+
+    #[test]
+    fn later_integrated_files_stay_protected_even_after_upstream_removes_them() {
+        let history = SourceHistory::new(
+            files(&[OLD]),
+            vec![
+                (RECOVERY_UPSTREAM.into(), files(&[OLD])),
+                (NEXT.into(), files(&[OLD, NEW])),
+                (LATER.into(), files(&[OLD])),
+            ],
+        );
+        let present = BTreeSet::from([OLD.to_owned()]);
+        assert!(history.protected.contains_key(NEW));
+        assert!(require_preserved(&history.protected, &present, &BTreeSet::new()).is_err());
+        let mut record = removal();
+        record["path"] = json!(NEW);
+        record["source_commit"] = json!(NEXT);
+        record["removed_in"] = json!(LATER);
+        record["replacement_paths"] = json!([]);
+        let map = json!({"upstream_removals": [record]});
+        let removed =
+            authorize_upstream_removals(&map, &history, &present, &BTreeSet::new()).unwrap();
+        require_preserved(&history.protected, &present, &removed).unwrap();
+    }
+
+    #[test]
+    fn reviewed_upstream_removal_is_separate_from_rust_acceptance() {
+        let history = removed_history();
+        let present = BTreeSet::from([NEW.to_owned()]);
+        assert!(require_preserved(&history.protected, &present, &BTreeSet::new()).is_err());
+        let map = json!({"upstream_removals": [removal()]});
+        let removed =
+            authorize_upstream_removals(&map, &history, &present, &BTreeSet::new()).unwrap();
+        require_preserved(&history.protected, &present, &removed).unwrap();
+        // An upstream removal is not in the accepted retirement set. Existing
+        // mapped adapters therefore remain mandatory current inputs in check().
+        assert_eq!(removed, BTreeSet::from([OLD.to_owned()]));
+    }
+
+    #[test]
+    fn upstream_removals_bind_provenance_replacements_and_fork_disposition() {
+        let history = removed_history();
+        let present = BTreeSet::from([NEW.to_owned()]);
+        for (key, bad) in [
+            ("source_commit", json!(NEXT)),
+            ("source_blob", json!(NEXT)),
+            ("removed_in", json!(LATER)),
+            ("recovery_blob", json!(NEXT)),
+            ("reason", json!("")),
+            ("fork_disposition", json!("")),
+            ("replacement_paths", json!(["apps/server/missing.ts"])),
+            ("replacement_paths", json!(["../outside"])),
+        ] {
+            let mut record = removal();
+            record[key] = bad;
+            assert!(
+                authorize_upstream_removals(
+                    &json!({"upstream_removals":[record]}),
+                    &history,
+                    &present,
+                    &BTreeSet::new()
+                )
+                .is_err(),
+                "accepted invalid {key}"
+            );
+        }
+        let map = json!({"upstream_removals":[removal()]});
+        assert!(
+            authorize_upstream_removals(&map, &history, &BTreeSet::new(), &BTreeSet::new())
+                .is_err()
+        );
+        // Upstream can remove a source after its Rust replacement already retired
+        // the fork's copy. Both records still carry independent provenance.
+        assert!(
+            authorize_upstream_removals(
+                &map,
+                &history,
+                &present,
+                &BTreeSet::from([OLD.to_owned()])
+            )
+            .is_ok()
+        );
+        assert!(
+            authorize_upstream_removals(
+                &json!({"upstream_removals":[removal(), removal()]}),
+                &history,
+                &present,
+                &BTreeSet::new()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn upstream_absence_never_authorizes_removing_fork_only_adapters() {
+        let history = SourceHistory::new(
+            files(&[OLD]),
+            vec![
+                (RECOVERY_UPSTREAM.into(), files(&[NEW])),
+                (NEXT.into(), files(&[NEW])),
+            ],
+        );
+        assert!(
+            authorize_upstream_removals(
+                &json!({"upstream_removals":[removal()]}),
+                &history,
+                &BTreeSet::from([NEW.to_owned()]),
+                &BTreeSet::new()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn historical_translation_mapping_requires_reviewed_removal() {
+        let history = removed_history();
+        let source = json!({"path":OLD,"blob":BLOB,"source_commit":RECOVERY_UPSTREAM});
+        assert!(upstream_source(&source, NEXT, &history, &BTreeSet::new()).is_err());
+        let removed = BTreeSet::from([OLD.to_owned()]);
+        upstream_source(&source, NEXT, &history, &removed).unwrap();
+        let no_provenance = json!({"path":OLD,"blob":BLOB});
+        assert!(upstream_source(&no_provenance, NEXT, &history, &removed).is_err());
+        upstream_source(&json!({"path":NEW,"blob":BLOB}), NEXT, &history, &removed).unwrap();
+    }
+
+    #[test]
+    fn renamed_replacements_keep_their_port_owner_and_current_blob() {
+        let history = removed_history();
+        let map = json!({"upstream_removals":[removal()]});
+        let removed = BTreeSet::from([OLD.to_owned()]);
+        let mut port = json!({"id":"renamed-port", "upstream_sources":[
+            {"path":OLD,"blob":BLOB,"source_commit":RECOVERY_UPSTREAM}
+        ]});
+        assert!(check_upstream_sources(&port, &map, NEXT, &history, &removed).is_err());
+        port["upstream_sources"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"path":NEW,"blob":BLOB}));
+        check_upstream_sources(&port, &map, NEXT, &history, &removed).unwrap();
+        port["upstream_sources"][1]["blob"] = json!(NEXT);
+        assert!(check_upstream_sources(&port, &map, NEXT, &history, &removed).is_err());
+        port["upstream_sources"][1]["blob"] = json!(BLOB);
+        port["upstream_sources"][1]["source_commit"] = json!(RECOVERY_UPSTREAM);
+        assert!(check_upstream_sources(&port, &map, NEXT, &history, &removed).is_err());
+    }
+
+    #[test]
+    fn reintroduced_upstream_source_invalidates_old_removal_and_historical_mapping() {
+        let mut history = removed_history();
+        history.snapshots.push((LATER.into(), files(&[OLD, NEW])));
+        let present = BTreeSet::from([NEW.to_owned()]);
+        assert!(
+            authorize_upstream_removals(
+                &json!({"upstream_removals":[removal()]}),
+                &history,
+                &present,
+                &BTreeSet::new()
+            )
+            .is_err()
+        );
+        let source = json!({"path":OLD,"blob":BLOB,"source_commit":RECOVERY_UPSTREAM});
+        assert!(
+            upstream_source(&source, LATER, &history, &BTreeSet::from([OLD.to_owned()])).is_err()
+        );
+    }
+
+    #[test]
+    fn retirement_can_identify_a_file_introduced_after_recovery() {
+        let history = SourceHistory::new(
+            files(&[OLD]),
+            vec![
+                (RECOVERY_UPSTREAM.into(), files(&[OLD])),
+                (NEXT.into(), files(&[OLD, NEW])),
+            ],
+        );
+        let receipts: BTreeMap<_, _> = TARGETS
+            .iter()
+            .map(|target| (*target, format!("qualification/{target}.json")))
+            .collect();
+        let mut map = json!({"ports":[{
+            "id":"new-port", "state":"retired",
+            "upstream_sources":[{"path":NEW}], "adapter_paths":[],
+            "retired_paths":[{"path":NEW,"source_commit":NEXT,"source_blob":BLOB}],
+            "platform_routes":[{"targets":TARGETS,"state":"accepted","implementation":"rust","acceptance_evidence":receipts}]
+        }]});
+        assert_eq!(
+            authorize_retirements(&map, &history).unwrap(),
+            BTreeSet::from([NEW.to_owned()])
+        );
+        map["ports"][0]["retired_paths"][0]["source_commit"] = json!(RECOVERY_COMMIT);
+        assert!(authorize_retirements(&map, &history).is_err());
+    }
+
+    #[test]
+    fn one_ports_acceptance_cannot_retire_another_owners_shared_adapter() {
+        let history = SourceHistory::new(
+            files(&[OLD]),
+            vec![(RECOVERY_UPSTREAM.into(), files(&[OLD]))],
+        );
+        let receipts: BTreeMap<_, _> = TARGETS
+            .iter()
+            .map(|target| (*target, format!("qualification/{target}.json")))
+            .collect();
+        let accepted = json!({"id":"accepted-owner", "state":"retired",
+            "upstream_sources":[{"path":OLD}], "adapter_paths":[OLD],
+            "retired_paths":[{"path":OLD,"source_commit":RECOVERY_COMMIT,"source_blob":BLOB}],
+            "platform_routes":[{"targets":TARGETS,"state":"accepted","implementation":"rust","acceptance_evidence":receipts}]
+        });
+        let other = json!({"id":"unaccepted-owner", "state":"integrated",
+            "upstream_sources":[], "adapter_paths":[OLD], "retired_paths":[],
+            "platform_routes":[{"targets":TARGETS,"state":"integrated","implementation":"upstream","acceptance_evidence":{}}]
+        });
+        let mut map = json!({"ports":[accepted, other]});
+        assert!(
+            authorize_retirements(&map, &history)
+                .unwrap_err()
+                .to_string()
+                .contains("unaccepted-owner")
+        );
+        map["ports"][1]["state"] = json!("synced");
+        map["ports"][1]["platform_routes"] = map["ports"][0]["platform_routes"].clone();
+        assert!(authorize_retirements(&map, &history).is_ok());
+        map["ports"][1]["platform_routes"][0]["targets"] = json!(["linux-x64"]);
+        assert!(authorize_retirements(&map, &history).is_err());
+    }
 
     #[test]
     fn path_checks_allow_upstream_languages_and_reject_escape() {
@@ -490,30 +1007,33 @@ mod tests {
 
     #[test]
     fn component_tests_and_linux_receipts_do_not_authorize_shared_retirement() {
-        let baseline =
-            BTreeMap::from([("packages/shared/src/policy.ts".into(), "original".into())]);
+        let blob = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let history = SourceHistory::new(
+            BTreeMap::from([("packages/shared/src/policy.ts".into(), blob.into())]),
+            vec![],
+        );
         let mut map = json!({"ports":[{
             "id":"policy", "state":"candidate",
             "upstream_sources":[{"path":"packages/shared/src/policy.ts"}],
             "adapter_paths":[],
-            "retired_paths":[{"path":"packages/shared/src/policy.ts","source_blob":"original"}],
+            "retired_paths":[{"path":"packages/shared/src/policy.ts","source_commit":RECOVERY_COMMIT,"source_blob":blob}],
             "platform_routes":[{"targets":["linux-x64"],"state":"accepted","implementation":"rust","acceptance_evidence":{"linux-x64":"qualification/linux.json"}}]
         }]});
-        assert!(authorize_retirements(&map, &baseline).is_err());
+        assert!(authorize_retirements(&map, &history).is_err());
         map["ports"][0]["state"] = json!("retired");
-        assert!(authorize_retirements(&map, &baseline).is_err());
+        assert!(authorize_retirements(&map, &history).is_err());
         map["ports"][0]["platform_routes"][0]["targets"] = json!(TARGETS);
         let evidence: BTreeMap<_, _> = TARGETS
             .iter()
             .map(|target| (*target, format!("qualification/{target}.json")))
             .collect();
         map["ports"][0]["platform_routes"][0]["acceptance_evidence"] = json!(evidence);
-        assert!(authorize_retirements(&map, &baseline).is_ok());
+        assert!(authorize_retirements(&map, &history).is_ok());
         map["ports"][0]["platform_routes"][0]["implementation"] = json!("upstream");
-        assert!(authorize_retirements(&map, &baseline).is_err());
+        assert!(authorize_retirements(&map, &history).is_err());
         map["ports"][0]["platform_routes"][0]["implementation"] = json!("rust");
         map["ports"][0]["retired_paths"][0]["source_blob"] = json!("different-source");
-        assert!(authorize_retirements(&map, &baseline).is_err());
+        assert!(authorize_retirements(&map, &history).is_err());
     }
 
     #[test]
@@ -546,19 +1066,15 @@ mod tests {
         let inputs = ["replacement.rs", "adapter.ts", "acceptance.test.ts"];
         let mut hashes = BTreeMap::new();
         let mut tracked = BTreeSet::new();
-        for path in
-            inputs
-                .into_iter()
-                .chain([
-                    "Cargo.toml",
-                    "Cargo.lock",
-                    "pnpm-lock.yaml",
-                    "lust-toolchain.json",
-                    "toolchain.lock.json",
-                    "crates/core/Cargo.toml",
-                    "crates/core/src/json.rs",
-                ])
-        {
+        for path in inputs.into_iter().chain([
+            "Cargo.toml",
+            "Cargo.lock",
+            "pnpm-lock.yaml",
+            "lust-toolchain.json",
+            "toolchain.lock.json",
+            "crates/core/Cargo.toml",
+            "crates/core/src/json.rs",
+        ]) {
             fs::create_dir_all(root.join(path).parent().unwrap()).unwrap();
             fs::write(root.join(path), "qualified source\n").unwrap();
             hashes.insert(
@@ -602,7 +1118,11 @@ mod tests {
             )
             .is_ok()
         );
-        for changed in ["adapter.ts", "toolchain.lock.json", "crates/core/src/json.rs"] {
+        for changed in [
+            "adapter.ts",
+            "toolchain.lock.json",
+            "crates/core/src/json.rs",
+        ] {
             fs::write(root.join(changed), "changed acceptance input\n").unwrap();
             let error = evidence(
                 root,
@@ -614,7 +1134,11 @@ mod tests {
                 &all_inputs,
             )
             .unwrap_err();
-            assert!(error.to_string().contains(&format!("stale or omits {changed}")));
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("stale or omits {changed}"))
+            );
             fs::write(root.join(changed), "qualified source\n").unwrap();
         }
     }

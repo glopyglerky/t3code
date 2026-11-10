@@ -30,8 +30,8 @@ jobs:
         run: |
           echo "CARGO_TARGET_DIR=$RUNNER_TEMP/t3code-ls-cargo" >> "$GITHUB_ENV"
 
-      - name: Test compiler-package admission and host launchers
-        run: node --test tools/install-toolchain.test.mjs tools/native-packaging.test.mjs
+      - name: Test compiler packages, host launchers and immutable source fetching
+        run: node --test tools/install-toolchain.test.mjs tools/native-packaging.test.mjs tools/fetch-migration-sources.test.mjs
 
       - name: Test immutable upstream and translated-code impact reporting
         run: python3 -m unittest discover -s tools -p test_nightly.py
@@ -52,11 +52,8 @@ jobs:
         id: toolchain
         run: node tools/install-toolchain.mjs --destination "$RUNNER_TEMP/t3code-ls-toolchains/preview-2026.11.09-2"
 
-      - name: Fetch the immutable upstream and recovery references
-        run: |
-          upstream_commit="$(node --input-type=module -e 'import fs from "node:fs"; const commit = JSON.parse(fs.readFileSync("upstream.lock.json", "utf8")).upstream.commit; if (!/^[0-9a-f]{40}$/.test(commit)) throw Error("invalid upstream pin"); console.log(commit)')"
-          git fetch --no-tags --depth=1 https://github.com/pingdotgg/t3code.git "$upstream_commit"
-          git fetch --no-tags --depth=1 origin d29a94f3a175eac1f26c548023fedd8695cedfaf
+      - name: Fetch the immutable integrated history and recovery references
+        run: node tools/fetch-migration-sources.mjs
 
       - name: Test Rust components and migration guards
         run: |

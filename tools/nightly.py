@@ -52,6 +52,14 @@ def require_sha(value: object) -> str:
     return value
 
 
+def require_relative_path(value: object) -> str:
+    if (not isinstance(value, str) or not value
+            or any(character in value for character in ("\\", "\0", "\n", "\r", ":"))
+            or any(part in ("", ".", "..") for part in value.split("/"))):
+        raise TrackingError("Port map paths must be repository-relative files.")
+    return value
+
+
 def published_time(value: object) -> datetime:
     if not isinstance(value, str):
         raise TrackingError("A published nightly has no valid publication timestamp.")
@@ -345,13 +353,16 @@ def port_impact(root: Path, baseline: str, changes: list[dict]) -> dict:
             raise TrackingError(f"Port {port['id']} has not reviewed the integrated upstream baseline.")
         sources = port.get("upstream_sources")
         retired = port.get("retired_paths", [])
-        if not isinstance(sources, list) or not isinstance(retired, list):
-            raise TrackingError(f"Port {port['id']} has invalid upstream or retired paths.")
+        adapters = port.get("adapter_paths", [])
+        if not all(isinstance(items, list) for items in (sources, retired, adapters)):
+            raise TrackingError(f"Port {port['id']} has invalid upstream, adapter or retired paths.")
         paths = set()
         for source in sources + retired:
-            if not isinstance(source, dict) or not isinstance(source.get("path"), str) or not source["path"]:
+            if not isinstance(source, dict):
                 raise TrackingError(f"Port {port['id']} contains an invalid source path.")
-            paths.add(source["path"])
+            paths.add(require_relative_path(source.get("path")))
+        adapter_paths = {require_relative_path(adapter) for adapter in adapters}
+        paths.update(adapter_paths)
         mapped_paths.update(paths)
         affected = [item["path"] for item in changes if item["path"] in paths]
         if affected or contract_paths:
@@ -360,6 +371,7 @@ def port_impact(root: Path, baseline: str, changes: list[dict]) -> dict:
                                                 "rust_paths", "rust_crates", "adapter_paths",
                                                 "platform_routes", "acceptance_tests")},
                 "changed_upstream_paths": affected,
+                "changed_adapter_paths": [path for path in affected if path in adapter_paths],
                 "requires_shared_contract_review": bool(contract_paths),
             })
     result["status"] = "mapped"

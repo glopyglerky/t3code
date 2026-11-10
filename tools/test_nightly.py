@@ -206,6 +206,88 @@ class ImmutableSnapshots(unittest.TestCase):
         self.assertEqual(self.lock, before)
         self.assertEqual(candidate["qualification"]["status"], "unqualified")
 
+    def test_shared_adapter_change_identifies_every_owner(self):
+        adapter = "packages/shared/source.txt"
+        (self.root / adapter).write_text("changed shared production adapter\n")
+        head = self.commit("upstream changes shared adapter")
+        policy = self.port("policy", "apps/server/source.txt")
+        generation = self.port("generation", "packages/provider-core/source.txt")
+        for port in (policy, generation):
+            port["adapter_paths"].append(adapter)
+        unrelated = self.port("unrelated", "apps/web/source.txt")
+        self.write_port_map(policy, generation, unrelated)
+        before = self.run_git("status", "--porcelain")
+
+        result = nightly.report(self.root, self.lock, nightly.manifest(self.root, self.metadata, head))
+        affected = result["port_impact"]["affected_ports"]
+        self.assertEqual([port["id"] for port in affected], ["policy", "generation"])
+        for port in affected:
+            self.assertEqual(port["changed_upstream_paths"], [adapter])
+            self.assertEqual(port["changed_adapter_paths"], [adapter])
+            self.assertFalse(port["requires_shared_contract_review"])
+        self.assertEqual(result["port_impact"]["unmapped_changes"], [])
+        self.assertEqual(self.run_git("status", "--porcelain"), before)
+
+    def test_removed_upstream_source_stays_mapped(self):
+        source = "apps/server/source.txt"
+        port = self.port("policy", source)
+        (self.root / source).unlink()
+        head = self.commit("upstream removes translated source")
+        self.write_port_map(port)
+
+        result = nightly.report(self.root, self.lock, nightly.manifest(self.root, self.metadata, head))
+        self.assertEqual(result["changes"][0]["status"], "removed")
+        affected = result["port_impact"]["affected_ports"]
+        self.assertEqual([item["id"] for item in affected], ["policy"])
+        self.assertEqual(affected[0]["changed_upstream_paths"], [source])
+        self.assertEqual(affected[0]["changed_adapter_paths"], [])
+        self.assertEqual(result["port_impact"]["unmapped_changes"], [])
+
+    def test_reintroduced_retired_path_stays_mapped_after_upstream_removal(self):
+        source = "apps/server/source.txt"
+        port = self.port("policy", source)
+        original_blob = port["upstream_sources"][0]["blob"]
+        (self.root / source).unlink()
+        removed = self.commit("upstream removes original source")
+        baseline = nightly.manifest(self.root, self.metadata, removed)
+        port["reviewed_upstream_commit"] = removed
+        port["upstream_sources"] = [{
+            "path": "apps/server/retained.txt",
+            "blob": self.run_git("rev-parse", f"{removed}:apps/server/retained.txt"),
+        }]
+        port["retired_paths"] = [{"path": source, "source_blob": original_blob}]
+        (self.root / source).write_text("upstream reintroduces historical source path\n")
+        head = self.commit("upstream reintroduces original path")
+        (self.root / "port-map.json").write_text(json.dumps({
+            "schema_version": 1, "integrated_upstream_commit": removed, "ports": [port],
+        }))
+
+        result = nightly.report(self.root, baseline, nightly.manifest(self.root, self.metadata, head))
+        self.assertEqual(result["changes"][0]["status"], "added")
+        affected = result["port_impact"]["affected_ports"]
+        self.assertEqual([item["id"] for item in affected], ["policy"])
+        self.assertEqual(affected[0]["changed_upstream_paths"], [source])
+        self.assertEqual(affected[0]["changed_adapter_paths"], [])
+        self.assertEqual(result["port_impact"]["unmapped_changes"], [])
+
+    def test_port_map_rejects_unsafe_source_adapter_and_retired_paths(self):
+        unsafe = ("", "/tmp/source.ts", "../source.ts", "apps/../source.ts", "apps//source.ts",
+                  "apps/./source.ts", "apps\\source.ts", "C:/source.ts", "apps/source\x00.ts",
+                  "apps/source\n.ts", "apps/source\r.ts", None, 3)
+        for field in ("upstream_sources", "adapter_paths", "retired_paths"):
+            for path in unsafe:
+                port = self.port("policy", "apps/server/source.txt")
+                port[field] = [path] if field == "adapter_paths" else [{"path": path}]
+                self.write_port_map(port)
+                with self.subTest(field=field, path=path), self.assertRaises(nightly.TrackingError):
+                    nightly.port_impact(self.root, self.base, [])
+            for invalid_collection in (None, "apps/server/source.ts", {}):
+                port = self.port("policy", "apps/server/source.txt")
+                port[field] = invalid_collection
+                self.write_port_map(port)
+                with self.subTest(field=field, collection=invalid_collection), self.assertRaises(nightly.TrackingError):
+                    nightly.port_impact(self.root, self.base, [])
+
     def test_stale_map_or_port_review_cannot_report_no_translation_impact(self):
         for changed in ("map", "port"):
             mapping = self.write_port_map(self.port("policy", "apps/server/source.txt"))
