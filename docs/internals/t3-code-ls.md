@@ -33,7 +33,8 @@ thread created with different execution settings. Project/thread deletion and
 the general outbox executor remain outside the implemented service subset.
 
 KDE capture depended on executable JavaScript/QML, including scripts embedded
-through Rust strings. That helper was retired as a unit. The remaining optional
+through Rust strings. Its previous implementation was removed; porting its
+behavior to Rust remains required. The remaining optional
 Hyprland and resource-monitor crates contain Rust implementation with upstream
 platform dependencies. They are excluded from the root workspace and have no
 qualified desktop delivery path.

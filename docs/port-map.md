@@ -47,8 +47,9 @@ and property ordering where they affect output. UTF-8 truncation includes the
 upstream marker in its byte cap. It does not silently substitute Rust's string
 or numeric behavior for JavaScript's.
 
-Rust/Serde cannot represent lone UTF-16 surrogates or non-finite JSON numbers.
-JavaScript can also parse nesting beyond Serde's safe recursion limit. A slice
+The current `String`/`serde_json::Value` representation cannot hold lone UTF-16
+surrogates or non-finite JSON numbers. JavaScript can also parse nesting beyond
+Serde's safe recursion limit. A slice
 that would split a surrogate pair, an escaped lone surrogate in a JSON envelope,
 a numeric-overflow envelope, or a parser-depth boundary returns an explicit
 representation error. Those inputs are **not parity-qualified**. Stack-safe

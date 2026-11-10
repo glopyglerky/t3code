@@ -1,6 +1,13 @@
-# Native API walkthrough
+# Native qualification API walkthrough
 
-This is the native application's JSON-RPC protocol. It is not compatible with the retired web, desktop or mobile clients. The sequence below follows the implemented service and controlled provider tests; it is not evidence of qualification with a real Codex installation or model.
+This is the temporary native qualification host's JSON-RPC protocol, not the
+original T3 Code application protocol. It is not compatible with the original
+web, desktop or mobile clients; porting those clients and their contracts remains
+required. This walkthrough documents the existing host, not a replacement
+application design. See [the source-to-port map](port-map.md) for the direct ports.
+
+The sequence below follows the implemented service and controlled provider tests;
+it is not evidence of qualification with a real Codex installation or model.
 
 ## Start a server
 
@@ -187,4 +194,4 @@ Use `result.last_sequence` as the next `events.list` request's `afterSequence`. 
 
 ## Implementation references
 
-The exact request boundary is in [service.rs](../crates/app/src/service.rs), HTTP limits are in [http.rs](../crates/app/src/http.rs), and provider state transitions are in [runtime.rs](../crates/app/src/runtime.rs). Controlled examples and recovery assertions are in [provider_runtime.rs](../crates/app/tests/provider_runtime.rs); [application.rs](../crates/app/tests/application.rs) covers durable commands and receipts. These source/tests define the implemented subset; they do not establish real-provider or retired-client parity.
+The exact request boundary is in [service.rs](../crates/app/src/service.rs), HTTP limits are in [http.rs](../crates/app/src/http.rs), and provider state transitions are in [runtime.rs](../crates/app/src/runtime.rs). Controlled examples and recovery assertions are in [provider_runtime.rs](../crates/app/tests/provider_runtime.rs); [application.rs](../crates/app/tests/application.rs) covers durable commands and receipts. These source/tests define the implemented subset; they do not establish real-provider or original-client parity.

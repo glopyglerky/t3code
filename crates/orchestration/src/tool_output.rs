@@ -4,8 +4,9 @@
 //! The imported reference readers below follow the same pinned `htmlRender.ts`,
 //! `mcpApp.ts`, `t3McpToolPresentation.ts` and contracts `chatAttachment.ts`.
 //! Inputs are JSON values; `None` represents JavaScript `undefined`, not `null`.
-//! Rust cannot represent lone UTF-16 surrogates or non-finite JSON numbers. Those
-//! cases, and JSON text beyond the parser's safe nesting limit, fail explicitly.
+//! The current String/serde_json::Value representation cannot hold lone UTF-16
+//! surrogates or non-finite JSON numbers. Those cases, and JSON text beyond the
+//! parser's safe nesting limit, fail explicitly; they remain porting gaps.
 
 use std::borrow::Cow;
 use std::fmt;
