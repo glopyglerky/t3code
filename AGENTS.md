@@ -1,31 +1,59 @@
 # t3code-ls
 
-The default tree contains Rust implementation only. Preserve licenses, provenance,
-passive assets, data fixtures and Git history. Do not restore foreign executable
-code, embed it in Rust strings, or use language-classification overrides.
+This is one working T3 Code fork whose implementation becomes Rust incrementally.
+Keep upstream functionality, source organization and public contracts. Replace
+implementation behind the existing application interfaces. Keep required upstream
+code, including TypeScript, JavaScript, HTML, CSS and platform code, until its
+replacement runs in the real application and passes the affected platform gates.
+Never delete a capability to increase the Rust percentage.
 
-The root Cargo workspace contains an authenticated native API/CLI, durable
-project/thread services, Codex sessions, decision/protocol tools, Unix structured
-generation, redb storage and Iroh transport. It is not a complete application.
-Web, Electron, mobile, Node server and Windows provider fallbacks have been
-retired; the native service subset does not replace their full behavior. Never claim full application,
-platform or whole-stack memory-safety qualification from component tests.
+The production application lives in apps/, packages/, native/ and infra/ alongside
+the root Cargo workspace and temporary pnpm workspace. Keep unported files at their
+upstream paths. Place new Rust in its owning application or package. Existing crates/
+are preserved migration inputs with ownership recorded in port-map.json; move them
+in separate changes from behavior substitutions. Do not create a second reduced
+product, a giant legacy/ tree or a vendored copy of the application.
 
-Build with the pinned qualified Lustr coordinator and produced BlueFe rustc and
-rustdoc. Cargo is bootstrap Cargo. Preserve caller flags and select the matching
-produced target sysroot. Do not substitute stock Clippy or compiler drivers.
+Port states are candidate, integrated, accepted, retired and synced. Component
+tests establish candidate behavior. Integrated means the real application can use
+the port. Acceptance requires normal execution through Rust, failure-path tests
+and evidence for each affected platform. Retire original code only within that
+accepted scope, then keep its upstream mapping for future changes. Linux evidence
+does not retire Windows or mobile behavior. Never infer UI, platform, feature or
+whole-stack memory-safety qualification from API or component tests.
+
+Thin adapters may translate arguments, cancellation and errors, but must not copy
+the business algorithm. Select the backend before execution; never retry an
+uncertain provider action or database mutation through a fallback implementation.
+Preserve authorization, omitted/null distinctions, event ordering, receipts and
+transaction ownership. Production SQLite remains authoritative until the entire
+redb persistence boundary is accepted. Iroh byte forwarding does not replace
+Connect account, pairing or client lifecycle behavior. Keep all working clients.
+
+Build full Rust with the verified packaged Lustr coordinator and produced BlueFe
+drivers recorded in toolchain.lock.json. Cargo is bootstrap Cargo. Native Lust's
+separate subset pin remains in lust-toolchain.json. Record the actual compilation
+route; coordinator forwarding to rustc-derived BlueFe is not native Lust coverage.
+Use pinned compiler artifacts in application CI; compiler bootstrap and release
+qualification belong in the compiler repositories. Preserve caller flags and
+select the matching produced target sysroot. Keep Cargo --locked and pnpm's frozen
+lockfile gate. Do not substitute unmatched Clippy or compiler drivers.
 Keep generated output outside canonical source and clean owned disposable output.
 
-Run workspace tests and `t3code-ls-tools check-source` and
-`check-upstream-readme` before publishing. Build helpers are Rust too. Do not
-run removed Node tooling or recreate vendored source caches.
+Run workspace tests, `t3code-ls-tools check-source`, `check-upstream-readme` and
+the affected hybrid application gates before publishing. check-source enforces
+migration accounting and source retention, not a language ban. Test real services
+and controlled provider fixtures. Do not recreate in-checkout reference caches.
 
 Original behavior is available from `pingdotgg/t3code` at the immutable commit
-and tree in `upstream.lock.json`. Use `git show <commit>:<path>` after fetching
-that exact commit, or read its pinned GitHub URL. The unchanged upstream README
-body is wrapped in `upstream-README.md`; its wrapper is fork prose. Historical
-fork source, including retired adapters and reference snapshots, stays in Git
-history. Reference pins are retained as passive metadata, never runtime imports.
+and tree in `upstream.lock.json`. Published nightly releases are the integration
+baseline. Record detected, integrated and qualified revisions separately. Review
+changes against port-map.json, including translated files that Git cannot match.
+New upstream functionality may retain its original implementation. A changed pin
+alone does not establish synchronization or application parity. Use disposable
+reference checkouts outside this tree for differential tests. The unchanged
+upstream README body is wrapped in `upstream-README.md`; its wrapper is fork prose.
+Preserve licenses, provenance, fixtures, assets and Git history.
 
 Keep repository identity 1352693431, fork relationship, license and separate
 archived-thread/mobile-backup branches. Publish main only through fresh-head,
@@ -67,7 +95,7 @@ or add speculative attribution comments. Carry this rule into worker handoffs.
 - Run authorized workers through T3's supported lifecycle APIs. Do not spawn workers for a bounded task assigned to work alone.
 - Never kill processes by name/path pattern. Stop only owned processes identified when spawned.
 - Never run tests against an installed application's state or remove user data.
-- Build the pinned Lustr and BlueFe sources in isolated hosted directories. Bootstrap compilers may build the toolchain; application qualification must use the produced drivers and matching sysroot.
+- Consume pinned and verified Lustr/BlueFe artifacts in isolated hosted directories. Application qualification must use the produced drivers and matching sysroot. Keep native Lust subset qualification distinct.
 - Keep generated output outside the source checkout and bound build concurrency to the hosted runner's capacity. Do not touch another owner's source or builds.
 - Own generated output through completion/failure/cancellation. Retain source/history, a current deliverable, one useful rollback and concise hashes/logs. Remove disposable targets, dependencies and staging after checking actual processes, descriptors, mounts and Cargo locks; record available-space change. Do not clean another owner's scope.
 - Do not resume unrelated work, schedules or agents to perform housekeeping. Preserve source revisions, first failures, receipts and rollback boundaries.

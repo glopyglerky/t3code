@@ -1,7 +1,7 @@
 [workspace]
 members = ["crates/core", "crates/transport", "crates/storage", "crates/app", "tools"]
 default-members = ["crates/core", "crates/transport", "crates/app"]
-exclude = ["native/hyprland-snap-shot", "native/resource-monitor"]
+exclude = ["native/hyprland-snap-shot", "native/kde-snap-shot", "native/resource-monitor"]
 resolver = "3"
 
 [workspace.package]
