@@ -157,7 +157,10 @@ function createTypedSource(source) {
       INSERT INTO effect_sql_migrations VALUES (80, 'ScheduledTaskThreadMode');
       INSERT INTO grants VALUES ('alice', 'read', NULL), ('alice', 'write', '2026-11-10T12:00:00.000Z');
     `);
-    database.prepare("INSERT INTO accounts VALUES (?, ?, ?, ?, ?, ?)").run(
+    const insert = database.prepare("INSERT INTO accounts VALUES (?, ?, ?, ?, ?, ?)");
+    // Node 26 also checks the run result's lastInsertRowid against this setting.
+    insert.setReadBigInts(true);
+    insert.run(
       9007199254740993n, "Unicode 😀 and NUL\0", Buffer.from([0, 128, 255]), -1.25, null, '{"enabled":true,"missing":null}',
     );
     database.exec("INSERT INTO accounts (name, raw, ratio, nullable, json) VALUES (CAST(X'80ff00' AS TEXT), X'', 1e999, '', '{}')");
