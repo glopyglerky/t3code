@@ -1,4 +1,4 @@
-//! Provider installer ownership decisions over bounded host observations.
+//! Provider installer ownership and update-action decisions.
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Owner {
@@ -109,6 +109,86 @@ pub struct Update {
     pub args: Vec<String>,
     pub lock_key: String,
     pub env: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UpdateActionInput {
+    pub command: String,
+    pub args: Vec<String>,
+    pub lock_key: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SelectedUpdateAction {
+    pub command: String,
+    pub args: Vec<String>,
+}
+
+fn original_update_action(update: &UpdateActionInput) -> SelectedUpdateAction {
+    SelectedUpdateAction {
+        command: update.command.clone(),
+        args: update.args.clone(),
+    }
+}
+
+pub fn make_targeted_update_action(
+    package_name: Option<&str>,
+    update: Option<&UpdateActionInput>,
+    version: &str,
+) -> Option<SelectedUpdateAction> {
+    // Match JavaScript's /^\d+\.\d+\.\d+$/ without numeric parsing or trimming.
+    let mut parts = version.split('.');
+    for _ in 0..3 {
+        let part = parts.next()?;
+        if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+    }
+    if parts.next().is_some() {
+        return None;
+    }
+    let update = update?;
+    let package_name = package_name.filter(|name| !name.is_empty())?;
+    if !update.lock_key.starts_with("npm-global:")
+        && !matches!(
+            update.lock_key.as_str(),
+            "bun-global" | "pnpm-global" | "vite-plus-global" | "yarn-global" | "volta"
+        )
+    {
+        return None;
+    }
+    let latest = format!("{package_name}@latest");
+    let package_index = update
+        .args
+        .iter()
+        .position(|arg| arg == &latest || arg == package_name)?;
+    let previous = &update.args[package_index];
+    let target = format!("{package_name}@{version}");
+    let mut selected = original_update_action(update);
+    selected.args[package_index] = target.clone();
+    if let Some(command_index) = selected.command.rfind(previous) {
+        selected
+            .command
+            .replace_range(command_index..command_index + previous.len(), &target);
+    }
+    Some(selected)
+}
+
+pub fn resolve_latest_update_action(
+    package_name: Option<&str>,
+    update: Option<&UpdateActionInput>,
+    latest_version: Option<&str>,
+) -> Option<SelectedUpdateAction> {
+    let update = update?;
+    if update.lock_key == "pnpm-global" {
+        if let Some(version) = latest_version {
+            if let Some(selected) = make_targeted_update_action(package_name, Some(update), version)
+            {
+                return Some(selected);
+            }
+        }
+    }
+    Some(original_update_action(update))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -843,6 +923,186 @@ pub fn resolve(request: &Request) -> Result<Decision, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn update_action(lock_key: &str) -> UpdateActionInput {
+        UpdateActionInput {
+            command: "pnpm add --global @openai/codex@latest".to_string(),
+            args: vec![
+                "add".to_string(),
+                "--global".to_string(),
+                "@openai/codex@latest".to_string(),
+            ],
+            lock_key: lock_key.to_string(),
+        }
+    }
+
+    #[test]
+    fn targeted_update_changes_first_argument_and_last_display_occurrence() {
+        let input = UpdateActionInput {
+            command: "echo 雪/pkg@latest; pnpm add 雪/pkg@latest".to_string(),
+            args: vec![
+                "add".to_string(),
+                "雪/pkg@latest".to_string(),
+                "雪/pkg".to_string(),
+                "雪/pkg@latest".to_string(),
+            ],
+            lock_key: "pnpm-global".to_string(),
+        };
+        let selected = make_targeted_update_action(Some("雪/pkg"), Some(&input), "01.2.003")
+            .expect("targeted update");
+        assert_eq!(
+            selected.command,
+            "echo 雪/pkg@latest; pnpm add 雪/pkg@01.2.003"
+        );
+        assert_eq!(
+            selected.args,
+            ["add", "雪/pkg@01.2.003", "雪/pkg", "雪/pkg@latest"]
+        );
+        assert_eq!(input.args[1], "雪/pkg@latest");
+
+        let mut bare = update_action("volta");
+        bare.args[2] = "@openai/codex".to_string();
+        bare.command = "display command without the package name".to_string();
+        let selected = make_targeted_update_action(Some("@openai/codex"), Some(&bare), "1.2.3")
+            .expect("bare package argument");
+        assert_eq!(selected.command, bare.command);
+        assert_eq!(selected.args[2], "@openai/codex@1.2.3");
+    }
+
+    #[test]
+    fn targeted_versions_match_ascii_javascript_pattern() {
+        let input = update_action("pnpm-global");
+        for version in ["0.0.0", "01.002.0003", "999999999999999999999999.2.3"] {
+            assert!(
+                make_targeted_update_action(Some("@openai/codex"), Some(&input), version).is_some(),
+                "valid version {version:?}"
+            );
+        }
+        for version in [
+            "",
+            "1.2",
+            "1.2.3.4",
+            ".2.3",
+            "1..3",
+            "1.2.",
+            "v1.2.3",
+            "1.2.3-beta",
+            "1.2.3+build",
+            " 1.2.3",
+            "1.2.3 ",
+            "1.2.3\n",
+            "1.2.3\r",
+            "1.2.3\r\n",
+            "1.2.3\u{2028}",
+            "1.2.3\u{2029}",
+            "١.٢.٣",
+            "１.２.３",
+        ] {
+            assert_eq!(
+                make_targeted_update_action(Some("@openai/codex"), Some(&input), version),
+                None,
+                "invalid version {version:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn targeted_update_requires_supported_lock_and_matching_package() {
+        for lock_key in [
+            "npm-global:",
+            "npm-global:/usr",
+            "npm-global:\n",
+            "bun-global",
+            "pnpm-global",
+            "vite-plus-global",
+            "yarn-global",
+            "volta",
+        ] {
+            assert!(
+                make_targeted_update_action(
+                    Some("@openai/codex"),
+                    Some(&update_action(lock_key)),
+                    "1.2.3"
+                )
+                .is_some(),
+                "supported lock {lock_key:?}"
+            );
+        }
+        for lock_key in [
+            "npm-global",
+            "npm-globalx:",
+            "xpnpm-global",
+            "pnpm-global:other",
+            "bun-global\n",
+            "pnpm-global\r",
+            "yarn-global\u{2028}",
+            "volta\u{2029}",
+            "homebrew",
+            "mise",
+            "",
+        ] {
+            assert_eq!(
+                make_targeted_update_action(
+                    Some("@openai/codex"),
+                    Some(&update_action(lock_key)),
+                    "1.2.3"
+                ),
+                None,
+                "unsupported lock {lock_key:?}"
+            );
+        }
+        let input = update_action("pnpm-global");
+        for package_name in [None, Some(""), Some("codex"), Some("@other/codex")] {
+            assert_eq!(
+                make_targeted_update_action(package_name, Some(&input), "1.2.3"),
+                None
+            );
+        }
+        assert_eq!(
+            make_targeted_update_action(Some("@openai/codex"), None, "1.2.3"),
+            None
+        );
+        let mut pinned = input;
+        pinned.args[2] = "@openai/codex@2.0.0".to_string();
+        assert_eq!(
+            make_targeted_update_action(Some("@openai/codex"), Some(&pinned), "1.2.3"),
+            None
+        );
+    }
+
+    #[test]
+    fn latest_update_pins_only_pnpm_and_keeps_original_when_target_unavailable() {
+        let input = update_action("pnpm-global");
+        assert_eq!(
+            resolve_latest_update_action(Some("@openai/codex"), Some(&input), Some("1.2.3"))
+                .unwrap()
+                .args[2],
+            "@openai/codex@1.2.3"
+        );
+        for version in [None, Some(""), Some("1.2.3-beta"), Some("1.2.3\n")] {
+            assert_eq!(
+                resolve_latest_update_action(Some("@openai/codex"), Some(&input), version),
+                Some(original_update_action(&input))
+            );
+        }
+        for package_name in [None, Some(""), Some("@other/package")] {
+            assert_eq!(
+                resolve_latest_update_action(package_name, Some(&input), Some("1.2.3")),
+                Some(original_update_action(&input))
+            );
+        }
+        for lock_key in ["npm-global:/usr", "bun-global", "pnpm-global\n", "native"] {
+            let input = update_action(lock_key);
+            assert_eq!(
+                resolve_latest_update_action(Some("@openai/codex"), Some(&input), Some("1.2.3")),
+                Some(original_update_action(&input))
+            );
+        }
+        assert_eq!(
+            resolve_latest_update_action(Some("@openai/codex"), None, Some("1.2.3")),
+            None
+        );
+    }
 
     fn request(path: &str) -> Request {
         Request {

@@ -289,7 +289,8 @@
       "adapter_paths": [
         "packages/provider-core/src/server/NativeMaintenancePolicy.ts",
         "packages/provider-core/src/server/maintenanceResolver.ts",
-        "packages/shared/src/nativeExecutable.ts"
+        "packages/shared/src/nativeExecutable.ts",
+        "apps/server/src/provider/providerMaintenanceRunner.ts"
       ],
       "platform_routes": [
         {
@@ -322,7 +323,7 @@
         "tools/check-maintenance.mjs"
       ],
       "retired_paths": [],
-      "notes": "The Rust ownership and installation decision port is integrated. Filesystem observation, credential handling and actual provider updates remain in their existing services.",
+      "notes": "Rust ownership, installation and targeted/latest update-action decisions are integrated through the production maintenance runner. Filesystem observation, credentials, update locks, compatibility checks and actual provider updates remain in their existing services.",
       "rust_crates": [
         "crates/core"
       ]
