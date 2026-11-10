@@ -172,7 +172,12 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pnpm-lock.yaml') }}
       - name: Prepare Chromium for Rust client integration
-        run: node apps/web/node_modules/playwright/cli.js install --with-deps --only-shell chromium
+        run: |
+          # The Azure mirror can time out repeatedly before falling back to this archive.
+          if [[ -f /etc/apt/apt-mirrors.txt ]]; then
+            sudo sed -i 's|http://azure\.archive\.ubuntu\.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' /etc/apt/apt-mirrors.txt
+          fi
+          node apps/web/node_modules/playwright/cli.js install --with-deps --only-shell chromium
       - name: Test fork client acceptance assertions
         run: node --test apps/web/scripts/hybrid-client-turn.test.ts
       - name: Check native selection and build the integration bundles

@@ -207,6 +207,48 @@ export function resolveLatestProviderUpdateAction(
   return makeTargetedProviderUpdateAction(capabilities, latestVersion) ?? update;
 }
 
+export const selectProviderUpdateAction = Effect.fn("selectProviderUpdateAction")(
+  function* (
+    capabilities: ProviderMaintenanceCapabilities,
+    targetVersion: string | undefined,
+    latestVersion: string | null,
+  ) {
+    const environment = yield* HostProcess.Environment;
+    const executable = selectNativeExecutable(
+      "maintenance",
+      environment.T3_CODE_LS_MAINTENANCE_EXECUTABLE,
+      yield* HostProcess.Platform,
+      yield* HostProcess.Architecture,
+      environment.T3_CODE_LS_IMPLEMENTATION,
+    );
+    if (executable === undefined)
+      return targetVersion === undefined
+        ? resolveLatestProviderUpdateAction(capabilities, latestVersion)
+        : makeTargetedProviderUpdateAction(capabilities, targetVersion);
+
+    // The host retains the authorized executable, environment and lock. Rust
+    // chooses only the argument list and display command before any update runs.
+    const update = capabilities.update;
+    const action = yield* NativeMaintenancePolicy.selectUpdateAction(executable, {
+      mode: targetVersion === undefined ? "latest" : "target",
+      packageName: capabilities.packageName,
+      update:
+        update === null
+          ? null
+          : {
+              command: update.command,
+              args: update.args,
+              lockKey: update.lockKey,
+            },
+      versionValue: targetVersion ?? latestVersion,
+    });
+    if (action === null) return null;
+    if (update === null)
+      return yield* new NativeMaintenancePolicy.NativeMaintenancePolicyError({ stage: "response" });
+    return { ...update, command: action.command, args: action.args };
+  },
+);
+
 export function makeManualOnlyProviderMaintenanceCapabilities(input: {
   readonly provider: ProviderDriverKind;
   readonly packageName: string | null;

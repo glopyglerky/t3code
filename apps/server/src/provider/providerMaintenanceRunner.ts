@@ -30,8 +30,7 @@ import { makeProviderMaintenanceCommandCoordinator } from "./providerMaintenance
 import {
   enrichProviderSnapshotWithVersionAdvisory,
   invalidateLatestProviderVersion,
-  makeTargetedProviderUpdateAction,
-  resolveLatestProviderUpdateAction,
+  selectProviderUpdateAction,
   resolveLatestProviderVersion,
   type ProviderMaintenanceCommandAction,
 } from "@t3tools/provider-core/server/maintenanceResolver";
@@ -475,10 +474,11 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
                 provider,
                 candidateVersion,
               );
-            const command =
-              targetVersion !== undefined
-                ? makeTargetedProviderUpdateAction(fresh, targetVersion)
-                : resolveLatestProviderUpdateAction(fresh, candidateVersion);
+            const command = yield* selectProviderUpdateAction(
+              fresh,
+              targetVersion,
+              candidateVersion,
+            ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
             const rejected =
               targetVersion !== undefined
                 ? !command ||

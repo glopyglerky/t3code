@@ -84,6 +84,10 @@ const Response = Schema.Struct({
   ok: Schema.Union([
     Schema.Struct({ kind: Schema.Literal("observe"), request: Observation }),
     Schema.Struct({ kind: Schema.Literal("resolved"), capabilities: Schema.NullOr(Capabilities) }),
+    Schema.Struct({
+      kind: Schema.Literal("selected"),
+      action: Schema.NullOr(Schema.Struct({ command: Schema.String, args: Schema.Array(Schema.String) })),
+    }),
   ]),
 });
 const decodeResponse = Schema.decodeUnknownEffect(Schema.fromJsonString(Response), {
@@ -124,6 +128,17 @@ export interface Request {
   } | null;
 }
 
+export interface UpdateActionRequest {
+  readonly mode: "target" | "latest";
+  readonly packageName: string | null;
+  readonly update: {
+    readonly command: string;
+    readonly args: ReadonlyArray<string>;
+    readonly lockKey: string;
+  } | null;
+  readonly versionValue: string | null;
+}
+
 function boundedJson(value: unknown): boolean {
   const pending = [{ value, depth: 0 }];
   let count = 0;
@@ -147,14 +162,15 @@ function boundedJson(value: unknown): boolean {
   return true;
 }
 
-export const resolve = Effect.fn("NativeMaintenancePolicy.resolve")(function* <R>(
+const exchange = Effect.fn("NativeMaintenancePolicy.exchange")(function* <R>(
   executable: string,
-  input: Request,
+  input: Request | UpdateActionRequest,
   observe: (
     request: Observation,
     evidence: ReadonlyArray<Evidence>,
   ) => Effect.Effect<unknown, NativeMaintenancePolicyError, R>,
 ) {
+  const selection = input.mode === "target" || input.mode === "latest";
   if (!NodePath.isAbsolute(executable) || executable.includes("\0"))
     return yield* new NativeMaintenancePolicyError({ stage: "configuration" });
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -264,7 +280,9 @@ export const resolve = Effect.fn("NativeMaintenancePolicy.resolve")(function* <R
     const evidence: Array<Evidence> = [];
     let aggregateBytes = 0;
     for (let step = 0; step <= MAX_OBSERVATIONS; step++) {
-      const request = { version: 1, operation: "resolve", ...input, observations: evidence };
+      const request = selection
+        ? { version: 1, operation: "select-update-action", ...input }
+        : { version: 1, operation: "resolve", ...input, observations: evidence };
       if (!boundedJson(request))
         return yield* new NativeMaintenancePolicyError({ stage: "request" });
       const frame = `${yield* encodeRequest(request).pipe(
@@ -287,7 +305,9 @@ export const resolve = Effect.fn("NativeMaintenancePolicy.resolve")(function* <R
       );
       if (failure !== undefined || !boundedJson(response))
         return yield* failure ?? new NativeMaintenancePolicyError({ stage: "response" });
-      if (response.ok.kind === "resolved") {
+      if (response.ok.kind !== "observe") {
+        if (selection !== (response.ok.kind === "selected"))
+          return yield* new NativeMaintenancePolicyError({ stage: "response" });
         const code = yield* child.exitCode.pipe(
           Effect.mapError((cause) => new NativeMaintenancePolicyError({ stage: "process", cause })),
         );
@@ -295,8 +315,9 @@ export const resolve = Effect.fn("NativeMaintenancePolicy.resolve")(function* <R
         yield* Fiber.join(stderr);
         if (Number(code) !== 0 || failure !== undefined)
           return yield* failure ?? new NativeMaintenancePolicyError({ stage: "process" });
-        return { capabilities: response.ok.capabilities, evidence };
+        return { result: response.ok, evidence };
       }
+      if (selection) return yield* new NativeMaintenancePolicyError({ stage: "response" });
       if (ended) return yield* new NativeMaintenancePolicyError({ stage: "process" });
       const observation = response.ok.request;
       if (
@@ -316,3 +337,28 @@ export const resolve = Effect.fn("NativeMaintenancePolicy.resolve")(function* <R
     ),
   );
 });
+
+export const resolve = Effect.fn("NativeMaintenancePolicy.resolve")(function* <R>(
+  executable: string,
+  input: Request,
+  observe: (
+    request: Observation,
+    evidence: ReadonlyArray<Evidence>,
+  ) => Effect.Effect<unknown, NativeMaintenancePolicyError, R>,
+) {
+  const { result, evidence } = yield* exchange(executable, input, observe);
+  if (result.kind !== "resolved")
+    return yield* new NativeMaintenancePolicyError({ stage: "response" });
+  return { capabilities: result.capabilities, evidence };
+});
+
+export const selectUpdateAction = Effect.fn("NativeMaintenancePolicy.selectUpdateAction")(
+  function* (executable: string, input: UpdateActionRequest) {
+    const { result } = yield* exchange(executable, input, () =>
+      Effect.fail(new NativeMaintenancePolicyError({ stage: "response" })),
+    );
+    if (result.kind !== "selected")
+      return yield* new NativeMaintenancePolicyError({ stage: "response" });
+    return result.action;
+  },
+);

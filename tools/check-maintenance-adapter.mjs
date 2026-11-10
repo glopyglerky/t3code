@@ -2,6 +2,7 @@
 import * as NodeAssert from "node:assert/strict";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
+import * as NodeModule from "node:module";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
@@ -26,6 +27,7 @@ import * as ProviderLatestVersions from "../packages/provider-core/src/server/Pr
 import * as ProviderMaintenanceRunner from "../apps/server/src/provider/providerMaintenanceRunner.ts";
 import * as ProviderRegistry from "../apps/server/src/provider/ProviderRegistry.ts";
 import * as ModelManifest from "../apps/server/src/provider/ModelManifest.ts";
+import { upstreamSource } from "./upstream-source.mjs";
 
 NodeAssert.ok(process.argv[2], "Pass the native maintenance executable");
 const executable = NodePath.resolve(process.argv[2]);
@@ -48,6 +50,45 @@ const policyExecutables = new Set([executable]);
 let totalNativeProcesses = 0;
 let totalProbeCommands = 0;
 let totalUpdateCommands = 0;
+let totalUpdateActionComparisons = 0;
+
+const oracleSource = upstreamSource("packages/provider-core/src/server/maintenanceResolver.ts");
+const oracleStart = "export function makeTargetedProviderUpdateAction(";
+const oracleEnd = "export function makeManualOnlyProviderMaintenanceCapabilities(";
+const oracleStartIndex = oracleSource.indexOf(oracleStart);
+const oracleEndIndex = oracleSource.indexOf(oracleEnd);
+NodeAssert.ok(oracleStartIndex >= 0 && oracleEndIndex > oracleStartIndex);
+NodeAssert.equal(oracleSource.indexOf(oracleStart, oracleStartIndex + 1), -1);
+NodeAssert.equal(oracleSource.indexOf(oracleEnd, oracleEndIndex + 1), -1);
+const updateActionOracle = new Function(
+  NodeModule.stripTypeScriptTypes(oracleSource.slice(oracleStartIndex, oracleEndIndex))
+    .replaceAll("export function ", "function ") +
+    "\nreturn { makeTargetedProviderUpdateAction, resolveLatestProviderUpdateAction };",
+)();
+
+function originalUpdateAction(input) {
+  const capabilities = { provider: driver, packageName: input.packageName, update: input.update };
+  const action = input.mode === "target"
+    ? updateActionOracle.makeTargetedProviderUpdateAction(capabilities, input.versionValue)
+    : updateActionOracle.resolveLatestProviderUpdateAction(capabilities, input.versionValue);
+  return action === null ? null : { command: action.command, args: action.args };
+}
+
+async function compareUpdateActions(name, inputs) {
+  const f = await fixture(`selection-${name}`);
+  await run(Effect.gen(function* () {
+    for (const [index, input] of inputs.entries()) {
+      const before = structuredClone(input);
+      const actual = yield* NativeMaintenancePolicy.selectUpdateAction(executable, input);
+      NodeAssert.deepEqual(actual, originalUpdateAction(input), `${name} case ${index}: ${JSON.stringify(input)}`);
+      NodeAssert.deepEqual(input, before, "selection must not mutate captured inputs");
+      totalUpdateActionComparisons++;
+    }
+  }), f);
+  NodeAssert.equal(f.natives.length, inputs.length);
+  NodeAssert.equal(f.calls.length, 0);
+  NodeAssert.equal(f.updates.length, 0);
+}
 
 async function writeExecutable(filename, source = "#!/bin/sh\nexit 93\n") {
   await NodeFSP.mkdir(NodePath.dirname(filename), { recursive: true });
@@ -68,6 +109,7 @@ async function fixture(name, relative = "native/codex") {
     calls: [],
     natives: [],
     updates: [],
+    commands: [],
     requestedVersion: "latest",
     active: true,
     which: command,
@@ -166,6 +208,7 @@ async function run(effect, f, selected = executable) {
             if (f.onNativeSpawn) yield* f.onNativeSpawn(child);
             return child;
           }
+          f.commands.push({ command: command.command, args: command.args, options: command.options });
           return handle(answer(f, command.command, command.args));
         }),
       );
@@ -214,7 +257,215 @@ function policyReply(expression, tail = "") {
   return `process.stdin.once('data', b => { const q=JSON.parse(b); process.stdout.write(JSON.stringify({version:1,ok:${expression}})+'\\n',()=>{${tail}process.exit(0)}); });`;
 }
 
+async function updateRunnerFixture(name, mode = "latest") {
+  const f = await fixture(name);
+  const manager = await writeExecutable(NodePath.join(f.base, "bin", mode === "latest" ? "pnpm" : "npm"));
+  const args = mode === "latest"
+    ? ["add", "--global", "@openai/codex@latest"]
+    : ["install", "-g", "@openai/codex@latest"];
+  const updateEnvironment = { ...f.env, CAPTURED_UPDATE_ENV: "retained-by-host" };
+  const capabilities = Maintenance.makeProviderMaintenanceCapabilities({
+    provider: driver,
+    packageName: owner.packageName,
+    updateExecutable: manager,
+    updateArgs: args,
+    updateLockKey: mode === "latest" ? "pnpm-global" : `npm-global:${f.base}`,
+    env: updateEnvironment,
+    latestVersion: "2.0.0",
+  });
+  const expectedArgs = args.map((arg) => arg === "@openai/codex@latest" ? "@openai/codex@2.0.0" : arg);
+  const states = [];
+  let providers = [{
+    instanceId, driver, enabled: true, installed: true, version: "1.0.0", status: "ready",
+    auth: { status: "authenticated" }, checkedAt: "2026-11-08T12:00:00.000Z",
+    models: [], slashCommands: [], skills: [],
+  }];
+  const manifest = {
+    version: 1,
+    currentModels: {},
+    compatibility: [{
+      driver, t3CodeRange: ">=0.0.0", recommendedVersion: "2.0.0",
+      ranges: [{ range: ">=0.0.0", status: "supported" }],
+    }],
+  };
+  const registry = {
+    getProviders: Effect.sync(() => providers),
+    refresh: () => Effect.sync(() => providers),
+    refreshInstance: () => Effect.sync(() => providers),
+    reloadSecretsAndRefresh: () => Effect.sync(() => providers),
+    refreshAfterUpdate: () => Effect.sync(() => {
+      providers = providers.map((provider) => ({ ...provider, version: "2.0.0" }));
+      return providers;
+    }),
+    refreshWorkspaceSnapshot: () => Effect.sync(() => providers),
+    invalidateModelCaches: () => Effect.void,
+    getProviderMaintenanceCapabilitiesForInstance: () => Effect.succeed(capabilities),
+    setProviderMaintenanceActionState: (input) => Effect.sync(() => {
+      if (input.state) states.push(input.state);
+      return providers;
+    }),
+    streamChanges: Stream.empty,
+  };
+  f.respond = (command, selectedArgs) => {
+    NodeAssert.equal(command, manager, "selection must retain the captured executable");
+    NodeAssert.deepEqual(selectedArgs, expectedArgs);
+    const spawned = f.commands.at(-1);
+    NodeAssert.deepEqual(spawned.options.env, updateEnvironment);
+    NodeAssert.equal(spawned.options.extendEnv, true);
+    NodeAssert.equal(spawned.options.shell, false);
+    f.updates.push([command, ...selectedArgs]);
+    totalUpdateCommands++;
+    return { stdout: "Controlled update completed\n" };
+  };
+  const operation = Effect.gen(function* () {
+    const runner = yield* ProviderMaintenanceRunner.make().pipe(
+      Effect.provideService(ProviderRegistry.ProviderRegistry, registry),
+      Effect.provideService(ModelManifest.ModelManifest, {
+        current: Effect.succeed(manifest), refresh: Effect.succeed(manifest),
+        forceRefresh: Effect.succeed(manifest), refreshInBackground: Effect.void,
+      }),
+      Effect.provideService(HttpClient.HttpClient,
+        HttpClient.make(() => Effect.die("No external version request is allowed"))),
+      Effect.provide(ProviderLatestVersions.layer),
+    );
+    yield* runner.updateProvider({
+      provider: driver, instanceId, ...(mode === "target" ? { targetVersion: "2.0.0" } : {}),
+    });
+  });
+  return { f, capabilities, operation, states, manager, expectedArgs };
+}
+
 try {
+  const selectionBase = {
+    mode: "target",
+    packageName: "@openai/codex",
+    update: {
+      command: "pnpm add --global @openai/codex@latest",
+      args: ["add", "--global", "@openai/codex@latest"],
+      lockKey: "pnpm-global",
+    },
+    versionValue: "2.0.0",
+  };
+  const versions = [
+    "0.0.0", "2.0.0", "01.002.0003", `${"9".repeat(128)}.2.3`,
+    "", "latest", "v2.0.0", "2.0", "2.0.0.0", "2.0.0-beta.1", "2.0.0+build",
+    " 2.0.0", "2.0.0 ", "2.0.0\t", "2.0.0\n", "2.0.0\r", "2.0.0\r\n",
+    "2.0.0\u2028", "2.0.0\u2029", "\n2.0.0", "2.0.0\0", "2.\n0.0",
+    "٢.٠.٠", "２.０.０", "𝟚.𝟘.𝟘", "-2.0.0", "+2.0.0", "2e0.0.0",
+  ];
+  await scenario("Rust update version validation matches the immutable upstream oracle", () =>
+    compareUpdateActions("versions", versions.map((versionValue) => ({ ...selectionBase, versionValue }))));
+
+  const lockKeys = [
+    "npm-global:", "npm-global:/opt/node", "npm-global:\nowner", "npm-global:opaque\0suffix",
+    "bun-global", "pnpm-global", "vite-plus-global", "yarn-global", "volta",
+    "", "npm-global", "npm-globalx:prefix", "xnpm-global:prefix", "NPM-global:prefix",
+    "bun-global:prefix", "pnpm-global:prefix", "vite-plus-global:prefix", "yarn-global:prefix",
+    "volta:prefix", "xbun-global", "mise:codex", "homebrew:codex", "codex-native",
+    ...["bun-global", "pnpm-global", "vite-plus-global", "yarn-global", "volta"].flatMap(
+      (key) => ["\n", "\r", "\r\n", "\u2028", "\u2029"].map((suffix) => `${key}${suffix}`)),
+  ];
+  await scenario("Rust target eligibility matches upstream installer lock semantics", () =>
+    compareUpdateActions("locks", lockKeys.map((lockKey) => ({
+      ...selectionBase, update: { ...selectionBase.update, lockKey },
+    }))));
+
+  const packageVariants = [
+    { packageName: null },
+    { packageName: "" },
+    { update: null },
+    { update: { ...selectionBase.update, args: [] } },
+    { update: { ...selectionBase.update, args: ["@openai/codex@next"] } },
+    { update: { ...selectionBase.update, args: ["@openai/codex@1.0.0"] } },
+    { update: { ...selectionBase.update, args: ["--package=@openai/codex@latest"] } },
+    { update: { ...selectionBase.update, args: ["@openai/codex", "@openai/codex@latest", "@openai/codex"] } },
+    { update: { ...selectionBase.update, args: ["@openai/codex@latest", "@openai/codex", "@openai/codex@latest"] } },
+    { update: { ...selectionBase.update, command: "@openai/codex@latest before @openai/codex@latest after" } },
+    { update: { ...selectionBase.update, command: "@openai/codex before @openai/codex@latest", args: ["@openai/codex"] } },
+    { update: { ...selectionBase.update, command: "an unrelated display command" } },
+    { update: { ...selectionBase.update, command: "" } },
+    { packageName: "@scope/工具🚀", update: {
+      command: "📦 add @scope/工具🚀@latest and @scope/工具🚀@latest",
+      args: ["add", "@scope/工具🚀@latest"], lockKey: "volta",
+    } },
+  ];
+  await scenario("Rust selection preserves first-argument and last-display-occurrence behavior", () =>
+    compareUpdateActions("packages", packageVariants.map((variant) => ({ ...selectionBase, ...variant }))));
+
+  await scenario("Rust latest selection preserves pnpm pinning and original-action fallbacks", () =>
+    compareUpdateActions("latest", [
+      ...[null, ...versions].map((versionValue) => ({ ...selectionBase, mode: "latest", versionValue })),
+      ...lockKeys.slice(0, 23).map((lockKey) => ({
+        ...selectionBase, mode: "latest", update: { ...selectionBase.update, lockKey },
+      })),
+      ...packageVariants.map((variant) => ({ ...selectionBase, ...variant, mode: "latest" })),
+    ]));
+
+  await scenario("the service retains the captured executable, environment and lock after Rust selection", async () => {
+    const { f, capabilities } = await updateRunnerFixture("selection-host-fields");
+    const before = structuredClone(capabilities);
+    const selected = await run(Maintenance.selectProviderUpdateAction(capabilities, undefined, "2.0.0"), f);
+    NodeAssert.equal(selected.executable, capabilities.update.executable);
+    NodeAssert.equal(selected.lockKey, capabilities.update.lockKey);
+    NodeAssert.strictEqual(selected.env, capabilities.update.env);
+    NodeAssert.deepEqual(selected.args, ["add", "--global", "@openai/codex@2.0.0"]);
+    NodeAssert.deepEqual(capabilities, before);
+    NodeAssert.equal(f.calls.length, 0);
+    NodeAssert.equal(f.natives.length, 1);
+  });
+
+  for (const mode of ["latest", "target"]) {
+    await scenario(`the actual runner executes and verifies the Rust-selected ${mode} version`, async () => {
+      const { f, operation, states, manager, expectedArgs } = await updateRunnerFixture(`selection-runner-${mode}`, mode);
+      await run(operation, f);
+      NodeAssert.equal(states.at(-1).status, "succeeded");
+      NodeAssert.deepEqual(f.updates, [[manager, ...expectedArgs]]);
+      NodeAssert.equal(f.natives.length, 1);
+    });
+  }
+
+  const selectionFaults = [
+    ["unknown selected field", policyReply("{kind:'selected',action:null,extra:true}")],
+    ["missing action", policyReply("{kind:'selected'}")],
+    ["nonstrings in selected arguments", policyReply("{kind:'selected',action:{command:'bad',args:[1]}}")],
+    ["forged executable", policyReply("{kind:'selected',action:{command:'bad',args:[],executable:'/unowned/updater'}}")],
+    ["forged environment", policyReply("{kind:'selected',action:{command:'bad',args:[],env:{PRIVATE:'forged'}}}")],
+    ["forged lock", policyReply("{kind:'selected',action:{command:'bad',args:[],lockKey:'unowned'}}")],
+    ["resolution instead of selection", policyReply("{kind:'resolved',capabilities:null}")],
+    ["selection requesting an observation", policyReply("{kind:'observe',request:{kind:'pnpmVersion'}}")],
+    ["nonzero exit after valid selection", policyReply("{kind:'selected',action:{command:'bad',args:[]}}", "process.exit(7);")],
+    ["trailing data after valid selection", policyReply("{kind:'selected',action:{command:'bad',args:[]}}", "process.stdout.write('trailing data\\n');")],
+  ];
+  for (const [name, source] of selectionFaults) {
+    await scenario(`${name} stops the actual runner before any update or fallback`, async () => {
+      const { f, operation, states } = await updateRunnerFixture(`selection-fault-${scenarios.length}`);
+      const policy = await fakePolicy(`selection-policy-${scenarios.length}`, source);
+      await run(operation, f, policy);
+      NodeAssert.equal(states.at(-1).status, "failed");
+      NodeAssert.equal(f.natives.length, 1);
+      NodeAssert.equal(f.updates.length, 0);
+      NodeAssert.equal(f.calls.length, 0);
+    });
+  }
+
+  await scenario("interrupting selection closes the helper without an update or fallback", async () => {
+    const { f, operation } = await updateRunnerFixture("selection-interruption");
+    const policy = await fakePolicy("selection-hang", "process.stdin.resume();setInterval(()=>{},1000);");
+    await run(Effect.gen(function* () {
+      const started = yield* Deferred.make();
+      f.onNativeSpawn = (child) => Deferred.succeed(started, Number(child.pid));
+      const fiber = yield* Effect.forkChild(operation);
+      const pid = yield* Deferred.await(started);
+      yield* Fiber.interrupt(fiber);
+      const exit = yield* Fiber.await(fiber);
+      NodeAssert.equal(Exit.isFailure(exit), true);
+      NodeAssert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+    }), f, policy);
+    NodeAssert.equal(f.natives.length, 1);
+    NodeAssert.equal(f.updates.length, 0);
+    NodeAssert.equal(f.calls.length, 0);
+  });
+
   await scenario(
     "the selected executable resolves the actual shared service through one isolated process",
     async () => {
@@ -514,7 +765,7 @@ try {
             "Provider installation changed. Refresh and try again.",
           );
         else NodeAssert.deepEqual(f.updates[0], [f.mise, "upgrade", "codex"]);
-        NodeAssert.equal(f.natives.length, changed ? 2 : 3);
+        NodeAssert.equal(f.natives.length, changed ? 2 : 4);
       },
     );
   }
@@ -825,7 +1076,9 @@ try {
       .update(await NodeFSP.readFile(executable))
       .digest("hex"),
     sourceHashes: hashes,
+    upstreamOracleSha256: NodeCrypto.createHash("sha256").update(oracleSource).digest("hex"),
     passed: scenarios.length,
+    updateActionComparisons: totalUpdateActionComparisons,
     nativeProcesses: totalNativeProcesses,
     probeCommands: totalProbeCommands,
     controlledUpdateCommands: totalUpdateCommands,
@@ -834,7 +1087,7 @@ try {
       "actual shared maintenance resolver and production update runner with a selected native policy",
       "isolated filesystem fixtures and controlled package-manager outputs; no real install, upgrade, provider turn or external request",
       "host owns filesystem/process access, callback predicates, semver facts, lazy lookups and cache hashing",
-      "native ownership decisions do not port the remaining provider drivers, server, storage or clients",
+      "native ownership and update-action decisions do not port the remaining provider drivers, server, storage or clients",
     ],
   };
   if (proofPath) {

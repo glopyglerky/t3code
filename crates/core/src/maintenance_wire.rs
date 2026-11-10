@@ -1,9 +1,10 @@
-//! JSONL observations for the provider ownership policy.
+//! Bounded JSONL for provider ownership and update-action decisions.
 
 use crate::json::{self, Value};
 use crate::maintenance::{
     self, Capabilities, Context, Decision, Definition, Homebrew, Lookup, MiseInstall, MiseTool,
-    NativeUpdate, Observation, ObservationValue, Observed, Owner, Request,
+    NativeUpdate, Observation, ObservationValue, Observed, Owner, Request, SelectedUpdateAction,
+    UpdateActionInput,
 };
 use std::collections::HashSet;
 
@@ -402,6 +403,77 @@ fn decode_request(value: &Value) -> Result<Request> {
     })
 }
 
+fn select_update_action(value: &Value) -> Result<Option<SelectedUpdateAction>> {
+    keys(
+        value,
+        &[
+            "version",
+            "operation",
+            "mode",
+            "packageName",
+            "update",
+            "versionValue",
+        ],
+    )?;
+    if field(value, "version")?.as_u64() != Some(1)
+        || field(value, "operation")?.as_str() != Some("select-update-action")
+    {
+        return Err(Error::InvalidRequest);
+    }
+    let mode = field(value, "mode")?
+        .as_str()
+        .ok_or(Error::InvalidRequest)?;
+    let package_name = optional_text(field(value, "packageName")?, MAX_TEXT_BYTES)?;
+    let version = optional_text(field(value, "versionValue")?, MAX_TEXT_BYTES)?;
+    let update = field(value, "update")?;
+    let update = if update == &Value::Null {
+        None
+    } else {
+        keys(update, &["command", "args", "lockKey"])?;
+        Some(UpdateActionInput {
+            command: text(field(update, "command")?)?,
+            args: text_array(field(update, "args")?)?,
+            lock_key: text(field(update, "lockKey")?)?,
+        })
+    };
+    match mode {
+        "target" => Ok(maintenance::make_targeted_update_action(
+            package_name.as_deref(),
+            update.as_ref(),
+            version.as_deref().ok_or(Error::InvalidRequest)?,
+        )),
+        "latest" => Ok(maintenance::resolve_latest_update_action(
+            package_name.as_deref(),
+            update.as_ref(),
+            version.as_deref(),
+        )),
+        _ => Err(Error::InvalidRequest),
+    }
+}
+
+fn encode_selected_action(value: &SelectedUpdateAction) -> Value {
+    object(vec![
+        ("command", Value::String(value.command.clone())),
+        (
+            "args",
+            Value::Array(value.args.iter().cloned().map(Value::String).collect()),
+        ),
+    ])
+}
+
+fn encode_response(result: Value) -> Result<String> {
+    let response = object(vec![
+        ("version", Value::Number("1".to_string())),
+        ("ok", result),
+    ]);
+    let mut response = json::stringify(&response);
+    response.push('\n');
+    if response.len() > MAX_FRAME_BYTES {
+        return Err(Error::OutputLimit);
+    }
+    Ok(response)
+}
+
 fn encode_lookup(value: &Lookup) -> Value {
     match value {
         Lookup::Mise { executable, tool } => object(vec![
@@ -513,6 +585,23 @@ impl Session {
                 Error::InvalidRequest
             }
         })?;
+        if field(&value, "operation")?.as_str() == Some("select-update-action") {
+            if self.base.is_some() {
+                return Err(Error::ObservationMismatch);
+            }
+            let selected = select_update_action(&value)?;
+            let response = encode_response(object(vec![
+                ("kind", Value::String("selected".to_string())),
+                (
+                    "action",
+                    selected
+                        .as_ref()
+                        .map_or(Value::Null, encode_selected_action),
+                ),
+            ]))?;
+            self.completed = true;
+            return Ok((response, true));
+        }
         let request = decode_request(&value)?;
         let Value::Object(fields) = &value else {
             return Err(Error::InvalidRequest);
@@ -562,15 +651,7 @@ impl Session {
                 ),
             ]),
         };
-        let response = object(vec![
-            ("version", Value::Number("1".to_string())),
-            ("ok", result),
-        ]);
-        let mut response = json::stringify(&response);
-        response.push('\n');
-        if response.len() > MAX_FRAME_BYTES {
-            return Err(Error::OutputLimit);
-        }
+        let response = encode_response(result)?;
         self.base = Some(base);
         self.observed = observations.to_vec();
         self.pending = if let Decision::Observe(observation) = decision {
@@ -580,5 +661,240 @@ impl Session {
         };
         self.completed = self.pending.is_none();
         Ok((response, self.completed))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn selection_request() -> Value {
+        object(vec![
+            ("version", Value::Number("1".to_string())),
+            (
+                "operation",
+                Value::String("select-update-action".to_string()),
+            ),
+            ("mode", Value::String("target".to_string())),
+            ("packageName", Value::String("@openai/codex".to_string())),
+            (
+                "update",
+                object(vec![
+                    (
+                        "command",
+                        Value::String("pnpm add @openai/codex@latest".to_string()),
+                    ),
+                    (
+                        "args",
+                        Value::Array(vec![
+                            Value::String("add".to_string()),
+                            Value::String("@openai/codex@latest".to_string()),
+                        ]),
+                    ),
+                    ("lockKey", Value::String("pnpm-global".to_string())),
+                ]),
+            ),
+            ("versionValue", Value::String("1.2.3".to_string())),
+        ])
+    }
+
+    fn replace(value: &mut Value, key: &str, replacement: Value) {
+        let Value::Object(fields) = value else {
+            panic!("expected object");
+        };
+        fields.iter_mut().find(|entry| entry.0 == key).unwrap().1 = replacement;
+    }
+
+    fn frame(value: &Value) -> String {
+        format!("{}\n", json::stringify(value))
+    }
+
+    #[test]
+    fn selection_is_a_single_terminal_frame_with_only_action_fields() {
+        let input = frame(&selection_request());
+        let mut session = Session::new();
+        assert_eq!(
+            session.respond(&input),
+            Ok((
+                "{\"version\":1,\"ok\":{\"kind\":\"selected\",\"action\":{\"command\":\"pnpm add @openai/codex@1.2.3\",\"args\":[\"add\",\"@openai/codex@1.2.3\"]}}}\n".to_string(),
+                true,
+            ))
+        );
+        assert_eq!(session.respond(&input), Err(Error::InvalidRequest));
+    }
+
+    #[test]
+    fn selection_preserves_null_and_latest_original_action() {
+        let mut input = selection_request();
+        replace(&mut input, "mode", Value::String("latest".to_string()));
+        replace(&mut input, "versionValue", Value::Null);
+        let (response, completed) = Session::new().respond(&frame(&input)).unwrap();
+        assert!(completed);
+        let response = json::parse(&response).unwrap();
+        assert_eq!(
+            response
+                .get("ok")
+                .unwrap()
+                .get("action")
+                .unwrap()
+                .get("command"),
+            Some(&Value::String("pnpm add @openai/codex@latest".to_string()))
+        );
+        replace(&mut input, "update", Value::Null);
+        replace(&mut input, "packageName", Value::Null);
+        assert_eq!(
+            Session::new().respond(&frame(&input)),
+            Ok((
+                "{\"version\":1,\"ok\":{\"kind\":\"selected\",\"action\":null}}\n".to_string(),
+                true
+            ))
+        );
+    }
+
+    #[test]
+    fn selection_rejects_invalid_fields_types_and_duplicate_keys() {
+        for (key, value) in [
+            ("version", Value::Number("2".to_string())),
+            ("mode", Value::String("resolve".to_string())),
+            ("mode", Value::Null),
+            ("versionValue", Value::Null),
+            ("versionValue", Value::Number("1".to_string())),
+            ("packageName", Value::Bool(false)),
+            ("update", Value::Array(vec![])),
+        ] {
+            let mut input = selection_request();
+            replace(&mut input, key, value);
+            assert_eq!(
+                Session::new().respond(&frame(&input)),
+                Err(Error::InvalidRequest),
+                "{key}"
+            );
+        }
+        let Value::Object(fields) = selection_request() else {
+            unreachable!();
+        };
+        for index in 0..fields.len() {
+            let mut incomplete = fields.clone();
+            incomplete.remove(index);
+            assert_eq!(
+                Session::new().respond(&frame(&Value::Object(incomplete))),
+                Err(Error::InvalidRequest)
+            );
+            let mut duplicate = fields.clone();
+            duplicate.push(fields[index].clone());
+            assert_eq!(
+                Session::new().respond(&frame(&Value::Object(duplicate))),
+                Err(Error::DuplicateKey)
+            );
+        }
+        let mut extra = fields;
+        extra.push(("observations".to_string(), Value::Array(vec![])));
+        assert_eq!(
+            Session::new().respond(&frame(&Value::Object(extra))),
+            Err(Error::InvalidRequest)
+        );
+
+        for (key, value) in [
+            ("command", Value::Null),
+            ("args", Value::String("not an array".to_string())),
+            ("args", Value::Array(vec![Value::Null])),
+            ("lockKey", Value::Bool(false)),
+        ] {
+            let mut input = selection_request();
+            let mut update = input.get("update").unwrap().clone();
+            replace(&mut update, key, value);
+            replace(&mut input, "update", update);
+            assert_eq!(
+                Session::new().respond(&frame(&input)),
+                Err(Error::InvalidRequest),
+                "update.{key}"
+            );
+        }
+        let mut input = selection_request();
+        let Value::Object(mut update) = input.get("update").unwrap().clone() else {
+            unreachable!();
+        };
+        update.push(("env".to_string(), Value::Null));
+        replace(&mut input, "update", Value::Object(update));
+        assert_eq!(
+            Session::new().respond(&frame(&input)),
+            Err(Error::InvalidRequest)
+        );
+    }
+
+    #[test]
+    fn selection_enforces_text_frame_and_expanded_output_limits() {
+        let mut input = selection_request();
+        replace(
+            &mut input,
+            "packageName",
+            Value::String("a".repeat(MAX_TEXT_BYTES + 1)),
+        );
+        assert_eq!(
+            Session::new().respond(&frame(&input)),
+            Err(Error::InputLimit)
+        );
+        assert_eq!(
+            Session::new().respond(&" ".repeat(MAX_FRAME_BYTES + 1)),
+            Err(Error::InputLimit)
+        );
+        assert_eq!(
+            Session::new().respond(&json::stringify(&selection_request())),
+            Err(Error::InvalidRequest)
+        );
+
+        let mut input = selection_request();
+        replace(
+            &mut input,
+            "versionValue",
+            Value::String(format!("{}.2.3", "1".repeat(MAX_TEXT_BYTES - 4))),
+        );
+        let mut update = input.get("update").unwrap().clone();
+        let mut args = vec![Value::String("@openai/codex@latest".to_string())];
+        args.extend((0..14).map(|_| Value::String("a".repeat(MAX_TEXT_BYTES))));
+        replace(&mut update, "args", Value::Array(args));
+        replace(&mut input, "update", update);
+        let input = frame(&input);
+        assert!(input.len() < MAX_FRAME_BYTES);
+        assert_eq!(Session::new().respond(&input), Err(Error::OutputLimit));
+    }
+
+    #[test]
+    fn selection_cannot_replace_pending_resolver_observations() {
+        let request = "{\"version\":1,\"operation\":\"resolve\",\"mode\":\"package\",\"owner\":{\"provider\":\"codex\",\"packageName\":\"@openai/codex\"},\"context\":{\"resolvedCommandPath\":\"/usr/bin/codex\",\"realCommandPath\":\"/usr/bin/codex\",\"platform\":\"linux\",\"hostPlatform\":\"linux\",\"commandPlatform\":\"linux\",\"chocolateyInstall\":null},\"definition\":{\"mise\":null,\"native\":null},\"homebrew\":null,\"observations\":[]}\n";
+        let mut session = Session::new();
+        let (response, completed) = session.respond(request).unwrap();
+        assert!(!completed);
+        assert_eq!(
+            response,
+            "{\"version\":1,\"ok\":{\"kind\":\"observe\",\"request\":{\"kind\":\"wrapper\"}}}\n"
+        );
+        assert_eq!(
+            session.respond(&frame(&selection_request())),
+            Err(Error::ObservationMismatch)
+        );
+
+        let mut request = json::parse(request).unwrap();
+        replace(
+            &mut request,
+            "observations",
+            Value::Array(vec![object(vec![
+                (
+                    "request",
+                    object(vec![("kind", Value::String("wrapper".to_string()))]),
+                ),
+                ("result", Value::Null),
+            ])]),
+        );
+        let (response, completed) = session.respond(&frame(&request)).unwrap();
+        assert!(completed);
+        assert_eq!(
+            json::parse(&response)
+                .unwrap()
+                .get("ok")
+                .unwrap()
+                .get("kind"),
+            Some(&Value::String("resolved".to_string()))
+        );
     }
 }
