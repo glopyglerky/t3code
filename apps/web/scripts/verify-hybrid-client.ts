@@ -18,13 +18,17 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
 import { chromium, type Browser, type Page } from "playwright";
+import {
+  assertReplayTurnLinks,
+  replayTurnIdentity,
+  type ReplayTurnIdentity,
+} from "./hybrid-client-turn.ts";
 
 type Implementation = "upstream" | "native";
 type DevReplayWindow = Window & {
   t3dev?: { replayScenarios: () => string[]; replay: (scenario: string) => Promise<string> };
 };
 type OwnedApplication = { pid: number; pairingUrl: string; stop: () => Promise<void> };
-type ReplayTurnIdentity = { runId: string; attemptId: string; providerTurnId: string };
 
 const repoRoot = NodeFS.realpathSync(NodeURL.fileURLToPath(new URL("../../../", import.meta.url)));
 const timeoutMs = 90_000;
@@ -307,32 +311,52 @@ async function readThreadSnapshot(
   );
   Assert.ok(response.ok(), `Thread snapshot failed with HTTP ${response.status()}`);
   const snapshot = decodeSnapshot(await response.json());
+  snapshotMetadata.set(page, summarizeSnapshot(snapshot));
   Assert.equal(snapshot.projection.thread.id, threadId);
   return snapshot;
 }
 
-function replayTurnIdentity(snapshot: OrchestrationV2ThreadDetailSnapshot): ReplayTurnIdentity {
-  Assert.equal(
-    snapshot.projection.runs.length,
-    1,
-    "The controlled fixture must have exactly one run",
-  );
-  const run = snapshot.projection.runs[0]!;
-  Assert.equal(run.providerInstanceId, "devReplay");
-  Assert.equal(run.modelSelection.model, "showcase");
-  Assert.ok(run.activeAttemptId, "The replay approval must belong to an active attempt");
-  const attempt = snapshot.projection.attempts.find((item) => item.id === run.activeAttemptId);
-  Assert.ok(attempt);
-  Assert.equal(attempt.runId, run.id);
-  Assert.equal(attempt.providerInstanceId, "devReplay");
-  Assert.ok(attempt.providerTurnId, "The replay approval must belong to a provider turn");
-  const providerTurn = snapshot.projection.providerTurns.find(
-    (item) => item.id === attempt.providerTurnId,
-  );
-  Assert.ok(providerTurn);
-  Assert.equal(providerTurn.runAttemptId, attempt.id);
-  return { runId: run.id, attemptId: attempt.id, providerTurnId: providerTurn.id };
+function summarizeSnapshot(snapshot: OrchestrationV2ThreadDetailSnapshot) {
+  const projection = snapshot.projection;
+  return {
+    snapshotSequence: snapshot.snapshotSequence,
+    threadId: projection.thread.id,
+    runs: projection.runs.map(({ id, status, activeAttemptId, rootNodeId, providerThreadId }) => ({
+      id,
+      status,
+      activeAttemptId,
+      rootNodeId,
+      providerThreadId,
+    })),
+    attempts: projection.attempts.map(
+      ({ id, status, runId, rootNodeId, providerThreadId, providerTurnId }) => ({
+        id,
+        status,
+        runId,
+        rootNodeId,
+        providerThreadId,
+        providerTurnId,
+      }),
+    ),
+    providerTurns: projection.providerTurns.map(
+      ({ id, status, runAttemptId, providerThreadId, nodeId, ordinal }) => ({
+        id,
+        status,
+        runAttemptId,
+        providerThreadId,
+        nodeId,
+        ordinal,
+      }),
+    ),
+    runtimeRequests: projection.runtimeRequests.map(({ id, status, nodeId, providerTurnId }) => ({
+      id,
+      status,
+      nodeId,
+      providerTurnId,
+    })),
+  };
 }
+const snapshotMetadata = new WeakMap<Page, ReturnType<typeof summarizeSnapshot>>();
 
 async function assertCompleted(page: Page, threadId: string, identity: ReplayTurnIdentity) {
   await page.waitForURL((url) => url.pathname.endsWith(`/${threadId}`), { timeout: timeoutMs });
@@ -361,8 +385,9 @@ async function assertCompleted(page: Page, threadId: string, identity: ReplayTur
     `Replay provider turn ${providerTurn.id} did not complete`,
   );
   Assert.equal(attempt.runId, run.id);
-  Assert.equal(attempt.providerTurnId, providerTurn.id);
-  Assert.equal(providerTurn.runAttemptId, attempt.id);
+  Assert.equal(attempt.providerThreadId, run.providerThreadId);
+  Assert.equal(attempt.rootNodeId, run.rootNodeId);
+  assertReplayTurnLinks(attempt, providerTurn);
   Assert.ok(run.completedAt);
   Assert.ok(attempt.completedAt);
   Assert.ok(providerTurn.completedAt);
@@ -590,6 +615,11 @@ async function exercise(implementation: Implementation): Promise<void> {
         browserErrors: proof.browserErrors.slice(-5),
       })}`,
     );
+    const metadata = snapshotMetadata.get(page);
+    if (metadata) {
+      writeJson(NodePath.join(directory, "failure-snapshot-metadata.json"), metadata);
+      console.error(`[${implementation}] Last snapshot links: ${JSON.stringify(metadata)}`);
+    }
     const snapshotPath = NodePath.join(directory, "failure.aria.txt");
     if (NodeFS.existsSync(snapshotPath)) {
       const snapshot = NodeFS.readFileSync(snapshotPath, "utf8");

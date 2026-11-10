@@ -88,6 +88,8 @@ jobs:
         run: node tools/check-hybrid.mjs --verify-binaries
       - name: Install Chromium for the original built client
         run: node apps/web/node_modules/playwright/cli.js install --with-deps --only-shell chromium
+      - name: Test client acceptance contract assertions
+        run: node --test apps/web/scripts/hybrid-client-turn.test.ts
       - name: Check contracts, recovery, server and web bundles
         run: node tools/check-hybrid.mjs --application "$RUNNER_TEMP/hybrid-proof"
       - name: Exercise the original client with original and Rust services
