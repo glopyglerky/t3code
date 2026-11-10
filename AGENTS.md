@@ -38,8 +38,8 @@ produced target sysroot. Do not substitute stock Clippy or compiler drivers.
 Keep generated output outside canonical source and clean owned disposable output.
 
 Run workspace tests and `t3code-ls-tools check-source` and
-`check-upstream-readme` before publishing. Build helpers are Rust too. Do not
-run removed Node tooling or recreate vendored source caches.
+`check-upstream-readme` and `check-upstream-ports` before publishing. Build helpers
+are Rust too. Do not run removed Node tooling or recreate vendored source caches.
 
 Original behavior is available from `pingdotgg/t3code` at the immutable commit
 and tree in `upstream.lock.json`. Use `git show <commit>:<path>` after fetching

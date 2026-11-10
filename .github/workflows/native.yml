@@ -68,6 +68,11 @@ jobs:
       - name: Fetch the immutable upstream behavior reference
         run: git fetch --no-tags --depth=1 https://github.com/pingdotgg/t3code.git 521ac7c218b3faa74281fb72fc36ce74a0951fb3
 
+      - name: Test the direct upstream module ports
+        run: |
+          export CARGO_ENCODED_RUSTFLAGS=$'--sysroot\x1f'"$T3_CODE_LS_TOOLCHAIN"
+          "$T3_CODE_LS_TOOLCHAIN/bin/lustr" --bluefe-root "$T3_CODE_LS_TOOLCHAIN" test --locked -p t3-code-ls-orchestration --all-targets
+
       - name: Test the application with the produced compiler
         run: |
           export CARGO_ENCODED_RUSTFLAGS=$'--sysroot\x1f'"$T3_CODE_LS_TOOLCHAIN"

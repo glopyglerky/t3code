@@ -21,6 +21,16 @@ fn marked(value: &Value, field: &str) -> bool {
     value.get(field) == Some(&Value::Bool(true))
 }
 
+/// Preserve object-spread order without copying bodies that will be blanked.
+fn copy_replacing_fields(
+    fields: &serde_json::Map<String, Value>,
+    mut replacement: impl FnMut(&str) -> Option<Value>,
+) -> serde_json::Map<String, Value> {
+    fields.iter().map(|(key, value)| {
+        (key.clone(), replacement(key).unwrap_or_else(|| value.clone()))
+    }).collect()
+}
+
 /// Also used for a repeated `subagent.updated`, whose previous record was sent earlier.
 pub fn dedupe_subagent_bodies(value: Item, previous: Option<&Value>) -> Item {
     let Some(previous) = previous else {
@@ -35,15 +45,18 @@ pub fn dedupe_subagent_bodies(value: Item, previous: Option<&Value>) -> Item {
     if !prompt && !result {
         return value;
     }
-    let Some(mut next) = value.as_object().cloned() else {
+    let Some(fields) = value.as_object() else {
         return value;
     };
+    let mut next = copy_replacing_fields(fields, |field| match field {
+        "prompt" if prompt => Some(json!("")),
+        "result" if result => Some(Value::Null),
+        _ => None,
+    });
     if prompt {
-        next.insert("prompt".into(), json!(""));
         next.insert("promptOmitted".into(), json!(true));
     }
     if result {
-        next.insert("result".into(), Value::Null);
         next.insert("resultOmitted".into(), json!(true));
     }
     Arc::new(Value::Object(next))
@@ -62,8 +75,8 @@ pub fn restore_subagent_bodies(value: Item, previous: Option<&Value>) -> Item {
     let Some(mut next) = value.as_object().cloned() else {
         return value;
     };
-    next.remove("promptOmitted");
-    next.remove("resultOmitted");
+    next.shift_remove("promptOmitted");
+    next.shift_remove("resultOmitted");
     for (restore, field, marker) in [
         (prompt, "prompt", "promptOmitted"),
         (result, "result", "resultOmitted"),
@@ -74,7 +87,7 @@ pub fn restore_subagent_bodies(value: Item, previous: Option<&Value>) -> Item {
             } else {
                 // JavaScript's object spread sets an absent source field to undefined.
                 // Its JSON representation omits that property.
-                next.remove(field);
+                next.shift_remove(field);
             }
         } else if marked(&value, marker) {
             next.insert(marker.into(), json!(true));
@@ -142,8 +155,9 @@ pub fn dedupe_turn_item_bodies(item: Item, source: &dyn BodySource) -> Item {
     let Some((field, value, marker)) = next else {
         return item;
     };
-    let mut next = item.as_object().expect("typed turn item").clone();
-    next.insert(field.into(), value);
+    let mut next = copy_replacing_fields(item.as_object().expect("typed turn item"), |key| {
+        (key == field).then(|| value.clone())
+    });
     next.insert(marker.into(), json!(true));
     Arc::new(Value::Object(next))
 }
@@ -173,7 +187,7 @@ pub fn restore_turn_item_bodies(item: Item, source: &dyn BodySource) -> Item {
         return item;
     };
     let mut next = item.as_object().expect("typed turn item").clone();
-    next.remove(marker);
+    next.shift_remove(marker);
     next.insert(field.into(), value);
     Arc::new(Value::Object(next))
 }
@@ -385,6 +399,101 @@ mod tests {
         let marked = Arc::new(json!({"prompt":"","result":null,"promptOmitted":true,"resultOmitted":true}));
         let previous = json!({"prompt":"","result":"done","promptOmitted":true});
         assert_eq!(*restore_subagent_bodies(marked,Some(&previous)),json!({"prompt":"","result":"done","promptOmitted":true}));
+    }
+
+    #[test]
+    fn restored_turn_item_object_rest_preserves_property_order_and_unknown_fields() {
+        let projection = fixture();
+        let source = SnapshotBodySource::new(&projection);
+        for (encoded, expected) in [
+            (
+                r#"{"type":"assistant_message","textOmitted":true,"messageId":"m-assistant","text":"","future":{"z":1e20,"2":2,"01":-0.0}}"#,
+                r#"{"type":"assistant_message","messageId":"m-assistant","text":"hi there","future":{"2":2,"z":100000000000000000000,"01":0}}"#,
+            ),
+            (
+                r#"{"type":"checkpoint","filesOmitted":true,"checkpointId":"c-1","files":[],"future":["keep"]}"#,
+                r#"{"type":"checkpoint","checkpointId":"c-1","files":[{"path":"src/a.ts","kind":"modified","additions":3,"deletions":1}],"future":["keep"]}"#,
+            ),
+        ] {
+            let value = Arc::new(serde_json::from_str::<Value>(encoded).unwrap());
+            let original = crate::js::stringify(&value);
+            let restored = restore_turn_item_bodies(value.clone(), &source);
+            assert_eq!(crate::js::stringify(&restored), expected);
+            assert_eq!(crate::js::stringify(&value), original);
+        }
+    }
+
+    #[test]
+    fn restored_subagent_object_rest_preserves_order_and_reappends_only_unrestored_markers() {
+        let value = Arc::new(serde_json::from_str::<Value>(
+            r#"{"promptOmitted":true,"id":"child","resultOmitted":true,"prompt":"","result":null,"future":{"keep":true}}"#,
+        ).unwrap());
+        for (previous, expected) in [
+            (
+                json!({"prompt":"task","result":"done"}),
+                r#"{"id":"child","prompt":"task","result":"done","future":{"keep":true}}"#,
+            ),
+            (
+                json!({"prompt":"","promptOmitted":true,"result":"done"}),
+                r#"{"id":"child","prompt":"","result":"done","future":{"keep":true},"promptOmitted":true}"#,
+            ),
+            (
+                json!({"prompt":"task","result":null,"resultOmitted":true}),
+                r#"{"id":"child","prompt":"task","result":null,"future":{"keep":true},"resultOmitted":true}"#,
+            ),
+            (
+                json!({"result":"done"}),
+                r#"{"id":"child","result":"done","future":{"keep":true}}"#,
+            ),
+        ] {
+            let restored = restore_subagent_bodies(value.clone(), Some(&previous));
+            assert_eq!(crate::js::stringify(&restored), expected);
+        }
+    }
+
+    #[test]
+    fn deduped_turn_item_replacements_preserve_property_and_marker_order() {
+        let projection = fixture();
+        let source = SnapshotBodySource::new(&projection);
+        for (encoded, expected) in [
+            (
+                r#"{"type":"assistant_message","text":"hi there","future":["keep"],"messageId":"m-assistant"}"#,
+                r#"{"type":"assistant_message","text":"","future":["keep"],"messageId":"m-assistant","textOmitted":true}"#,
+            ),
+            (
+                r#"{"type":"checkpoint","files":[{"path":"src/a.ts","kind":"modified","additions":3,"deletions":1}],"future":["keep"],"checkpointId":"c-1"}"#,
+                r#"{"type":"checkpoint","files":[],"future":["keep"],"checkpointId":"c-1","filesOmitted":true}"#,
+            ),
+        ] {
+            let value = Arc::new(serde_json::from_str::<Value>(encoded).unwrap());
+            let deduped = dedupe_turn_item_bodies(value.clone(), &source);
+            assert_eq!(crate::js::stringify(&deduped), expected);
+            assert_eq!(crate::js::stringify(&value), encoded);
+        }
+    }
+
+    #[test]
+    fn deduped_subagent_replacements_keep_unmatched_bodies_and_marker_order() {
+        let encoded = r#"{"future":["keep"],"result":"done","prompt":"task","id":"child"}"#;
+        let value = Arc::new(serde_json::from_str::<Value>(encoded).unwrap());
+        for (previous, expected) in [
+            (
+                json!({"prompt":"task","result":"done"}),
+                r#"{"future":["keep"],"result":null,"prompt":"","id":"child","promptOmitted":true,"resultOmitted":true}"#,
+            ),
+            (
+                json!({"prompt":"task","result":"other"}),
+                r#"{"future":["keep"],"result":"done","prompt":"","id":"child","promptOmitted":true}"#,
+            ),
+            (
+                json!({"prompt":"other","result":"done"}),
+                r#"{"future":["keep"],"result":null,"prompt":"task","id":"child","resultOmitted":true}"#,
+            ),
+        ] {
+            let deduped = dedupe_subagent_bodies(value.clone(), Some(&previous));
+            assert_eq!(crate::js::stringify(&deduped), expected);
+            assert_eq!(crate::js::stringify(&value), encoded);
+        }
     }
 
     #[test]

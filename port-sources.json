@@ -3,6 +3,18 @@
   "scope": "Direct module translations; test and representation gaps are recorded in docs/port-map.md, not a full-application parity claim.",
   "sources": [
     {
+      "path": "packages/contracts/src/orchestrationV2.ts",
+      "blob": "eb0e9d43190dc28fe745a8636ce7c66b70ecd512",
+      "rust": "crates/orchestration/src/types.rs",
+      "scope": "Record field reference only; full schema validation remains unported"
+    },
+    {
+      "path": "packages/contracts/src/chatAttachment.ts",
+      "blob": "bc3e103d74aab0308841173e94dc448289655bbb",
+      "rust": "crates/orchestration/src/tool_output.rs",
+      "scope": "Image MIME predicate and byte-limit constant used by tool output"
+    },
+    {
       "path": "packages/shared/src/orchestrationV2DedupedBodies.ts",
       "blob": "701ae1e8305565487d21cb1b5392e89486c98bc5",
       "rust": "crates/orchestration/src/deduped_bodies.rs"

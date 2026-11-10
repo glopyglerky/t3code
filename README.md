@@ -75,6 +75,7 @@ Use a qualified Lustr/BlueFe payload matching [lust-toolchain.json](lust-toolcha
 test --locked --workspace --all-targets
 run --locked -p t3code-ls-tools -- check-source
 run --locked -p t3code-ls-tools -- check-upstream-readme
+run --locked -p t3code-ls-tools -- check-upstream-ports
 ```
 
 For executable staging, unset the manually supplied sysroot flag and run `t3code-ls-tools build`. It selects the produced drivers, appends the selected sysroot while preserving caller flags, passes an explicit Rust target, and stages workspace executables plus a manifest under `<CARGO_TARGET_DIR>/deliverable/<target>/`. `T3_CODE_LS_SYSROOT` and `T3_CODE_LS_RUST_TARGET` select a matching cross-target payload. Missing sysroots fail before building; a target linker and native dependencies are also required. This is component staging, not an installer or a release archive.

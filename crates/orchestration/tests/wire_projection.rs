@@ -11,7 +11,7 @@ use serde_json::{Map, Value, json};
 use t3_code_ls_orchestration::bounded_snapshot::{
     bounded_snapshot_projection, omit_local_visible_turn_items,
 };
-use t3_code_ls_orchestration::deduped_bodies::dedupe_snapshot_bodies;
+use t3_code_ls_orchestration::deduped_bodies::{BodySource, dedupe_snapshot_bodies};
 use t3_code_ls_orchestration::tool_output::{MAX_TOOL_OUTPUT_IMAGES, tool_output_images};
 use t3_code_ls_orchestration::types::{Item, ProjectedTurnItem, Projection, ThreadProjection};
 use t3_code_ls_orchestration::wire_projection::{
@@ -107,6 +107,47 @@ fn upstream_handoff_activity_and_events_do_not_expose_copied_transcripts() {
     assert!(!serde_json::to_string(projected.as_ref()).unwrap().contains("PRIVATE_HANDOFF_TRANSCRIPT"));
     assert_eq!(*item,original);
     assert_eq!(event["payload"]["summary"],json!("PRIVATE_HANDOFF_TRANSCRIPT"));
+}
+
+#[test]
+fn redaction_keeps_javascript_spread_order_and_appends_reintroduced_fields() {
+    let mut projector = WireProjector::default();
+    for (source, expected) in [
+        (r#"{"type":"handoff","summary":"private","first":1,"last":2}"#,
+         r#"{"type":"handoff","first":1,"last":2}"#),
+        (r#"{"type":"command_execution","output":"private","input":"echo","last":2,"exitCode":0}"#,
+         r#"{"type":"command_execution","input":"echo","last":2,"exitCode":0,"outputOmitted":true}"#),
+        (r#"{"type":"file_change","diffStr":"failed change","oldStr":"old","status":"failed","last":2,"newStr":"new"}"#,
+         r#"{"type":"file_change","status":"failed","last":2,"diffStr":"failed change"}"#),
+        (r#"{"type":"dynamic_tool","output":{"threadId":"child","text":"private"},"input":{"x":1},"last":2}"#,
+         r#"{"type":"dynamic_tool","input":{"x":1},"last":2,"output":{"threadId":"child"},"outputOmitted":true}"#),
+        (r#"{"type":"subagent","prompt":"task","last":2,"result":null,"progress":"working"}"#,
+         r#"{"type":"subagent","prompt":"task","last":2,"result":null,"progress":"working"}"#),
+    ] {
+        let source = Arc::new(serde_json::from_str(source).unwrap());
+        let projected = projector.project_turn_item_for_wire(&source).unwrap();
+        assert_eq!(serde_json::to_string(projected.as_ref()).unwrap(),expected);
+    }
+    let handoff: Value = serde_json::from_str(r#"{"id":"h","history":["private"],"summaryText":"private","delivery":{},"last":2}"#).unwrap();
+    assert_eq!(serde_json::to_string(&project_context_handoff_for_wire(&handoff).unwrap()).unwrap(),
+        r#"{"id":"h","summaryText":"","last":2}"#);
+}
+
+#[test]
+fn large_discarded_bodies_are_omitted_through_nested_stored_event_projection() {
+    let mut projector = WireProjector::default();
+    for body in [
+        json!({"type":"handoff","summary":"x".repeat(2_000_000)}),
+        json!({"type":"command_execution","input":"echo","output":"x".repeat(2_000_000),"exitCode":0}),
+        json!({"type":"file_change","status":"completed","diffStr":"x".repeat(2_000_000),"oldStr":"y".repeat(2_000_000),"newStr":"z".repeat(2_000_000)}),
+        json!({"type":"dynamic_tool","input":{},"output":{"threadId":"child","text":"x".repeat(2_000_000)}}),
+    ] {
+        let stored = Arc::new(json!({"sequence":1,"event":{"type":"turn-item.updated","payload":body}}));
+        let projected = projector.project_stored_event_for_wire(&stored).unwrap();
+        assert!(serde_json::to_string(projected.as_ref()).unwrap().len()<300);
+        assert!(Arc::ptr_eq(&projected,&projector.project_stored_event_for_wire(&stored).unwrap()));
+        assert!(serde_json::to_string(stored.as_ref()).unwrap().len()>2_000_000);
+    }
 }
 
 #[test]
@@ -344,6 +385,34 @@ fn thread_stream_events_share_cached_wire_envelopes_without_command_metadata() {
 }
 
 #[test]
+fn cached_stream_envelopes_release_expired_sources_and_keep_live_identity() {
+    let mut projector = WireProjector::default();
+    let mut sources = Vec::new();
+    let mut results = Vec::new();
+    for sequence in 0..1024 {
+        let stored = Arc::new(json!({"sequence":sequence,"event":{"type":"unrelated","payload":sequence}}));
+        let projected = projector.thread_stream_event_item(&stored).unwrap();
+        results.push(Arc::downgrade(&projected));
+        sources.push(stored);
+    }
+    let live = sources.split_off(512);
+    drop(sources);
+    // Active consumers eventually release expired entries without invalidating
+    // another still-live source's shared output, even after many insertions.
+    for _ in 0..1024 {
+        let projected = projector.thread_stream_event_item(&live[0]).unwrap();
+        assert!(Arc::ptr_eq(&projected,&results[512].upgrade().unwrap()));
+    }
+    assert!(results[..512].iter().all(|result| result.upgrade().is_none()));
+    for (source, expected) in live.iter().zip(&results[512..]) {
+        assert!(Arc::ptr_eq(&projector.thread_stream_event_item(source).unwrap(),&expected.upgrade().unwrap()));
+    }
+    drop(live);
+    drop(projector);
+    assert!(results.iter().all(|result| result.upgrade().is_none()));
+}
+
+#[test]
 fn checkpoint_caps_preserve_totals_and_cached_identity() {
     let item = tool(json!({"type":"checkpoint","checkpointId":"checkpoint-large","scopeId":"scope-large","files":files(250),"future":{"keep":true}}));
     let mut projector = WireProjector::default();
@@ -502,6 +571,28 @@ fn snapshot_seeds_all_body_indexes_and_subagent_repetition_is_field_specific() {
     assert_eq!(payload(&projected)["resultOmitted"],json!(true));
     let unrelated = Arc::new(json!({"kind":"heartbeat","future":true}));
     assert!(Arc::ptr_eq(&deduper.apply(&unrelated).unwrap(),&unrelated));
+}
+
+#[test]
+fn live_subagent_memory_retains_only_the_received_prompt_and_result() {
+    let snapshot = Arc::new(json!({"kind":"snapshot","projection":{
+        "messages":[],"checkpoints":[],"subagents":[{
+            "id":"s","prompt":"task","result":"done","progress":"x".repeat(2_000_000),
+            "promptOmitted":true,"future":{"private":"not part of body memory"}
+        }]
+    }}));
+    let mut deduper = LiveBodyDeduper::default();
+    assert!(Arc::ptr_eq(&deduper.apply(&snapshot).unwrap(),&snapshot));
+    assert_eq!(BodySource::subagent(&deduper,"s"),Some(&json!({"prompt":"task","result":"done"})));
+
+    let updated = stream(1,"subagent.updated",json!({
+        "id":"s","prompt":"task","result":"new result","progress":"y".repeat(2_000_000),
+        "future":{"private":"also not retained"}
+    }));
+    let projected = deduper.apply(&updated).unwrap();
+    assert_eq!(payload(&projected)["promptOmitted"],json!(true));
+    assert_eq!(BodySource::subagent(&deduper,"s"),Some(&json!({"prompt":"task","result":"new result"})));
+    assert_eq!(payload(&updated)["prompt"],json!("task"));
 }
 
 #[test]

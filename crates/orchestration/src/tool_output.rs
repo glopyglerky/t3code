@@ -64,8 +64,11 @@ impl Default for ResultReadBudget {
 }
 
 #[derive(Default)]
-struct ResultEnvelope {
-    data: Option<Value>,
+struct ResultEnvelope<'a> {
+    // Direct records may contain arbitrarily large ignored result bodies. Keep
+    // them borrowed until compact_dynamic_tool_output selects bounded metadata.
+    // Owned values originate only from the bounded JSON text parser below.
+    data: Option<Cow<'a, Value>>,
     failed: bool,
 }
 
@@ -137,7 +140,7 @@ fn parse_result_text(text: &str) -> Result<Option<Value>> {
     }
 }
 
-fn read_result(value: Option<&Value>, budget: &mut ResultReadBudget, depth: usize) -> Result<ResultEnvelope> {
+fn read_result<'a>(value: Option<&'a Value>, budget: &mut ResultReadBudget, depth: usize) -> Result<ResultEnvelope<'a>> {
     if depth > MAX_ENVELOPE_DEPTH || budget.remaining_nodes == 0 {
         budget.exceeded = true;
         return Ok(ResultEnvelope::default());
@@ -151,7 +154,13 @@ fn read_result(value: Option<&Value>, budget: &mut ResultReadBudget, depth: usiz
         }
         budget.remaining_bytes -= text.len();
         return match parse_result_text(text)? {
-            Some(value) => read_result(Some(&value), budget, depth + 1),
+            Some(value) => {
+                let result = read_result(Some(&value), budget, depth + 1)?;
+                Ok(ResultEnvelope {
+                    data: result.data.map(|data| Cow::Owned(data.into_owned())),
+                    failed: result.failed,
+                })
+            }
             None => Ok(ResultEnvelope::default()),
         };
     }
@@ -185,7 +194,7 @@ fn read_result(value: Option<&Value>, budget: &mut ResultReadBudget, depth: usiz
         nested.failed |= failed;
         return Ok(nested);
     }
-    Ok(ResultEnvelope { data: Some(value.clone()), failed })
+    Ok(ResultEnvelope { data: Some(Cow::Borrowed(value)), failed })
 }
 
 fn bounded_id(value: Option<&Value>) -> Option<&str> {
@@ -482,9 +491,14 @@ pub fn omit_tool_output_image_data(value: Option<&Value>) -> Option<Value> {
     let value = value?;
     if let Some(blocks) = value.as_array() { return Some(Value::Array(blocks.iter().map(omit).collect())); }
     if is_object(value) && let Some(blocks) = value.get("content").and_then(Value::as_array) {
-        let mut output = value.clone();
-        output["content"] = Value::Array(blocks.iter().map(omit).collect());
-        return Some(output);
+        // Do not clone the original base64 content just to replace it. Copy the
+        // retained fields in their original order, matching the upstream spread.
+        let output = value.as_object().expect("object with a content property").iter()
+            .map(|(key, field)| (key.clone(), if key == "content" {
+                Value::Array(blocks.iter().map(omit).collect())
+            } else { field.clone() }))
+            .collect::<Map<_, _>>();
+        return Some(Value::Object(output));
     }
     Some(omit(value))
 }
@@ -606,6 +620,31 @@ mod tests {
     }
 
     #[test]
+    fn large_ignored_direct_bodies_are_borrowed_before_metadata_selection() {
+        let value = json!({
+            "threadId":"known",
+            "body":"x".repeat(1_000_000),
+            "privateRows":(0..4096).map(|index| json!({"index":index,"text":"ignored"})).collect::<Vec<_>>()
+        });
+        let mut budget = ResultReadBudget::default();
+        let result = read_result(Some(&value), &mut budget, 0).unwrap();
+        let data = result.data.unwrap();
+        assert!(matches!(&data, Cow::Borrowed(_)), "direct result bodies must not be cloned");
+        assert!(std::ptr::eq(data.as_ref(), &value));
+        assert_eq!(budget.remaining_bytes, MAX_PARSED_BYTES);
+        assert_eq!(compact_dynamic_tool_output(Some(&value)).unwrap(), Some(json!({"threadId":"known"})));
+
+        let envelope = json!({"isError":true,"structuredContent":value});
+        let mut budget = ResultReadBudget::default();
+        let result = read_result(Some(&envelope), &mut budget, 0).unwrap();
+        assert!(result.failed);
+        let data = result.data.unwrap();
+        assert!(matches!(&data, Cow::Borrowed(_)));
+        assert!(std::ptr::eq(data.as_ref(), &envelope["structuredContent"]));
+        assert_eq!(compact_dynamic_tool_output(Some(&envelope)).unwrap(), Some(json!({"isError":true,"threadId":"known"})));
+    }
+
+    #[test]
     fn preserves_command_failure_phrases_across_shells_without_copying_output() {
         for text in [
             "FILE NOT FOUND", "No files found", "ENOENT", "No such file or directory",
@@ -706,6 +745,20 @@ mod tests {
         assert_eq!(value["content"][0]["source"]["data"], "AAAA");
         assert_eq!(read_tool_output_image(Some(&json!({"type":"image","mimeType":"image/gif","data":19}))), Some(ToolOutputImage {mime_type:"image/gif".into(),data:None}));
         assert!(read_tool_output_image(Some(&json!({"type":"image","mimeType":"image/png","data":"AAAA","source":[]}))).is_none());
+    }
+
+    #[test]
+    fn metadata_deletions_and_image_replacement_preserve_javascript_property_order() {
+        let output = compact(json!({
+            "isError":true,"threadId":"remove","messageId":"message","taskId":"task",
+            "scheduledTaskId":"schedule","status":"rolled_back","linkedCount":1,
+            "threads":[{"threadId":"known"},{"title":"missing identity"}]
+        })).unwrap();
+        assert_eq!(js::stringify(&output), r#"{"isError":true,"messageId":"message","taskId":"task","scheduledTaskId":"schedule","linkedCount":1}"#);
+
+        let input: Value = serde_json::from_str(r#"{"z":1,"content":[{"type":"image","mimeType":"image/PNG","data":"AAAA"}],"2":2,"a":3,"structuredContent":{"x":1}}"#).unwrap();
+        let output = omit_tool_output_image_data(Some(&input)).unwrap();
+        assert_eq!(js::stringify(&output), r#"{"2":2,"z":1,"content":[{"type":"image","mimeType":"image/png"}],"a":3,"structuredContent":{"x":1}}"#);
     }
 
     #[test]
