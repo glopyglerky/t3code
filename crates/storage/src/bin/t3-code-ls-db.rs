@@ -3,8 +3,9 @@ use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use t3_code_ls_core::json as core_json;
+use t3_code_ls_storage::application::{ApplicationSchema, ApplicationTransactions};
 use t3_code_ls_storage::outbox::{self, EnqueueEffect};
 use t3_code_ls_storage::project_service::{ProjectRequest, execute_project};
 use t3_code_ls_storage::sqlite_import::ImportLimits;
@@ -13,6 +14,45 @@ use t3_code_ls_storage::{CommitBatch, Error, MAX_BATCH_BYTES, OutboxBatch, Store
 #[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
+    ApplicationSchema {},
+    ApplicationInit {
+        schema: ApplicationSchema,
+    },
+    ApplicationBegin {
+        transaction_id: String,
+    },
+    ApplicationGet {
+        transaction_id: String,
+        table: String,
+        key: Vec<Value>,
+    },
+    ApplicationScan {
+        transaction_id: String,
+        table: String,
+        after: Option<String>,
+        limit: u32,
+    },
+    ApplicationPut {
+        transaction_id: String,
+        table: String,
+        key: Vec<Value>,
+        row: Map<String, Value>,
+    },
+    ApplicationDelete {
+        transaction_id: String,
+        table: String,
+        key: Vec<Value>,
+    },
+    ApplicationCommit {
+        transaction_id: String,
+    },
+    ApplicationRollback {
+        transaction_id: String,
+    },
+    ImportSqliteApplication {
+        path: PathBuf,
+    },
+    ApplicationImport {},
     Snapshot {},
     Receipt {
         command_id: String,
@@ -103,8 +143,64 @@ enum Request {
     },
 }
 
-async fn evaluate(store: &Store, planner: Option<&Path>, request: Request) -> Result<Value, Error> {
+async fn evaluate(
+    store: &Store,
+    transactions: &mut ApplicationTransactions,
+    planner: Option<&Path>,
+    request: Request,
+) -> Result<Value, Error> {
     match request {
+        Request::ApplicationSchema {} => serde_json::to_value(transactions.schema().await?),
+        Request::ApplicationInit { schema } => {
+            Ok(json!({"initialized": transactions.initialize(schema).await?}))
+        }
+        Request::ApplicationBegin { transaction_id } => {
+            transactions.begin(&transaction_id).await?;
+            Ok(json!({"transaction_id": transaction_id}))
+        }
+        Request::ApplicationGet {
+            transaction_id,
+            table,
+            key,
+        } => serde_json::to_value(transactions.get(&transaction_id, &table, &key).await?),
+        Request::ApplicationScan {
+            transaction_id,
+            table,
+            after,
+            limit,
+        } => serde_json::to_value(
+            transactions
+                .scan(&transaction_id, &table, after.as_deref(), limit)
+                .await?,
+        ),
+        Request::ApplicationPut {
+            transaction_id,
+            table,
+            key,
+            row,
+        } => {
+            transactions.put(&transaction_id, &table, key, row).await?;
+            Ok(json!({"written": true}))
+        }
+        Request::ApplicationDelete {
+            transaction_id,
+            table,
+            key,
+        } => Ok(json!({"deleted": transactions.delete(&transaction_id, &table, &key).await?})),
+        Request::ApplicationCommit { transaction_id } => {
+            transactions.commit(&transaction_id).await?;
+            Ok(json!({"committed": true}))
+        }
+        Request::ApplicationRollback { transaction_id } => {
+            transactions.rollback(&transaction_id).await?;
+            Ok(json!({"rolled_back": true}))
+        }
+        Request::ImportSqliteApplication { path } => serde_json::to_value(
+            store
+                .import_sqlite_application(path, ImportLimits::default())
+                .await?,
+        ),
+        Request::ApplicationImport {} => serde_json::to_value(store.application_import().await?),
         Request::Snapshot {} => serde_json::to_value(store.snapshot().await?),
         Request::Receipt { command_id } => {
             serde_json::to_value(store.read_receipt(&command_id).await?)
@@ -323,6 +419,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     let planner = std::env::var_os("T3_CODE_LS_PROJECT_STORE_EXECUTABLE").map(PathBuf::from);
+    let mut transactions = ApplicationTransactions::new(store.clone());
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut input = stdin.lock();
@@ -346,16 +443,22 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             return Err(Error::Invalid("frame exceeds 16 MiB".into()).into());
         }
         let response = match decode_frame(&frame) {
-            Ok(request) => match evaluate(&store, planner.as_deref(), request).await {
-                Ok(result) => json!({"ok": true, "result": result}),
-                Err(error) => error_response(&error),
-            },
-            Err(error) => error_response(&error),
+            Ok(request) => {
+                match evaluate(&store, &mut transactions, planner.as_deref(), request).await {
+                    Ok(result) => json!({"ok": true, "result": result}),
+                    Err(error) => error_response(&error),
+                }
+            }
+            Err(error) => {
+                transactions.discard_all();
+                error_response(&error)
+            }
         };
         serde_json::to_writer(&mut output, &response)?;
         writeln!(output)?;
         output.flush()?;
     }
+    drop(transactions);
     store.shutdown().await?;
     Ok(())
 }

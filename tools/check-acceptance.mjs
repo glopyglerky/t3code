@@ -10,6 +10,13 @@ const root = fileURLToPath(new URL("../", import.meta.url));
 const manifestPath = fileURLToPath(new URL("./acceptance-checks.json", import.meta.url));
 export const acceptanceChecks = JSON.parse(FS.readFileSync(manifestPath, "utf8"));
 
+export function acceptanceExecutables(check) {
+  return [
+    ...(check.executable === null ? [] : [{ package: check.package, executable: check.executable }]),
+    ...(check.additional_executables ?? []),
+  ];
+}
+
 export function validateAcceptanceManifest(manifest) {
   Assert.ok(manifest && typeof manifest === "object" && !Array.isArray(manifest),
     "Acceptance manifest must map script paths to execution details");
@@ -18,7 +25,9 @@ export function validateAcceptanceManifest(manifest) {
     Assert.ok(check && typeof check === "object" && !Array.isArray(check),
       `Invalid acceptance entry: ${script}`);
     Assert.deepEqual(Object.keys(check).sort(),
-      ["executable", "extra_arguments", "package", "proof_argument"],
+      ["executable", "extra_arguments", "package", "proof_argument",
+        ...(Object.hasOwn(check, "additional_executables") ? ["additional_executables"] : []),
+        ...(Object.hasOwn(check, "typecheck_project") ? ["typecheck_project"] : [])].sort(),
       `Unexpected acceptance fields: ${script}`);
     Assert.match(check.package, /^[a-z][a-z0-9-]+$/, `Invalid Cargo package: ${script}`);
     Assert.ok(check.executable === null ||
@@ -28,6 +37,28 @@ export function validateAcceptanceManifest(manifest) {
       check.extra_arguments.every((argument) => typeof argument === "string"),
     `Invalid extra arguments: ${script}`);
     Assert.equal(typeof check.proof_argument, "boolean", `Invalid proof argument: ${script}`);
+    if (Object.hasOwn(check, "typecheck_project")) {
+      Assert.ok(typeof check.typecheck_project === "string" &&
+        /^tools\/[a-z][a-z0-9-]*-tsconfig\.json$/.test(check.typecheck_project),
+      `Invalid typecheck project: ${script}`);
+    }
+    if (Object.hasOwn(check, "additional_executables")) {
+      Assert.ok(check.executable !== null && Array.isArray(check.additional_executables) &&
+        check.additional_executables.length > 0,
+      `Additional executables require a primary executable and nonempty target list: ${script}`);
+      for (const target of check.additional_executables) {
+        Assert.ok(target && typeof target === "object" && !Array.isArray(target),
+          `Invalid additional executable: ${script}`);
+        Assert.deepEqual(Object.keys(target).sort(), ["executable", "package"],
+          `Unexpected additional executable fields: ${script}`);
+        Assert.match(target.package, /^[a-z][a-z0-9-]+$/, `Invalid Cargo package: ${script}`);
+        Assert.ok(typeof target.executable === "string" &&
+          /^(?:examples\/)?[a-zA-Z0-9_-]+$/.test(target.executable),
+        `Additional executable must be a relative debug binary or example: ${script}`);
+      }
+      const targets = acceptanceExecutables(check).map((target) => `${target.package}/${target.executable}`);
+      Assert.equal(new Set(targets).size, targets.length, `Duplicate executable target: ${script}`);
+    }
   }
   return manifest;
 }
@@ -82,9 +113,11 @@ export function planAcceptanceChecks(tests, {
       Assert.ok(targetDirectory && Path.isAbsolute(targetDirectory),
         "Set an absolute CARGO_TARGET_DIR for component acceptance executables");
     }
-    const executable = check.executable === null ? null : Path.join(
-      targetDirectory, "debug", `${check.executable}${platform === "win32" ? ".exe" : ""}`,
-    );
+    const executables = acceptanceExecutables(check).map((target) => ({
+      package: target.package,
+      path: Path.join(targetDirectory, "debug", `${target.executable}${platform === "win32" ? ".exe" : ""}`),
+    }));
+    const executable = executables[0]?.path ?? null;
     const proof = check.proof_argument
       ? Path.join(proofDirectory, `${Path.basename(script, ".mjs")}.json`)
       : null;
@@ -92,10 +125,11 @@ export function planAcceptanceChecks(tests, {
       script,
       package: check.package,
       executable,
+      executables,
       proof,
       arguments: [
         "--disable-warning=ExperimentalWarning", script,
-        ...(executable === null ? [] : [executable]),
+        ...executables.map((target) => target.path),
         ...check.extra_arguments,
         ...(proof === null ? [] : [proof]),
       ],
@@ -107,10 +141,11 @@ export function planAcceptanceBuilds(tests, toolchainDirectory, manifest = accep
   const packages = new Map();
   for (const script of selectAcceptanceTests(tests, manifest)) {
     const check = manifest[script];
-    if (check.executable === null) continue;
-    const targets = packages.get(check.package) ?? new Set();
-    targets.add(check.executable);
-    packages.set(check.package, targets);
+    for (const target of acceptanceExecutables(check)) {
+      const targets = packages.get(target.package) ?? new Set();
+      targets.add(target.executable);
+      packages.set(target.package, targets);
+    }
   }
   if (packages.size > 0) {
     Assert.ok(toolchainDirectory && Path.isAbsolute(toolchainDirectory),
@@ -125,6 +160,20 @@ export function planAcceptanceBuilds(tests, toolchainDirectory, manifest = accep
         ? ["--example", target.slice("examples/".length)]
         : ["--bin", target]),
     ],
+  }));
+}
+
+export function planAcceptanceTypechecks(tests, runtimeDirectory, manifest = acceptanceChecks) {
+  const projects = new Set();
+  for (const script of selectAcceptanceTests(tests, manifest)) {
+    const project = manifest[script].typecheck_project;
+    if (project !== undefined) projects.add(project);
+  }
+  return [...projects].sort().map((project) => ({
+    project,
+    program: Path.resolve(runtimeDirectory ?? Path.join(root, "tools/server-test-runtime"),
+      "node_modules", ".bin", "effect-tsgo"),
+    arguments: ["tsrs", "--noEmit", "--project", project],
   }));
 }
 
@@ -156,6 +205,7 @@ function main() {
     scope: "Selected mapped Rust component parity, runtime and candidate-boundary acceptance; upstream behavior is the trusted oracle",
     status: "running",
     builds: [],
+    typechecks: [],
     checks: [],
   };
   const reportPath = Path.join(proof, "acceptance.json");
@@ -181,6 +231,7 @@ function main() {
       proofDirectory: proof,
     });
     const builds = planAcceptanceBuilds(tests, process.env.T3_CODE_LS_TOOLCHAIN);
+    const typechecks = planAcceptanceTypechecks(tests, process.env.T3_CODE_LS_TEST_RUNTIME);
     if (builds.length > 0) {
       Assert.ok(!process.env.CARGO_BUILD_TARGET,
         "Component acceptance requires host debug executables; leave CARGO_BUILD_TARGET unset");
@@ -202,12 +253,15 @@ function main() {
     for (const build of builds) {
       run(report.builds, { package: build.package }, build.program, build.arguments, env);
     }
+    for (const check of typechecks) {
+      run(report.typechecks, { script: check.project }, check.program, check.arguments, env);
+    }
     // Always supply the selected executable: legacy scripts must never enter their Cargo fallback.
     for (const check of checks) {
-      if (check.executable !== null) {
-        Assert.ok(FS.lstatSync(check.executable).isFile(),
-          `Expected a built acceptance executable: ${check.executable}`);
-        FS.accessSync(check.executable, FS.constants.X_OK);
+      for (const target of check.executables) {
+        Assert.ok(FS.lstatSync(target.path).isFile(),
+          `Expected a built acceptance executable: ${target.path}`);
+        FS.accessSync(target.path, FS.constants.X_OK);
       }
     }
     for (const check of checks) {
@@ -217,6 +271,11 @@ function main() {
         script_sha256: sha256(Path.join(root, check.script)),
         executable: check.executable,
         executable_sha256: check.executable === null ? null : sha256(check.executable),
+        executables: check.executables.map((target) => ({
+          package: target.package,
+          path: target.path,
+          sha256: sha256(target.path),
+        })),
         proof_file: check.proof,
       }, process.execPath, check.arguments, env);
     }

@@ -6,9 +6,11 @@ import * as Test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   acceptanceChecks,
+  acceptanceExecutables,
   parseAcceptanceArguments,
   planAcceptanceBuilds,
   planAcceptanceChecks,
+  planAcceptanceTypechecks,
   selectAcceptanceTests,
   validateAcceptanceManifest,
 } from "./check-acceptance.mjs";
@@ -51,12 +53,14 @@ Test.test("manifest executables belong to existing Cargo package targets", () =>
   }
   for (const [script, check] of Object.entries(acceptanceChecks)) {
     Assert.ok(packages.has(check.package), `Unknown manifest Cargo package: ${script}`);
-    if (check.executable === null) continue;
-    const source = check.executable.startsWith("examples/")
-      ? `${check.executable}.rs`
-      : `src/bin/${check.executable}.rs`;
-    Assert.ok(FS.existsSync(Path.join(packages.get(check.package), source)),
-      `Wrong executable owner or target for ${script}: ${source}`);
+    for (const target of acceptanceExecutables(check)) {
+      Assert.ok(packages.has(target.package), `Unknown additional Cargo package: ${script}`);
+      const source = target.executable.startsWith("examples/")
+        ? `${target.executable}.rs`
+        : `src/bin/${target.executable}.rs`;
+      Assert.ok(FS.existsSync(Path.join(packages.get(target.package), source)),
+        `Wrong executable owner or target for ${script}: ${source}`);
+    }
   }
 });
 
@@ -117,6 +121,54 @@ Test.test("selected builds use only pinned Lustr and deduplicate exact package t
   Assert.throws(() => planAcceptanceChecks(["tools/check-policy.mjs"], { proofDirectory }), /TARGET_DIR/);
 });
 
+Test.test("database gates receive every helper in order and compile each owning package once", () => {
+  const tests = ["tools/check-database.mjs", "tools/check-outbox.mjs",
+    "tools/check-native-outbox-worker.mjs"];
+  for (const platform of ["linux", "win32"]) {
+    const checks = planAcceptanceChecks(tests, { targetDirectory, proofDirectory, platform });
+    const suffix = platform === "win32" ? ".exe" : "";
+    for (const [script, helper] of [
+      ["tools/check-database.mjs", "t3-code-ls-project-store"],
+      ["tools/check-outbox.mjs", "t3-code-ls-outbox"],
+    ]) {
+      const check = checks.find((entry) => entry.script === script);
+      Assert.deepEqual(check.arguments.slice(2), [
+        Path.join(targetDirectory, `debug/t3-code-ls-db${suffix}`),
+        Path.join(targetDirectory, `debug/${helper}${suffix}`),
+        Path.join(proofDirectory, `${Path.basename(script, ".mjs")}.json`),
+      ]);
+      Assert.deepEqual(check.executables.map((target) => target.package),
+        ["t3-code-ls-storage", "t3-code-ls-core"]);
+    }
+  }
+  Assert.deepEqual(planAcceptanceBuilds(tests, toolchainDirectory), [
+    {
+      package: "t3-code-ls-core",
+      program: Path.join(toolchainDirectory, "bin/lustr"),
+      arguments: ["--bluefe-root", toolchainDirectory, "build", "--locked", "-p", "t3-code-ls-core",
+        "--bin", "t3-code-ls-outbox", "--bin", "t3-code-ls-project-store"],
+    },
+    {
+      package: "t3-code-ls-storage",
+      program: Path.join(toolchainDirectory, "bin/lustr"),
+      arguments: ["--bluefe-root", toolchainDirectory, "build", "--locked", "-p", "t3-code-ls-storage",
+        "--bin", "t3-code-ls-db"],
+    },
+  ]);
+});
+
+Test.test("candidate database adapters use the locked runtime's actual typechecker", () => {
+  const runtimeDirectory = Path.resolve("/tmp/acceptance-runtime");
+  const tests = ["tools/check-redb-transactions.mjs", "tools/check-native-outbox-worker.mjs"];
+  Assert.deepEqual(planAcceptanceTypechecks(tests, runtimeDirectory),
+    ["tools/outbox-tsconfig.json", "tools/redb-tsconfig.json"].map((project) => ({
+      project,
+      program: Path.join(runtimeDirectory, "node_modules/.bin/effect-tsgo"),
+      arguments: ["tsrs", "--noEmit", "--project", project],
+    })));
+  Assert.deepEqual(planAcceptanceTypechecks(["tools/check-native-database.mjs"], undefined), []);
+});
+
 Test.test("fixture-only acceptance does not require or start a compiler", () => {
   const tests = ["tools/check-native-database.mjs"];
   Assert.deepEqual(planAcceptanceBuilds(tests, undefined), []);
@@ -138,6 +190,16 @@ Test.test("manifest rejects paths and executables outside its fixed command sche
     { ...valid, extra_arguments: "--single" },
     { ...valid, proof_argument: undefined },
     { ...valid, command: "cargo" },
+    { ...valid, additional_executables: [] },
+    { ...valid, additional_executables: null },
+    { ...valid, additional_executables: [{ package: "t3-code-ls-core", executable: "../wrong" }] },
+    { ...valid, additional_executables: [{ package: "--workspace", executable: "wrong" }] },
+    { ...valid, additional_executables: [{ package: valid.package, executable: valid.executable }] },
+    { ...valid, additional_executables: [{ package: valid.package, executable: "valid", extra: true }] },
+    { ...valid, executable: null, additional_executables: [{ package: valid.package, executable: "valid" }] },
+    { ...valid, typecheck_project: "../other-tsconfig.json" },
+    { ...valid, typecheck_project: "tools/../other-tsconfig.json" },
+    { ...valid, typecheck_project: null },
   ]) Assert.throws(() => validateAcceptanceManifest({ "tools/check-policy.mjs": entry }));
   Assert.throws(() => validateAcceptanceManifest({ "../check-policy.mjs": valid }));
 });

@@ -152,7 +152,10 @@ class SelectionTests(unittest.TestCase):
 
     def test_transport_candidate_does_not_build_unrelated_storage_or_application(self):
         result = self.select(["crates/transport/src/bridge.rs"])
-        self.assertEqual(set(result["rust_packages"]), {"t3-code-ls-transport", "t3code-ls-tools"})
+        self.assertEqual(set(result["rust_packages"]), {
+            "t3-code-ls-core", "t3-code-ls-transport", "t3code-ls-tools",
+        })
+        self.assertEqual(result["component_tests"], ["tools/check-connection.mjs"])
         self.assertFalse(result["gates"]["application"])
         self.assertEqual(result["adapter_ports"], [])
 
@@ -177,7 +180,7 @@ class SelectionTests(unittest.TestCase):
     def test_port_test_changes_select_its_adapter_without_browser_flow(self):
         result = self.select(["tools/check-project-adapter.mjs"])
         self.assertEqual(result["adapter_ports"], ["project-commands"])
-        self.assertEqual(set(result["rust_packages"]), {"t3-code-ls-core", "t3code-ls-tools"})
+        self.assertEqual(set(result["rust_packages"]), {"t3-code-ls-core", "t3-code-ls-storage", "t3code-ls-tools"})
         self.assertEqual(result["component_tests"], [])
         self.assertTrue(result["stage_native"])
         self.assertFalse(result["gates"]["application"])
@@ -187,7 +190,7 @@ class SelectionTests(unittest.TestCase):
         result = self.select([path])
         self.assertEqual(result["component_tests"], [path])
         self.assertEqual(result["adapter_ports"], ["project-commands"])
-        self.assertEqual(set(result["rust_packages"]), {"t3-code-ls-core", "t3code-ls-tools"})
+        self.assertEqual(set(result["rust_packages"]), {"t3-code-ls-core", "t3-code-ls-storage", "t3code-ls-tools"})
         self.assertFalse(result["gates"]["application"])
 
     def test_changed_candidate_connection_script_gets_an_executable_gate(self):
@@ -215,6 +218,47 @@ class SelectionTests(unittest.TestCase):
         manifest["tools/check-connection.mjs"]["package"] = "unknown-package"
         with self.assertRaisesRegex(ValueError, "unknown Rust package execution mapping"):
             self.select(["tools/check-connection.mjs"], manifest=manifest)
+
+    def test_candidate_runtime_changes_run_owning_component_checks(self):
+        mapping = copy.deepcopy(MAPPING)
+        mapping["ports"][2]["acceptance_tests"] = ["tools/check-database.mjs"]
+        manifest = copy.deepcopy(COMPONENT_MANIFEST)
+        manifest["tools/check-database.mjs"] = {
+            "package": "t3-code-ls-storage", "executable": "t3-code-ls-db",
+            "additional_executables": [{
+                "package": "t3-code-ls-core", "executable": "t3-code-ls-project-store",
+            }],
+            "extra_arguments": [], "proof_argument": True,
+        }
+        result = self.select(["crates/storage/src/lib.rs"], mapping=mapping, old=mapping,
+                             manifest=manifest)
+        self.assertEqual(result["component_tests"], ["tools/check-database.mjs"])
+        self.assertEqual(set(result["rust_packages"]), {
+            "t3-code-ls-core", "t3-code-ls-storage", "t3-code-ls-app", "t3code-ls-tools",
+        })
+        self.assertFalse(result["stage_native"])
+        self.assertFalse(result["gates"]["application"])
+        tests_only = self.select(["crates/storage/tests/store.rs"], mapping=mapping, old=mapping,
+                                 manifest=manifest)
+        self.assertEqual(tests_only["component_tests"], [])
+
+    def test_component_typecheck_configuration_schedules_its_candidate_gate(self):
+        manifest = copy.deepcopy(COMPONENT_MANIFEST)
+        manifest["tools/check-connection.mjs"]["typecheck_project"] = "tools/connection-tsconfig.json"
+        result = self.select(["tools/connection-tsconfig.json"], manifest=manifest)
+        self.assertEqual(result["component_tests"], ["tools/check-connection.mjs"])
+        self.assertEqual(result["affected_ports"], ["iroh-transport"])
+        self.assertEqual(result["adapter_ports"], [])
+        self.assertFalse(result["stage_native"])
+        self.assertFalse(result["gates"]["application"])
+
+    def test_component_additional_executables_require_known_package_owners(self):
+        for additional in [None, {}, [None], [{"package": "unknown-package", "executable": "helper"}]]:
+            with self.subTest(additional=additional):
+                manifest = copy.deepcopy(COMPONENT_MANIFEST)
+                manifest["tools/check-connection.mjs"]["additional_executables"] = additional
+                with self.assertRaisesRegex(ValueError, "unknown additional Rust package"):
+                    self.select(["tools/check-connection.mjs"], manifest=manifest)
 
     def test_component_test_selection_is_exposed_as_json_github_output(self):
         result = self.select(["tools/check-connection.mjs"])

@@ -21,7 +21,7 @@ const MAX_JSON_DEPTH = 128;
 export class NativeDatabaseInputError extends Schema.TaggedError<NativeDatabaseInputError>()(
   "NativeDatabaseInputError",
   {
-    stage: Schema.Literals(["configuration", "request"]),
+    stage: Schema.Literals(["configuration", "request", "session"]),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {
@@ -79,6 +79,21 @@ export type NativeDatabaseError =
   | NativeDatabaseRejected
   | NativeDatabaseOutcomeUnknown;
 
+export interface NativeDatabaseSession {
+  /** Bound to one helper and the fiber that acquired this session. Never reconnects. */
+  readonly request: <A>(
+    input: unknown,
+    response: Schema.Decoder<A>,
+  ) => Effect.Effect<A, NativeDatabaseError>;
+  /** Close this helper, rolling back any uncommitted native transaction. */
+  readonly discard: Effect.Effect<void>;
+}
+
+const CurrentSession = Context.Reference<object | undefined>(
+  "t3/orchestration-v2/NativeDatabase/CurrentSession",
+  { defaultValue: () => undefined },
+);
+
 export class NativeDatabase extends Context.Service<
   NativeDatabase,
   {
@@ -86,6 +101,10 @@ export class NativeDatabase extends Context.Service<
       input: unknown,
       response: Schema.Decoder<A>,
     ) => Effect.Effect<A, NativeDatabaseError>;
+    /** Hold the connection for an entire transaction, excluding standalone requests. */
+    readonly withSession: <A, E, R>(
+      use: (session: NativeDatabaseSession) => Effect.Effect<A, E, R>,
+    ) => Effect.Effect<A, E | NativeDatabaseError, R>;
   }
 >()("t3/orchestration-v2/NativeDatabase") {}
 
@@ -166,6 +185,7 @@ export const make = Effect.fn("NativeDatabase.make")(function* (config: {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const owner = yield* Scope.Scope;
   const gate = yield* Semaphore.make(1);
+  const connectionIdentity = {};
   let current: Session | undefined;
   let closed = false;
 
@@ -289,7 +309,8 @@ export const make = Effect.fn("NativeDatabase.make")(function* (config: {
     return session;
   });
 
-  const request = Effect.fn("NativeDatabase.request")(function* <A>(
+  const send = Effect.fn("NativeDatabase.send")(function* <A>(
+    session: Session,
     input: unknown,
     response: Schema.Decoder<A>,
   ) {
@@ -298,63 +319,106 @@ export const make = Effect.fn("NativeDatabase.make")(function* (config: {
     )}\n`;
     if (Buffer.byteLength(encoded, "utf8") > MAX_REQUEST_BYTES)
       return yield* new NativeDatabaseInputError({ stage: "request" });
-    return yield* gate.withPermits(1)(
-      Effect.gen(function* () {
-        const session = yield* connect();
-        const pending = yield* Deferred.make<string, NativeDatabaseOutcomeUnknown>();
-        session.pending = pending;
-        session.received = false;
-        return yield* Stream.run(Stream.encodeText(Stream.make(encoded)), session.child.stdin).pipe(
-          Effect.mapError((cause) => new NativeDatabaseOutcomeUnknown({ stage: "write", cause })),
-          Effect.andThen(Deferred.await(pending)),
-          Effect.flatMap((body) =>
-            decodeEnvelope(body).pipe(
-              Effect.mapError(
-                (cause) => new NativeDatabaseOutcomeUnknown({ stage: "response", cause }),
-              ),
+    if (closed) return yield* new NativeDatabaseUnavailable({ stage: "closed" });
+    if (session.failure !== undefined) return yield* session.failure;
+    const pending = yield* Deferred.make<string, NativeDatabaseOutcomeUnknown>();
+    session.pending = pending;
+    session.received = false;
+    return yield* Stream.run(Stream.encodeText(Stream.make(encoded)), session.child.stdin).pipe(
+      Effect.mapError((cause) => new NativeDatabaseOutcomeUnknown({ stage: "write", cause })),
+      Effect.andThen(Deferred.await(pending)),
+      Effect.flatMap((body) =>
+        decodeEnvelope(body).pipe(
+          Effect.mapError(
+            (cause) => new NativeDatabaseOutcomeUnknown({ stage: "response", cause }),
+          ),
+        ),
+      ),
+      Effect.flatMap(
+        (envelope): Effect.Effect<A, NativeDatabaseOutcomeUnknown | NativeDatabaseRejected> => {
+          if (session.failure !== undefined) return Effect.fail(session.failure);
+          if (!envelope.ok)
+            return envelope.error.kind === "unknown_commit"
+              ? Effect.fail(new NativeDatabaseOutcomeUnknown({ stage: "database" }))
+              : Effect.fail(new NativeDatabaseRejected({ kind: envelope.error.kind }));
+          if (!boundedJson(envelope.result))
+            return Effect.fail(new NativeDatabaseOutcomeUnknown({ stage: "response" }));
+          return Schema.decodeUnknownEffect(response, { onExcessProperty: "error" })(
+            envelope.result,
+          ).pipe(
+            Effect.mapError(
+              (cause) => new NativeDatabaseOutcomeUnknown({ stage: "response", cause }),
             ),
-          ),
-          Effect.flatMap(
-            (envelope): Effect.Effect<A, NativeDatabaseOutcomeUnknown | NativeDatabaseRejected> => {
-              if (session.failure !== undefined) return Effect.fail(session.failure);
-              if (!envelope.ok)
-                return envelope.error.kind === "unknown_commit"
-                  ? Effect.fail(new NativeDatabaseOutcomeUnknown({ stage: "database" }))
-                  : Effect.fail(new NativeDatabaseRejected({ kind: envelope.error.kind }));
-              if (!boundedJson(envelope.result))
-                return Effect.fail(new NativeDatabaseOutcomeUnknown({ stage: "response" }));
-              return Schema.decodeUnknownEffect(response, { onExcessProperty: "error" })(
-                envelope.result,
-              ).pipe(
-                Effect.mapError(
-                  (cause) => new NativeDatabaseOutcomeUnknown({ stage: "response", cause }),
-                ),
-              );
-            },
-          ),
-          Effect.timeoutOption(timeout),
-          Effect.flatMap((result) =>
-            Effect.fromOption(result, () => new NativeDatabaseOutcomeUnknown({ stage: "timeout" })),
-          ),
-          Effect.onExit((exit) => {
-            session.pending = undefined;
-            if (
-              Exit.isSuccess(exit) ||
-              exit.cause.reasons.every(
-                (reason) =>
-                  reason._tag === "Fail" && reason.error._tag === "NativeDatabaseRejected",
-              )
-            )
-              return Effect.void;
-            session.failure ??= new NativeDatabaseOutcomeUnknown({
-              stage: "cancelled",
-              cause: exit.cause,
-            });
-            return Scope.close(session.scope, Exit.void);
-          }),
-        );
+          );
+        },
+      ),
+      Effect.timeoutOption(timeout),
+      Effect.flatMap((result) =>
+        Effect.fromOption(result, () => new NativeDatabaseOutcomeUnknown({ stage: "timeout" })),
+      ),
+      Effect.onExit((exit) => {
+        session.pending = undefined;
+        if (
+          Exit.isSuccess(exit) ||
+          exit.cause.reasons.every(
+            (reason) =>
+              reason._tag === "Fail" && reason.error._tag === "NativeDatabaseRejected",
+          )
+        )
+          return Effect.void;
+        session.failure ??= new NativeDatabaseOutcomeUnknown({
+          stage: "cancelled",
+          cause: exit.cause,
+        });
+        return Scope.close(session.scope, Exit.void);
       }),
     );
   });
-  return NativeDatabase.of({ request });
+  const request: NativeDatabase["Service"]["request"] = Effect.fn("NativeDatabase.request")(
+    function* <A>(input: unknown, response: Schema.Decoder<A>) {
+      if ((yield* CurrentSession) !== undefined)
+        return yield* new NativeDatabaseInputError({ stage: "session" });
+      return yield* gate.withPermits(1)(
+        Effect.flatMap(connect(), (session) => send(session, input, response)),
+      );
+    },
+  );
+
+  const withSession: NativeDatabase["Service"]["withSession"] = Effect.fn("NativeDatabase.withSession")(
+    function* <A, E, R>(use: (session: NativeDatabaseSession) => Effect.Effect<A, E, R>) {
+      // A child fiber inherits this marker. It must not wait for its parent's connection.
+      if ((yield* CurrentSession) !== undefined)
+        return yield* new NativeDatabaseInputError({ stage: "session" });
+      return yield* gate.withPermits(1)(
+        Effect.gen(function* () {
+          const session = yield* connect();
+          const ownerId = yield* Effect.withFiber((fiber) => Effect.succeed(fiber.id));
+          let active = true;
+          const discard = poison(
+            session,
+            new NativeDatabaseOutcomeUnknown({ stage: "cancelled" }),
+          ).pipe(Effect.andThen(Scope.close(session.scope, Exit.void)));
+          const owned: NativeDatabaseSession = {
+            request: (input, response) =>
+              Effect.withFiber((fiber) =>
+                active && fiber.id === ownerId
+                  ? send(session, input, response)
+                  : Effect.fail(new NativeDatabaseInputError({ stage: "session" })),
+              ),
+            discard: Effect.withFiber((fiber) =>
+              active && fiber.id === ownerId ? discard : Effect.void,
+            ),
+          };
+          return yield* Effect.suspend(() => use(owned)).pipe(
+            Effect.provideService(CurrentSession, connectionIdentity),
+            Effect.onExit((exit) => {
+              active = false;
+              return Exit.isSuccess(exit) ? Effect.void : discard;
+            }),
+          );
+        }),
+      );
+    },
+  );
+  return NativeDatabase.of({ request, withSession });
 });

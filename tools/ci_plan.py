@@ -187,7 +187,7 @@ def select_checks(changed: list[str], mapping: dict, old_mapping: dict, names: d
                   reverse: dict, trusted_paths: set[str], full_reason: str | None = None,
                   component_manifest: dict | None = None) -> dict:
     """Pure decision function. Unknown fork changes widen qualification."""
-    packages, changed_packages, affected = set(), set(), set()
+    packages, changed_packages, affected, runtime_affected = set(), set(), set(), set()
     reasons = []
     guards = False
     application = False
@@ -211,6 +211,16 @@ def select_checks(changed: list[str], mapping: dict, old_mapping: dict, names: d
         spec = component_manifest[path]
         if not isinstance(spec, dict) or spec.get("package") not in names.values():
             raise ValueError(f"Acceptance test has an unknown Rust package execution mapping: {path}")
+        additional = spec.get("additional_executables", [])
+        if (not isinstance(additional, list)
+                or any(not isinstance(target, dict) or target.get("package") not in names.values()
+                       for target in additional)):
+            raise ValueError(f"Acceptance test has an unknown additional Rust package execution mapping: {path}")
+    typecheck_tests = {script for script, spec in component_manifest.items()
+                       if spec.get("typecheck_project") in changed}
+    typecheck_projects = {component_manifest[script]["typecheck_project"] for script in typecheck_tests}
+    affected.update(port["id"] for port in ports
+                    if typecheck_tests.intersection(port.get("acceptance_tests", [])))
 
     def mapped_packages(owners: list[dict]) -> set[str]:
         nonlocal full_reason
@@ -254,8 +264,10 @@ def select_checks(changed: list[str], mapping: dict, old_mapping: dict, names: d
                     affected.update(owners)
                     runtime_owners.update(owners)
         application |= bool(runtime_owners & PRODUCTION_PORTS)
+        runtime_affected.update(runtime_owners)
         if path.startswith("packages/contracts/"):
             affected.update(port["id"] for port in ports)
+            runtime_affected.update(port["id"] for port in ports)
             changed_packages.update(mapped_packages(ports))
             application = True
             guards = True
@@ -278,7 +290,8 @@ def select_checks(changed: list[str], mapping: dict, old_mapping: dict, names: d
             full_reason = full_reason or f"Unmapped fork integration changed: {path}"
         elif path.startswith("tools/"):
             if path.endswith("-tsconfig.json"):
-                affected.update(PRODUCTION_PORTS)
+                if path not in typecheck_projects:
+                    affected.update(PRODUCTION_PORTS)
                 guards = True
             elif is_reporting_tool(path):
                 # These standalone reports and Python tests run in the cheap job.
@@ -307,21 +320,28 @@ def select_checks(changed: list[str], mapping: dict, old_mapping: dict, names: d
         dependent_owners = {port["id"] for port in ports
                             if dependent_members.intersection(port.get("rust_crates", []))}
         affected.update(dependent_owners)
+        runtime_affected.update(dependent_owners)
         application |= bool(dependent_owners & PRODUCTION_PORTS)
     adapters = sorted(affected & PRODUCTION_PORTS)
     scheduled_tests = {path for path, port in HYBRID_ACCEPTANCE_TESTS.items() if port in adapters}
-    selected_tests = acceptance_tests if full_reason else acceptance_tests.intersection(changed)
+    selected_tests = acceptance_tests if full_reason else (
+        acceptance_tests.intersection(changed) | typecheck_tests
+        | {test for port in ports if port["id"] in runtime_affected
+           for test in port.get("acceptance_tests", [])})
     component_tests = sorted(path for path in selected_tests
                              if not path.endswith(".rs") and path not in scheduled_tests)
     for path in component_tests:
         if path not in component_manifest:
             raise ValueError(f"Acceptance test needs a scheduled execution mapping: {path}")
         packages.add(component_manifest[path]["package"])
+        packages.update(target["package"]
+                        for target in component_manifest[path].get("additional_executables", []))
     if guards:
         packages.add(names["tools"])
     stage_native = bool(adapters or application)
     if stage_native:
         packages.add(names["crates/core"])
+        packages.add(names["crates/storage"])
     return {
         "mode": "full-fork" if full_reason else "affected-fork",
         "gates": {"native": bool(packages), "adapters": bool(adapters), "application": application},

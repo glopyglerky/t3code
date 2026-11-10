@@ -25,23 +25,25 @@ NodeTest.test(
           modulePath + ".ts",
         );
         const { nativeExecutable } = await import(NodeURL.pathToFileURL(modulePath + ".ts").href);
-        const expected = NodePath.join(
-          NodePath.dirname(modulePath).replace(/\.asar(?=\/)/, ".asar.unpacked"),
-          "native-bin",
-          "t3-code-ls-policy",
-        );
-        NodeFS.mkdirSync(NodePath.dirname(expected), { recursive: true });
-        NodeFS.writeFileSync(
-          expected,
-          '#!/usr/bin/env node\nconsole.log("native-policy-fixture")\n',
-          { mode: 0o755 },
-        );
-        NodeAssert.equal(nativeExecutable("policy"), expected);
-        const child = NodeChildProcess.spawnSync(nativeExecutable("policy"), [], {
-          encoding: "utf8",
-        });
-        NodeAssert.equal(child.status, 0, child.stderr);
-        NodeAssert.equal(child.stdout.trim(), "native-policy-fixture");
+        for (const component of ["policy", "db"]) {
+          const expected = NodePath.join(
+            NodePath.dirname(modulePath).replace(/\.asar(?=\/)/, ".asar.unpacked"),
+            "native-bin",
+            `t3-code-ls-${component}`,
+          );
+          NodeFS.mkdirSync(NodePath.dirname(expected), { recursive: true });
+          NodeFS.writeFileSync(
+            expected,
+            `#!/usr/bin/env node\nconsole.log("native-${component}-fixture")\n`,
+            { mode: 0o755 },
+          );
+          NodeAssert.equal(nativeExecutable(component), expected);
+          const child = NodeChildProcess.spawnSync(nativeExecutable(component), [], {
+            encoding: "utf8",
+          });
+          NodeAssert.equal(child.status, 0, child.stderr);
+          NodeAssert.equal(child.stdout.trim(), `native-${component}-fixture`);
+        }
       }
     } finally {
       NodeFS.rmSync(root, { recursive: true, force: true });
@@ -65,7 +67,19 @@ NodeTest.test(
       NodeFS.mkdirSync(NodePath.join(toolchain, "bin"));
       NodeFS.writeFileSync(
         NodePath.join(toolchain, "bin/lustr"),
-        `#!${process.execPath}\nconst NodeFS = require('node:fs'), p = require('node:path');\nconst args = process.argv.slice(2);\nconst dir = p.join(args[args.indexOf('--target-dir') + 1], args[args.indexOf('--target') + 1], 'release');\nNodeFS.mkdirSync(dir, {recursive:true});\nfor (const name of ${JSON.stringify(nativeComponents)}) NodeFS.writeFileSync(p.join(dir, 't3-code-ls-' + name), '#!/usr/bin/env node\\nconsole.log("fixture-component")\\n', {mode:0o755});\nNodeFS.writeFileSync(p.join(dir, 'flags.json'), JSON.stringify(process.env.CARGO_ENCODED_RUSTFLAGS));\n`,
+        `#!${process.execPath}
+const NodeFS = require('node:fs'), p = require('node:path');
+const args = process.argv.slice(2);
+const packages = args.flatMap((arg, index) => arg === '-p' ? [args[index + 1]] : []);
+const dir = p.join(args[args.indexOf('--target-dir') + 1], args[args.indexOf('--target') + 1], 'release');
+NodeFS.mkdirSync(dir, {recursive:true});
+for (const name of ${JSON.stringify(nativeComponents)}) {
+  if (!packages.includes(name === 'db' ? 't3-code-ls-storage' : 't3-code-ls-core')) continue;
+  NodeFS.writeFileSync(p.join(dir, 't3-code-ls-' + name), '#!/usr/bin/env node\\nconsole.log("fixture-component")\\n', {mode:0o755});
+}
+NodeFS.writeFileSync(p.join(dir, 'flags.json'), JSON.stringify(process.env.CARGO_ENCODED_RUSTFLAGS));
+NodeFS.writeFileSync(p.join(dir, 'packages.json'), JSON.stringify(packages));
+`,
         { mode: 0o755 },
       );
       const env = {
@@ -83,6 +97,12 @@ NodeTest.test(
         { env, encoding: "utf8" },
       );
       NodeAssert.equal(run.status, 0, run.stderr);
+      NodeAssert.deepEqual(
+        JSON.parse(NodeFS.readFileSync(NodePath.join(target, "x86_64-unknown-linux-gnu/release/packages.json"))),
+        ["t3-code-ls-core", "t3-code-ls-storage"],
+      );
+      const manifest = JSON.parse(NodeFS.readFileSync(NodePath.join(output, "manifest.json")));
+      NodeAssert.ok(Object.hasOwn(manifest.files, "t3-code-ls-db"));
       NodeAssert.equal(
         JSON.parse(
           NodeFS.readFileSync(NodePath.join(target, "x86_64-unknown-linux-gnu/release/flags.json")),
@@ -130,14 +150,19 @@ NodeTest.test(
       );
       NodeAssert.equal(
         NodeChildProcess.spawnSync(
-          NodePath.join(extracted, "native-bin", nativeFile("policy", "linux-x64")),
+          NodePath.join(extracted, "native-bin", nativeFile("db", "linux-x64")),
           [],
           { encoding: "utf8" },
         ).stdout.trim(),
         "fixture-component",
       );
       NodeAssert.throws(() => stageNativeArtifacts(output, stage, "win32-x64"), /do not match/);
-      NodeFS.appendFileSync(NodePath.join(output, nativeFile("policy", "linux-x64")), "damage");
+      const databaseHelper = NodePath.join(output, nativeFile("db", "linux-x64"));
+      const databaseBytes = NodeFS.readFileSync(databaseHelper);
+      NodeFS.rmSync(databaseHelper);
+      NodeAssert.throws(() => stageNativeArtifacts(output, stage, "linux-x64"), /ENOENT/);
+      NodeFS.writeFileSync(databaseHelper, databaseBytes, { mode: 0o755 });
+      NodeFS.appendFileSync(databaseHelper, "damage");
       NodeAssert.throws(() => stageNativeArtifacts(output, stage, "linux-x64"), /hash mismatch/);
       const cross = NodeChildProcess.spawnSync(
         process.execPath,

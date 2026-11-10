@@ -79,18 +79,18 @@ pub struct ArchiveReceipt {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ChunkRef {
+pub(crate) struct ChunkRef {
     sha256: String,
     byte_count: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ArchiveRecord {
+pub(crate) struct ArchiveRecord {
     format_version: u64,
     ready: bool,
-    summary: ExportSummary,
-    chunks: Vec<ChunkRef>,
+    pub(crate) summary: ExportSummary,
+    pub(crate) chunks: Vec<ChunkRef>,
 }
 
 fn invalid<T>(message: &str) -> Result<T> {
@@ -538,7 +538,7 @@ fn finish_table(current: &mut Option<TableState>, tables: &mut Vec<Value>) -> Re
     Ok(())
 }
 
-fn validate_reader<R: BufRead>(
+pub(crate) fn validate_reader<R: BufRead>(
     mut reader: R,
     limits: ImportLimits,
     mut on_line: impl FnMut(&[u8]) -> Result<()>,
@@ -845,7 +845,7 @@ impl Store {
             }))
     }
 
-    async fn archive_record(&self, archive_id: &str) -> Result<Option<ArchiveRecord>> {
+    pub(crate) async fn archive_record(&self, archive_id: &str) -> Result<Option<ArchiveRecord>> {
         if !is_hash(archive_id) {
             return invalid("invalid archive ID");
         }
@@ -1007,7 +1007,7 @@ impl Store {
         Ok(chunk)
     }
 
-    async fn read_archive_chunk(&self, chunk: &ChunkRef) -> Result<Vec<u8>> {
+    pub(crate) async fn read_archive_chunk(&self, chunk: &ChunkRef) -> Result<Vec<u8>> {
         let witness_key = store_key(&format!("archive/chunk-meta/{}", chunk.sha256));
         let witness = self.db.read(&witness_key).await?;
         if witness.as_deref() != Some(chunk.byte_count.to_be_bytes().as_slice()) {

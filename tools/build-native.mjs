@@ -118,6 +118,8 @@ if (process.env.T3_CODE_LS_NATIVE_DIR) {
       target,
       "-p",
       "t3-code-ls-core",
+      "-p",
+      "t3-code-ls-storage",
       "--bins",
     ],
     { cwd: root, env, stdio: "inherit" },

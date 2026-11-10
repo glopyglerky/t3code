@@ -1113,12 +1113,17 @@
         "crates/storage/src/outbox.rs",
         "crates/storage/src/project_service.rs",
         "crates/storage/src/thread_service.rs",
-        "crates/storage/src/sqlite_import.rs"
+        "crates/storage/src/sqlite_import.rs",
+        "apps/server/src/persistence/redb_transactions.rs",
+        "apps/server/src/persistence/redb_transactions_tests.rs",
+        "apps/server/src/persistence/redb_import.rs",
+        "apps/server/src/persistence/redb_import_tests.rs"
       ],
       "adapter_paths": [
         "apps/server/src/orchestration-v2/NativeDatabase.ts",
         "apps/server/src/orchestration-v2/NativeEffectOutbox.ts",
-        "apps/server/src/orchestration-v2/EventSink.ts"
+        "apps/server/src/orchestration-v2/EventSink.ts",
+        "apps/server/src/persistence/RedbClient.ts"
       ],
       "platform_routes": [
         {
@@ -1135,10 +1140,14 @@
         "tools/check-native-database.mjs",
         "tools/check-native-outbox-worker.mjs",
         "tools/check-outbox-claim-recovery.mjs",
-        "tools/check-project-persistence.mjs"
+        "tools/check-project-persistence.mjs",
+        "tools/check-database.mjs",
+        "tools/check-outbox.mjs",
+        "tools/check-redb-transactions.mjs",
+        "tools/check-redb-import.mjs"
       ],
       "retired_paths": [],
-      "notes": "Candidate only. redb is the intended destination, but the restored application continues its complete SQLite transaction boundary. Migration, replay, crash recovery and backup/restore must qualify before authoritative cutover.",
+      "notes": "Candidate only. Packaged redb transactions, typed SQLite row hydration with atomic catalog publication, outbox recovery and standalone store durability have explicit qualification gates. The restored application keeps its complete SQLite transaction boundary until every repository, migration, replay, crash recovery and backup/restore path is accepted for authoritative cutover.",
       "rust_crates": [
         "crates/core",
         "crates/storage"

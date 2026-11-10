@@ -2,6 +2,11 @@
 
 mod backend;
 
+#[path = "../../../apps/server/src/persistence/redb_transactions.rs"]
+pub mod application;
+#[path = "../../../apps/server/src/persistence/redb_import.rs"]
+pub mod application_import;
+
 pub mod outbox;
 pub mod project_service;
 pub mod project_validation;

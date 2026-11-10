@@ -15,6 +15,7 @@ export const nativeComponents = [
   "maintenance",
   "outbox",
   "project-store",
+  "db",
 ];
 export const nativeTargets = {
   "linux-x64": "x86_64-unknown-linux-gnu",
