@@ -1,0 +1,61 @@
+{
+  "upstreamCommit": "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
+  "scope": "Direct module translations; test and representation gaps are recorded in docs/port-map.md, not a full-application parity claim.",
+  "sources": [
+    {
+      "path": "packages/shared/src/orchestrationV2DedupedBodies.ts",
+      "blob": "701ae1e8305565487d21cb1b5392e89486c98bc5",
+      "rust": "crates/orchestration/src/deduped_bodies.rs"
+    },
+    {
+      "path": "packages/shared/src/orchestrationV2DedupedBodies.test.ts",
+      "blob": "a0f81bbd4d4d97fe93c891e68780c00a6d1cdf28",
+      "rust": "crates/orchestration/src/deduped_bodies.rs"
+    },
+    {
+      "path": "packages/shared/src/orchestrationV2BoundedSnapshot.ts",
+      "blob": "ad246e38a60df736ab71a273f929f179d885dcc5",
+      "rust": "crates/orchestration/src/bounded_snapshot.rs"
+    },
+    {
+      "path": "packages/shared/src/orchestrationV2BoundedSnapshot.test.ts",
+      "blob": "aafb2d5a1a45f590e6b3ccd037ddc6e0ccf513dd",
+      "rust": "crates/orchestration/src/bounded_snapshot.rs"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/WireProjection.ts",
+      "blob": "c801180dcc0f846138c2b5b6eef040b83c0b2e31",
+      "rust": "crates/orchestration/src/wire_projection.rs"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/WireProjection.test.ts",
+      "blob": "5c42cc1b8fe33524f37691ce79bdd116b1782c24",
+      "rust": "crates/orchestration/tests/wire_projection.rs"
+    },
+    {
+      "path": "packages/shared/src/toolOutput.ts",
+      "blob": "6287c673ef63961e8e48bbf419ac5b84580c6d48",
+      "rust": "crates/orchestration/src/tool_output.rs"
+    },
+    {
+      "path": "packages/shared/src/toolOutput.test.ts",
+      "blob": "453695e397d7cda5dc2bdcdfc13061f9db584567",
+      "rust": "crates/orchestration/src/tool_output.rs"
+    },
+    {
+      "path": "packages/shared/src/htmlRender.ts",
+      "blob": "12af0f39336b2bbbc76253ae071c6e547e65c31d",
+      "rust": "crates/orchestration/src/tool_output.rs"
+    },
+    {
+      "path": "packages/shared/src/mcpApp.ts",
+      "blob": "35a50306423e5247f07254205b9f97e7fe9f6276",
+      "rust": "crates/orchestration/src/tool_output.rs"
+    },
+    {
+      "path": "packages/shared/src/t3McpToolPresentation.ts",
+      "blob": "7a6c2fab91187fda75634a7d241065467b7b607b",
+      "rust": "crates/orchestration/src/tool_output.rs"
+    }
+  ]
+}

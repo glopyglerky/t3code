@@ -43,7 +43,7 @@ fn check_source() -> Result<()> {
             continue;
         }
         if name.starts_with(".repos/") || foreign_code(name) {
-            return Err(format!("retired implementation remains: {name}").into());
+            return Err(format!("non-Rust implementation remains: {name}").into());
         }
         count += 1;
     }
@@ -51,7 +51,7 @@ fn check_source() -> Result<()> {
         return Err("remove obsolete in-checkout reference caches".into());
     }
     println!(
-        "Checked {count} tracked files; no retired implementation languages or reference cache"
+        "Checked {count} tracked files; no non-Rust implementation or reference cache; feature parity is a separate check"
     );
     Ok(())
 }
@@ -143,6 +143,40 @@ fn upstream_readme() -> Result<()> {
     println!("Upstream README matches {commit}, {} bytes", source.len());
     Ok(())
 }
+fn upstream_ports() -> Result<()> {
+    let lock: Value = serde_json::from_slice(&fs::read(root().join("upstream.lock.json"))?)?;
+    let map: Value = serde_json::from_slice(&fs::read(root().join("port-sources.json"))?)?;
+    let commit = map["upstreamCommit"].as_str().ok_or("missing port source commit")?;
+    if commit.len() != 40 || !commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || map["upstreamCommit"] != lock["upstream"]["commit"]
+    {
+        return Err("port source commit must match the immutable upstream reference".into());
+    }
+    let sources = map["sources"].as_array().ok_or("missing source mappings")?;
+    if sources.is_empty() { return Err("empty source mapping".into()); }
+    for source in sources {
+        let path = source["path"].as_str().ok_or("missing source path")?;
+        let rust = source["rust"].as_str().ok_or("missing Rust destination")?;
+        for name in [path, rust] {
+            if name.is_empty() || name.chars().any(char::is_control)
+                || Path::new(name).components().any(|part| !matches!(part, std::path::Component::Normal(_)))
+            {
+                return Err("port mappings must use relative repository paths".into());
+            }
+        }
+        if !rust.ends_with(".rs") || !root().join(rust).is_file() {
+            return Err(format!("missing Rust port destination: {rust}").into());
+        }
+        let expected = source["blob"].as_str().ok_or("missing source blob")?;
+        let actual = String::from_utf8(git(&["rev-parse", &format!("{commit}:{path}")])?)?;
+        if expected != actual.trim() {
+            return Err(format!("upstream source changed for port mapping: {path}").into());
+        }
+    }
+    println!("Verified {} immutable source/test mappings at {commit}; behavioral parity requires tests", sources.len());
+    Ok(())
+}
+
 fn unique_boundary(document: &[u8], marker: &[u8]) -> Result<usize> {
     let positions: Vec<_> = document
         .windows(marker.len())
@@ -275,8 +309,9 @@ fn run() -> Result<()> {
     match env::args().nth(1).as_deref() {
         Some("check-source") => check_source(),
         Some("check-upstream-readme") => upstream_readme(),
+        Some("check-upstream-ports") => upstream_ports(),
         Some("build") => build(),
-        _ => Err("usage: t3code-ls-tools <check-source|check-upstream-readme|build>".into()),
+        _ => Err("usage: t3code-ls-tools <check-source|check-upstream-readme|check-upstream-ports|build>".into()),
     }
 }
 fn main() {

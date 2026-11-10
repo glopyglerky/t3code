@@ -2,6 +2,8 @@
 
 t3code-ls is glopyglerky's native Rust port of [T3 Code](https://github.com/pingdotgg/t3code), in progress. It includes a native application API and command-line client, durable redb storage, Codex sessions and Iroh forwarding. It is **not a complete replacement for the original application**. Web, desktop and mobile user interfaces remain unfinished.
 
+The goal is to port the existing T3 Code source and preserve its behavior, not build a different application from scratch. Lust handles its supported Rust subset; Lustr and BlueFe cover the rest of Rust. Existing source modules, contracts and tests are the reference. [The source-to-port map](docs/port-map.md) records direct translations and their remaining gaps.
+
 ## Usable components
 
 - `t3-code-ls-app`: authenticated native application server and command-line client. It connects project and thread commands to redb, provides durable event cursors, and runs explicitly configured Codex sessions on Unix.
@@ -11,9 +13,9 @@ t3code-ls is glopyglerky's native Rust port of [T3 Code](https://github.com/ping
 - `t3-code-ls-db`: standalone redb events, projections, receipts, outbox and SQLite-export import. It does not automatically migrate an installed T3 database or provide distributed active-active HA.
 - `t3code-ls-tools`: Rust build staging and source/upstream README checks.
 
-The React web app, Node/Effect server and adapters, Electron/SEA/npm distributions, iOS/Android clients, Windows fallback and non-Rust build/test tools were removed. The native API below implements a subset of their behavior with a new protocol. It is not compatible with the retired clients. The KDE capture helper was retired because it depended on embedded JavaScript/QML. Rust-only resource-monitor and Hyprland helper sources remain separate optional crates; their desktop integration and platform execution are unqualified.
+The React web app, Node/Effect server and adapters, Electron/SEA/npm distributions, iOS/Android clients, Windows fallback and non-Rust build/test tools were removed from the current tree in earlier work. Their required functionality is not thereby ported or dropped from scope. The native API below is a temporary qualification host with a different protocol; it is not the target application's contract and is not compatible with the original clients. The absent KDE helper's behavior also remains a porting gap. Rust-only resource-monitor and Hyprland helper sources remain separate optional crates; their desktop integration and platform execution are unqualified.
 
-## Run the native application
+## Run the current native qualification host
 
 The [native API walkthrough](docs/native-api.md) shows a complete project, thread, provider turn, approval, close and archive sequence, including receipt recovery after a lost reply.
 

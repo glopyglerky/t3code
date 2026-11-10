@@ -1,11 +1,17 @@
 # t3code-ls design and divergence
 
-The default tree contains native Rust components and an application API/CLI.
-The former application clients, server adapters and foreign-language tooling
-are retired; the native application's implemented subset does not replace their
-full behavior. Their source is available
+The goal is a direct Rust port of the existing application, with Lust covering
+its supported Rust subset and Lustr/BlueFe covering the rest. The default tree
+contains native Rust components and a temporary qualification API/CLI. Its
+different protocol is not a replacement for the original application's contracts.
+The former clients, server adapters and foreign-language tooling are absent;
+porting their behavior remains required. Their source is available
 in Git history and upstream at the immutable `upstream.lock.json` revision.
 No vendored reference checkout belongs in this product checkout.
+
+New direct translations and their test boundaries are recorded in
+`docs/port-map.md`. A source-language deletion is not a completed port. Unknown
+behavior remains an explicit gap rather than a new product decision.
 
 Core protocol/decision code, redb storage and Iroh transport retain their existing
 contracts. Standalone redb does not substitute for an installed application's

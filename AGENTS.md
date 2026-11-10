@@ -1,5 +1,25 @@
 # t3code-ls
 
+## Port the existing application
+
+This is a behavior-preserving Rust port of the existing T3 Code implementation,
+not a new application built from scratch or a cleanroom replacement. Preserve
+upstream contracts, features, UI behavior, ordering, errors and persistence
+semantics. Port the upstream modules and their tests; record source mappings and
+remaining differences in `docs/port-map.md`. Do not invent a replacement protocol
+and count it as the upstream protocol's port.
+
+Lust compiles its supported Rust subset. Lustr coordinates that path with BlueFe
+for the rest of Rust. Compiler coverage is not a reason to remove features or
+redesign the product to fit a smaller language subset. Qualification must identify
+which compiler path ran, without calling a BlueFe build a native-Lust build.
+
+Previously removed source is a porting gap, not authorization to discard its
+functionality. Web, desktop, mobile and server behavior remain required. The
+existing native API is a temporary implementation/qualification host with a
+different protocol, not the completed application's contract. Do not expand that
+different protocol as a substitute for porting the original.
+
 The default tree contains Rust implementation only. Preserve licenses, provenance,
 passive assets, data fixtures and Git history. Do not restore foreign executable
 code, embed it in Rust strings, or use language-classification overrides.
@@ -7,8 +27,9 @@ code, embed it in Rust strings, or use language-classification overrides.
 The root Cargo workspace contains an authenticated native API/CLI, durable
 project/thread services, Codex sessions, decision/protocol tools, Unix structured
 generation, redb storage and Iroh transport. It is not a complete application.
-Web, Electron, mobile, Node server and Windows provider fallbacks have been
-retired; the native service subset does not replace their full behavior. Never claim full application,
+Web, Electron, mobile, Node server and Windows provider source is absent from
+the current tree; porting their behavior remains required. The native service
+subset does not replace their full behavior. Never claim full application,
 platform or whole-stack memory-safety qualification from component tests.
 
 Build with the pinned qualified Lustr coordinator and produced BlueFe rustc and

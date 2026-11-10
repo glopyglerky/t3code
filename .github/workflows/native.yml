@@ -74,6 +74,7 @@ jobs:
           "$T3_CODE_LS_TOOLCHAIN/bin/lustr" --bluefe-root "$T3_CODE_LS_TOOLCHAIN" test --locked --workspace --all-targets
           "$T3_CODE_LS_TOOLCHAIN/bin/lustr" --bluefe-root "$T3_CODE_LS_TOOLCHAIN" run --locked -p t3code-ls-tools -- check-source
           "$T3_CODE_LS_TOOLCHAIN/bin/lustr" --bluefe-root "$T3_CODE_LS_TOOLCHAIN" run --locked -p t3code-ls-tools -- check-upstream-readme
+          "$T3_CODE_LS_TOOLCHAIN/bin/lustr" --bluefe-root "$T3_CODE_LS_TOOLCHAIN" run --locked -p t3code-ls-tools -- check-upstream-ports
 
       - name: Retain compiler provenance
         if: always()

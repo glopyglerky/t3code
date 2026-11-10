@@ -1,0 +1,17 @@
+[package]
+name = "t3-code-ls-orchestration"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+regex = "=1.13.1"
+ryu-js = "=1.0.2"
+serde = { version = "=1.0.229", features = ["derive", "rc"] }
+serde_json = { version = "=1.0.154", features = ["preserve_order"] }
+t3-code-ls-core = { path = "../core" }
+
+[lints]
+workspace = true
