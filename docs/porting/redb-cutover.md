@@ -1,5 +1,12 @@
 # redb cutover
 
+The native storage crate now resolves the user's `omdb` fork at the immutable
+revision recorded in `database.lock.json` and `Cargo.lock`. `omdb` currently
+keeps the `redb` Cargo package name and version 4.5.0, so existing Rust API and
+on-disk compatibility contracts are unchanged. CI checks the exact Git source,
+including the lockfile, to prevent a silent fallback to crates.io's `redb`.
+Pinning the engine is independent of making it authoritative for the T3 server.
+
 The production server and CLI still use SQLite. The native candidate now includes
 SQLite row import and an injectable `NativeEventSink` composition: events,
 receipts, positions, projects, projection mutations and the application outbox

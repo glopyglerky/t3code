@@ -1,14 +1,19 @@
 {
-  "product": "redb",
+  "product": "omdb",
   "version": "4.5.0",
-  "sourceCommit": "96ce31fe5cafcf735425a02f1781487a4287e2de",
-  "sourceUrl": "https://github.com/cberner/redb/tree/96ce31fe5cafcf735425a02f1781487a4287e2de",
+  "sourceCommit": "b2ff031398b1f0a793a352db7a699575b5d4d3d4",
+  "sourceUrl": "https://github.com/glopyglerky/omdb/tree/b2ff031398b1f0a793a352db7a699575b5d4d3d4",
   "license": "MIT OR Apache-2.0",
   "crate": {
     "name": "redb",
     "version": "4.5.0",
-    "url": "https://static.crates.io/crates/redb/redb-4.5.0.crate",
-    "sha256": "8b317ef681e18f6091efbfab532eaf924a135c492d9d0299d0fbfae07e92a39b"
+    "git": "https://github.com/glopyglerky/omdb",
+    "rev": "b2ff031398b1f0a793a352db7a699575b5d4d3d4"
+  },
+  "upstream": {
+    "repository": "https://github.com/cberner/redb",
+    "sourceCommit": "96ce31fe5cafcf735425a02f1781487a4287e2de",
+    "crateSha256": "8b317ef681e18f6091efbfab532eaf924a135c492d9d0299d0fbfae07e92a39b"
   },
   "concurrencyMode": "MultiWriter",
   "durability": "Immediate",

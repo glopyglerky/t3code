@@ -8,7 +8,9 @@ publish.workspace = true
 
 [dependencies]
 regex = "=1.13.1"
-redb = "=4.5.0"
+# omdb retains redb's package name and on-disk compatibility. Pin the fork to an
+# immutable revision; never silently resolve the upstream crates.io package.
+redb = { version = "=4.5.0", git = "https://github.com/glopyglerky/omdb", rev = "b2ff031398b1f0a793a352db7a699575b5d4d3d4" }
 same-file = "=1.0.6"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"

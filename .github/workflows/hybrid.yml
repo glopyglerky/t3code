@@ -49,7 +49,13 @@ jobs:
           python3 -m unittest discover -s tools -p 'test_ci*.py'
           python3 -m unittest discover -s tools -p test_nightly.py
           python3 -m unittest discover -s tools -p test_plan_porting.py
-          node --test tools/install-toolchain.test.mjs tools/native-packaging.test.mjs tools/fetch-migration-sources.test.mjs tools/hybrid-checks.test.mjs tools/check-acceptance.test.mjs
+          node --test \
+            tools/install-toolchain.test.mjs \
+            tools/native-packaging.test.mjs \
+            tools/fetch-migration-sources.test.mjs \
+            tools/hybrid-checks.test.mjs \
+            tools/check-acceptance.test.mjs \
+            tools/omdb-source.test.mjs
       - name: Plan work against the trusted upstream default branch
         run: python3 tools/plan-porting.py --repo-root "$GITHUB_WORKSPACE" --fetch-default --output "$RUNNER_TEMP/porting-plan.json" --summary "$GITHUB_STEP_SUMMARY"
       - name: Select checks from verified qualification history
