@@ -472,6 +472,11 @@ fn time_parts(bytes: &[u8]) -> Option<(i64, i64, i64, i64)> {
             seconds += (numerator / scale).min(0.999);
         }
     }
+    // SQLite 3.54 accepts hour 24 only at midnight. Check the fraction before
+    // millisecond rounding: 24:00:00.0001 is invalid even though it rounds to zero.
+    if hour == 24 && (minute != 0 || seconds != 0.0) {
+        return None;
+    }
     while bytes.get(end).is_some_and(u8::is_ascii_whitespace) {
         end += 1;
     }

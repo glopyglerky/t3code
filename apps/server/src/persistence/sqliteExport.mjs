@@ -142,7 +142,9 @@ function* searchDeleteWitness(source, limits, expected) {
       if (largest > BigInt(limits.maxRowBytes))
         throw new Error("Search shadow row exceeds maxRowBytes");
       clone.exec(`DELETE FROM ${quote(name)}`);
-      const insert = clone.prepare(
+      // run() also returns lastInsertRowid; FTS shadow IDs can exceed safe JS integers.
+      const insert = statement(
+        clone,
         `INSERT INTO ${quote(name)} (${columns.map(quote).join(",")}) VALUES (${columns.map(() => "?").join(",")})`,
       );
       for (const row of statement(
@@ -189,7 +191,7 @@ function* searchDeleteWitness(source, limits, expected) {
       clone,
       `SELECT id FROM ${messageSearch}_docsize WHERE id > ? ORDER BY id LIMIT 128`,
     );
-    const remove = clone.prepare(`DELETE FROM ${messageSearch} WHERE rowid = ?`);
+    const remove = statement(clone, `DELETE FROM ${messageSearch} WHERE rowid = ?`);
     let after;
     let documents = 0;
     while (true) {
