@@ -20,7 +20,7 @@ concurrency:
 jobs:
   plan:
     name: Select fork checks and porting work
-    runs-on: ubuntu-24.04
+    runs-on: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(vars.CI_RUNNER_ROUTES || '{}')['ubuntu-24.04'] || 'ubuntu-24.04' }}
     timeout-minutes: 5
     permissions:
       contents: read
@@ -92,7 +92,7 @@ jobs:
     name: Affected production adapters
     needs: [plan, native]
     if: needs.plan.outputs.adapters == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(vars.CI_RUNNER_ROUTES || '{}')['ubuntu-24.04'] || 'ubuntu-24.04' }}
     timeout-minutes: 15
     env:
       T3CODE_DEV_SEED: "0"
@@ -139,7 +139,7 @@ jobs:
     name: Rust integration through the application
     needs: [plan, native]
     if: needs.plan.outputs.application == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(vars.CI_RUNNER_ROUTES || '{}')['ubuntu-24.04'] || 'ubuntu-24.04' }}
     timeout-minutes: 20
     env:
       T3CODE_DEV_SEED: "0"
@@ -207,7 +207,7 @@ jobs:
     name: Record verified qualification
     needs: [plan, native, adapters, application]
     if: always()
-    runs-on: ubuntu-24.04
+    runs-on: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(vars.CI_RUNNER_ROUTES || '{}')['ubuntu-24.04'] || 'ubuntu-24.04' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
