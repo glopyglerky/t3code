@@ -86,6 +86,18 @@ export const make = Effect.gen(function* () {
           `,
             );
           }
+          case "run":
+            return yield* sql.withTransaction(
+              Effect.gen(function* () {
+                if (!(yield* exists(query.thread_id))) return { ...empty, owner_exists: false };
+                return payloads(
+                  yield* sql<{ readonly payload_json: string }>`
+            SELECT payload_json FROM orchestration_v2_projection_runs
+            WHERE run_id = ${query.run_id} AND thread_id = ${query.thread_id}
+          `,
+                );
+              }),
+            );
           case "run_message":
             return yield* sql.withTransaction(
               Effect.gen(function* () {

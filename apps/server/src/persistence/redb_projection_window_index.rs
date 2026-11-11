@@ -21,6 +21,9 @@ fn key(catalog: &ApplicationCatalog, name: &str, primary: &[Value]) -> Vec<u8> {
 
 fn compact(name: &str, row: &Map<String, Value>, order: RowOrder) -> Result<Metadata> {
     let mut slim = row.clone();
+    // Search reads the authoritative message, not this bounded metadata. Keeping
+    // the new body column out also preserves existing migration-80 witnesses.
+    slim.remove("search_text");
     if let Some(cell) = row.get("payload_json") {
         let raw = cell
             .get("value")
@@ -484,6 +487,7 @@ mod compact_tests {
         let row=Map::from_iter([
             ("message_id".into(),text_cell("message:compact")),
             ("role".into(),text_cell("user")),
+            ("search_text".into(),text_cell(&"readable-private-body".repeat(10000))),
             ("payload_json".into(),text_cell(&json!({
                 "text":"\u{00a0}/COMPACT\u{feff}","attachments":[],"createdBy":"agent","creationSource":"server",
                 "unrelatedBody":"private-body".repeat(10000)
@@ -501,6 +505,19 @@ mod compact_tests {
         let encoded = text(&compact.row, "payload_json").expect("metadata");
         assert!(encoded.len() < 512);
         assert!(!encoded.contains("private-body"));
+        assert!(!compact.row.contains_key("search_text"));
+        let mut legacy_row = row.clone();
+        legacy_row.remove("search_text");
+        let legacy = super::compact(
+            MESSAGES,
+            &legacy_row,
+            RowOrder {
+                epoch: 0,
+                ordinal: 3,
+            },
+        )
+        .unwrap();
+        assert_eq!(compact.row, legacy.row);
         let parsed: Value = serde_json::from_str(&encoded).expect("valid compact payload");
         assert_eq!(parsed["nativeIdleCompactionMessage"], true);
         assert!(parsed.get("text").is_none());

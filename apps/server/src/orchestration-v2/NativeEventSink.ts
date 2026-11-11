@@ -35,7 +35,7 @@ const receipts = CommandReceiptStore.layerFromApplicationReceipts.pipe(
 export const projects = ProjectStore.layerWithRows.pipe(Layer.provide(NativeProjectRows.layer));
 
 /** Every repository joins one RedbClient. The returned outbox also owns worker wakeups. */
-export const repositories = Layer.mergeAll(
+const repositories = Layer.mergeAll(
   events,
   receipts,
   projects,

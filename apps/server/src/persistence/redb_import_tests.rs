@@ -20,17 +20,27 @@ fn export(
     ids: &[u64],
     payload: &str,
 ) -> (ExportSummary, ApplicationTable, Vec<ApplicationRow>) {
-    let sql = "CREATE TABLE records (id INTEGER PRIMARY KEY, payload TEXT)";
+    export_table(path, ids, payload, "records", "payload")
+}
+
+fn export_table(
+    path: &Path,
+    ids: &[u64],
+    payload: &str,
+    name: &str,
+    value_column: &str,
+) -> (ExportSummary, ApplicationTable, Vec<ApplicationRow>) {
+    let sql = format!("CREATE TABLE {name} (id INTEGER PRIMARY KEY, {value_column} TEXT)");
     let header = json!({"type":"header","format":"t3-code-ls/sqlite-export","version":1,
         "sqliteVersion":"fixture","userVersion":0,"schemaVersion":1,"applicationId":0,
         "tableCount":1,"excludedDerivedTables":[],"sequences":[],"migrations":[],
-        "schema":[{"type":"table","name":"records","tableName":"records","sql":sql}]});
+        "schema":[{"type":"table","name":name,"tableName":name,"sql":sql}]});
     let columns = [
         json!({"name":"id","declaredType":"INTEGER","notNull":false,"defaultSql":null,"primaryKeyOrder":1,"hidden":0}),
-        json!({"name":"payload","declaredType":"TEXT","notNull":false,"defaultSql":null,"primaryKeyOrder":0,"hidden":0}),
+        json!({"name":value_column,"declaredType":"TEXT","notNull":false,"defaultSql":null,"primaryKeyOrder":0,"hidden":0}),
     ];
     let table =
-        json!({"type":"table","name":"records","sql":sql,"columns":columns,"rowCount":ids.len()});
+        json!({"type":"table","name":name,"sql":sql,"columns":columns,"rowCount":ids.len()});
     let definition = table_from_record(&table).unwrap();
     let mut bytes = Vec::new();
     let append = |bytes: &mut Vec<u8>, value: &Value| {
@@ -42,7 +52,7 @@ fn export(
     let mut row_bytes = Vec::new();
     let mut rows = Vec::new();
     for (ordinal, id) in ids.iter().enumerate() {
-        let record = json!({"type":"row","table":"records","ordinal":ordinal,"values":[
+        let record = json!({"type":"row","table":name,"ordinal":ordinal,"values":[
             {"type":"integer","value":id.to_string()}, {"type":"text","value":payload}
         ]});
         append(&mut bytes, &record);
@@ -50,11 +60,44 @@ fn export(
         rows.push(row_from_record(&definition, &record).unwrap());
     }
     let manifest = json!({"type":"manifest","tableCount":1,"rowCount":ids.len(),
-        "tables":[{"name":"records","rowCount":ids.len(),"sha256":hash(&row_bytes)}],"sha256":hash(&bytes)});
+        "tables":[{"name":name,"rowCount":ids.len(),"sha256":hash(&row_bytes)}],"sha256":hash(&bytes)});
     append(&mut bytes, &manifest);
     std::fs::write(path, &bytes).unwrap();
     let summary = validate_sqlite_export(path, ImportLimits::default()).unwrap();
     (summary, definition, rows)
+}
+
+#[tokio::test]
+async fn import_receipt_survives_the_current_reader_floor_and_read_only_reopen() {
+    let fixture = TestFixture::start().await;
+    let store = fixture.initialize().await;
+    let source = fixture.path().with_extension("ndjson");
+    let (summary, _, _) = export_table(
+        &source,
+        &[7],
+        "readable citation",
+        "orchestration_v2_projection_messages",
+        "search_text",
+    );
+    store
+        .import_sqlite_application(&source, ImportLimits::default())
+        .await
+        .unwrap();
+    let catalog = store.db.read(&schema_key()).await.unwrap().unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&catalog).unwrap()["minimum_reader_migration"],
+        json!(81)
+    );
+    assert!(serde_json::from_slice::<ApplicationCatalog>(&catalog).is_err());
+    let receipt = store.application_import().await.unwrap().unwrap();
+    assert_eq!(receipt.summary, summary);
+    assert!(receipt.replayed);
+    store.shutdown().await.unwrap();
+    let before = std::fs::read(fixture.path()).unwrap();
+    let reopened = Store::open_read_only(fixture.path()).await.unwrap();
+    assert_eq!(reopened.application_import().await.unwrap(), Some(receipt));
+    reopened.shutdown().await.unwrap();
+    assert_eq!(std::fs::read(fixture.path()).unwrap(), before);
 }
 
 #[tokio::test]

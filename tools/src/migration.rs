@@ -1,5 +1,5 @@
 //! Migration accounting protects the working application, regardless of language.
-use crate::{Result, output};
+use crate::{output, Result};
 use serde_json::Value;
 use std::{collections::BTreeMap, collections::BTreeSet, fs, path::Path, process::Command};
 
@@ -816,24 +816,20 @@ mod tests {
         );
         // Upstream can remove a source after its Rust replacement already retired
         // the fork's copy. Both records still carry independent provenance.
-        assert!(
-            authorize_upstream_removals(
-                &map,
-                &history,
-                &present,
-                &BTreeSet::from([OLD.to_owned()])
-            )
-            .is_ok()
-        );
-        assert!(
-            authorize_upstream_removals(
-                &json!({"upstream_removals":[removal(), removal()]}),
-                &history,
-                &present,
-                &BTreeSet::new()
-            )
-            .is_err()
-        );
+        assert!(authorize_upstream_removals(
+            &map,
+            &history,
+            &present,
+            &BTreeSet::from([OLD.to_owned()])
+        )
+        .is_ok());
+        assert!(authorize_upstream_removals(
+            &json!({"upstream_removals":[removal(), removal()]}),
+            &history,
+            &present,
+            &BTreeSet::new()
+        )
+        .is_err());
     }
 
     #[test]
@@ -845,15 +841,13 @@ mod tests {
                 (NEXT.into(), files(&[NEW])),
             ],
         );
-        assert!(
-            authorize_upstream_removals(
-                &json!({"upstream_removals":[removal()]}),
-                &history,
-                &BTreeSet::from([NEW.to_owned()]),
-                &BTreeSet::new()
-            )
-            .is_err()
-        );
+        assert!(authorize_upstream_removals(
+            &json!({"upstream_removals":[removal()]}),
+            &history,
+            &BTreeSet::from([NEW.to_owned()]),
+            &BTreeSet::new()
+        )
+        .is_err());
     }
 
     #[test]
@@ -894,15 +888,13 @@ mod tests {
         let mut history = removed_history();
         history.snapshots.push((LATER.into(), files(&[OLD, NEW])));
         let present = BTreeSet::from([NEW.to_owned()]);
-        assert!(
-            authorize_upstream_removals(
-                &json!({"upstream_removals":[removal()]}),
-                &history,
-                &present,
-                &BTreeSet::new()
-            )
-            .is_err()
-        );
+        assert!(authorize_upstream_removals(
+            &json!({"upstream_removals":[removal()]}),
+            &history,
+            &present,
+            &BTreeSet::new()
+        )
+        .is_err());
         let source = json!({"path":OLD,"blob":BLOB,"source_commit":RECOVERY_UPSTREAM});
         assert!(
             upstream_source(&source, LATER, &history, &BTreeSet::from([OLD.to_owned()])).is_err()
@@ -956,12 +948,10 @@ mod tests {
             "platform_routes":[{"targets":TARGETS,"state":"integrated","implementation":"upstream","acceptance_evidence":{}}]
         });
         let mut map = json!({"ports":[accepted, other]});
-        assert!(
-            authorize_retirements(&map, &history)
-                .unwrap_err()
-                .to_string()
-                .contains("unaccepted-owner")
-        );
+        assert!(authorize_retirements(&map, &history)
+            .unwrap_err()
+            .to_string()
+            .contains("unaccepted-owner"));
         map["ports"][1]["state"] = json!("synced");
         map["ports"][1]["platform_routes"] = map["ports"][0]["platform_routes"].clone();
         assert!(authorize_retirements(&map, &history).is_ok());
@@ -995,14 +985,12 @@ mod tests {
     fn missing_recovery_source_cannot_pass_as_a_lower_rust_percentage() {
         let baseline = BTreeMap::from([("apps/web/src/index.tsx".into(), "original".into())]);
         assert!(require_preserved(&baseline, &BTreeSet::new(), &BTreeSet::new()).is_err());
-        assert!(
-            require_preserved(
-                &baseline,
-                &BTreeSet::from(["apps/web/src/index.tsx".into()]),
-                &BTreeSet::new()
-            )
-            .is_ok()
-        );
+        assert!(require_preserved(
+            &baseline,
+            &BTreeSet::from(["apps/web/src/index.tsx".into()]),
+            &BTreeSet::new()
+        )
+        .is_ok());
     }
 
     #[test]
@@ -1106,18 +1094,16 @@ mod tests {
         all_inputs.extend(crate_inputs(&tracked, &["crates/core"]).unwrap());
         assert!(all_inputs.contains(&"crates/core/src/json.rs"));
         assert!(all_inputs.contains(&"crates/core/Cargo.toml"));
-        assert!(
-            evidence(
-                root,
-                &tracked,
-                &port,
-                &route,
-                "linux-x64",
-                "receipt.json",
-                &all_inputs
-            )
-            .is_ok()
-        );
+        assert!(evidence(
+            root,
+            &tracked,
+            &port,
+            &route,
+            "linux-x64",
+            "receipt.json",
+            &all_inputs
+        )
+        .is_ok());
         for changed in [
             "adapter.ts",
             "toolchain.lock.json",
@@ -1134,11 +1120,9 @@ mod tests {
                 &all_inputs,
             )
             .unwrap_err();
-            assert!(
-                error
-                    .to_string()
-                    .contains(&format!("stale or omits {changed}"))
-            );
+            assert!(error
+                .to_string()
+                .contains(&format!("stale or omits {changed}")));
             fs::write(root.join(changed), "qualified source\n").unwrap();
         }
     }

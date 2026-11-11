@@ -143,11 +143,22 @@ export const make = Effect.fn("Omdb.make")(
             });
           }
           const adapter = yield* loadMigrationAdapter;
-          const currentDigest = yield* adapter.snapshotForNativeImport(source).pipe(
+          // A prior build may have imported the unchanged source at an older
+          // schema. Check those exact bytes before current SQL migrations add
+          // columns or timestamps. Native bootstrap validates and upgrades the
+          // candidate separately; neither comparison writes to the source.
+          const sourceDigest = yield* adapter.snapshotForExistingNativeImport(source).pipe(
             Effect.map((snapshot) => snapshot.sha256),
             Effect.scoped,
           );
-          if (currentDigest !== prior.receipt.summary.export_sha256) {
+          const expectedDigest = prior.receipt.summary.export_sha256;
+          const verified =
+            sourceDigest === expectedDigest ||
+            (yield* adapter.snapshotForNativeImport(source).pipe(
+              Effect.map((snapshot) => snapshot.sha256 === expectedDigest),
+              Effect.scoped,
+            ));
+          if (!verified) {
             return yield* new OmdbStartupError({
               path: options.databasePath,
               cause: new Error(
@@ -230,7 +241,7 @@ export const make = Effect.fn("Omdb.make")(
     ),
 );
 
-export const layerFromPath = (databasePath: string, executable: string) =>
+const layerFromPath = (databasePath: string, executable: string) =>
   Layer.unwrap(
     Effect.gen(function* () {
       const { database, client } = yield* make({ databasePath, executable });

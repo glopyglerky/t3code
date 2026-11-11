@@ -4,8 +4,9 @@
 Usage: python3 tools/check-lust.py --source /absolute/path/to/lust-lang
 
 The checkout must match lust-toolchain.json. Cargo builds the compiler; Lust
-itself checks, tests and builds our core. There is no --rustc or --release
-fallback. Iroh remains Cargo-built. A JSON receipt is
+itself checks, tests and builds our core. Explicit --allow-unsupported-fallback
+records unsupported core coverage only after pinned stock Rust checks that source;
+it never turns a Lust runtime/parity failure into success. Iroh remains Cargo-built. A JSON receipt is
 written on both success and failure, defaulting to target/lust-proof.json.
 """
 from __future__ import annotations
@@ -22,6 +23,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+
+from pinned_rust import pinned_stock_environment
 
 ROOT = Path(__file__).resolve().parents[1]
 REPO = ROOT
@@ -63,13 +66,57 @@ def verify_source(source: Path, revision: str) -> None:
         raise RuntimeError("The pinned Lust checkout has local changes; use a clean checkout")
 
 
+def unsupported_core_diagnostics(step: dict) -> list[dict] | None:
+    """Only the observed, structured frontend limitations can choose stock Rust.
+
+    Crashes, missing dependencies, compiler integrity errors and runtime/parity
+    failures remain hard failures. This is not a native-Lust passing receipt.
+    """
+    if (step.get("name") != "check core with Lust" or step.get("returncode") != 1
+            or step.get("stderr", "").strip()):
+        return None
+    try:
+        records = [json.loads(line) for line in step["stdout"].splitlines() if line.strip()]
+    except (ValueError, KeyError):
+        return None
+    if not records or any(not isinstance(record, dict)
+                          or record.get("kind") != "diagnostic"
+                          or record.get("severity") != "error"
+                          or record.get("code") not in {"L0104", "L0610"}
+                          for record in records):
+        return None
+    return records
+
+
+def verify_stock_fallback(env: dict[str, str], receipt: dict, diagnostics: list[dict]) -> None:
+    env, _, channel = pinned_stock_environment(ROOT, env)
+    identity = run([env["RUSTC"], "-vV"], cwd=ROOT, env=env, receipt=receipt,
+                   name="verify pinned stock compiler identity").stdout.strip()
+    if f"release: {channel}" not in identity.splitlines():
+        raise RuntimeError("Stock fallback compiler differs from rust-toolchain.toml")
+    run([env["CARGO"], "check", "--locked", "-p", "t3-code-ls-core",
+         "--all-targets"], cwd=ROOT, env=env, receipt=receipt,
+        name="verify unsupported Lust input with pinned stock Rust")
+    receipt["fallback"] = {
+        "route": "pinned-stock-rustc", "package": "t3-code-ls-core", "release": channel,
+        "compiler_identity": identity, "compiler_sha256": sha256(Path(env["RUSTC"])),
+        "diagnostics": diagnostics,
+    }
+    receipt["artifacts"] = []
+
+
 def source_hashes() -> dict[str, str]:
     files = list((ROOT / "crates/core").rglob("*.rs"))
     files += list((ROOT / "tools").glob("check-*.mjs"))
     files += list((ROOT / "tools").glob("*-tsconfig.json"))
-    files += [ROOT / "Cargo.toml", ROOT / "Cargo.lock", ROOT / "crates/core/Cargo.toml",
+    files += [ROOT / "Cargo.toml", ROOT / "Cargo.lock", ROOT / "rust-toolchain.toml", ROOT / "crates/core/Cargo.toml",
+              REPO / "apps/server/src/guest/guest_uploads.rs",
+              REPO / "apps/server/src/provider/provider_update_verification.rs",
               ROOT / "tools/upstream-source.mjs",
               ROOT / "tools/install-server-tests.mjs",
+              ROOT / "tools/server-test-runtime-identity.mjs",
+              ROOT / "tools/install-toolchain.mjs",
+              ROOT / "tools/pinned_rust.py",
               ROOT / "tools/server-test-runtime/package.json",
               ROOT / "tools/server-test-runtime/package-lock.json",
               ROOT / "upstream.lock.json", Path(__file__).resolve(), PIN_FILE]
@@ -174,6 +221,8 @@ def main() -> int:
     parser.add_argument("--artifacts", type=Path,
                         help="save the verified standalone Lust executables here on success")
     parser.add_argument("--toolchain", type=Path, help="retained packaged compiler directory")
+    parser.add_argument("--allow-unsupported-fallback", action="store_true",
+                        help="record structured unsupported core coverage and verify pinned rustc instead")
     args = parser.parse_args()
     source = args.source.resolve() if args.source else None
     receipt = {"schema": 1, "status": "failed", "steps": [],
@@ -229,9 +278,22 @@ def main() -> int:
             # This pinned compiler sets --lib's target name to the package
             # argument without Cargo's hyphen-to-underscore normalization.
             # Passing the actual Cargo lib target selects the unchanged core.
-            run([str(lust), "check", "crates/core/src/lib.rs", "--manifest-path",
-                 "crates/core/Cargo.toml", "--lib", "--package", "t3_code_ls_core", "--json"],
-                cwd=ROOT, env=env, receipt=receipt, name="check core with Lust")
+            try:
+                run([str(lust), "check", "crates/core/src/lib.rs", "--manifest-path",
+                     "crates/core/Cargo.toml", "--lib", "--package", "t3_code_ls_core", "--json"],
+                    cwd=ROOT, env=env, receipt=receipt, name="check core with Lust")
+            except RuntimeError:
+                diagnostics = unsupported_core_diagnostics(receipt["steps"][-1])
+                if not args.allow_unsupported_fallback or diagnostics is None:
+                    raise
+                verify_stock_fallback(env, receipt, diagnostics)
+                if not args.toolchain:
+                    verify_source(source, pin["revision"])
+                if source_hashes() != receipt["inputs"]:
+                    raise RuntimeError("Inputs changed during compiler fallback verification")
+                receipt["status"] = "unsupported"
+                print("Pinned Lust does not cover the current core crate; pinned stock rustc verified it. No native-Lust application artifacts are accepted.")
+                return 0
             # Lust's test harness rejects file modules. Execute each original
             # module containing inline unit tests, without rewriting the source.
             test_files = [path for path in sorted((ROOT / "crates/core/src").rglob("*.rs"))

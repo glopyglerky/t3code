@@ -205,7 +205,7 @@ const layerProjectServiceDependencies = Layer.mergeAll(
   Layer.provideMerge(layerMetadata),
   Layer.provideMerge(SqlitePersistence.layerMemory),
   Layer.provideMerge(ServerSettings.layerTest()),
-  Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "project-service-race-" })),
+  Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "project-service-race-" })),
   Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
 );
 

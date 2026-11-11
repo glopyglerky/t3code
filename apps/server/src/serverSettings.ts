@@ -667,7 +667,7 @@ function foldLegacyProjectSettings(
   };
 }
 
-export const makeWithPersistenceReads = Effect.gen(function* () {
+const makeWithPersistenceReads = Effect.gen(function* () {
   const { settingsPath } = yield* ServerConfig.ServerConfig;
   const fs = yield* FileSystem.FileSystem;
   const pathService = yield* Path.Path;

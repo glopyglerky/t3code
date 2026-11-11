@@ -263,18 +263,64 @@ export function flagsForSysroot(
 ) {
   const flags =
     encoded !== undefined
-      ? encoded.split("\x1f").filter(Boolean)
+      ? encoded === ""
+        ? []
+        : encoded.split("\x1f")
       : (plain ?? "").split(/\s+/).filter(Boolean);
   let selected = false;
   for (let index = 0; index < flags.length; index++) {
     const flag = flags[index];
     if (flag === "--sysroot" || flag.startsWith("--sysroot=")) {
       const value = flag === "--sysroot" ? flags[++index] : flag.slice("--sysroot=".length);
-      assert(!selected && value === root, "Conflicting or repeated explicit sysroot selection");
+      assert(
+        !selected && value && samePath(value, root),
+        "Conflicting or repeated explicit sysroot selection",
+      );
       selected = true;
     }
   }
   return (selected ? flags : [...flags, "--sysroot", root]).join("\x1f");
+}
+
+function samePath(left, right) {
+  const canonical = (value) =>
+    NodeFS.existsSync(value) ? NodeFS.realpathSync(value) : NodePath.resolve(value);
+  return canonical(left) === canonical(right);
+}
+
+export function stockRustEnvironment(env, { tools, sysroot, release, target }) {
+  assert(/^\d+\.\d+\.\d+$/.test(release), "Stock Rust requires an exact pinned release");
+  assert(
+    (env.T3_CODE_LS_COMPILER ?? "rustc") === "rustc",
+    "Stock Rust conflicts with the explicit compiler route",
+  );
+  for (const name of ["T3_CODE_LS_TOOLCHAIN", "T3_CODE_LS_SYSROOT"])
+    assert(env[name] === undefined, `${name} conflicts with the pinned stock Rust route`);
+  for (const name of [
+    "RUSTC_WRAPPER",
+    "RUSTC_WORKSPACE_WRAPPER",
+    "CARGO_BUILD_RUSTC_WRAPPER",
+    "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
+  ])
+    assert(!env[name], `${name} conflicts with the verified compiler route`);
+  for (const [name, selected] of Object.entries(tools))
+    assert(
+      !env[name] || samePath(env[name], selected),
+      `${name} conflicts with the pinned stock Rust route`,
+    );
+  assert(sysroot, "The pinned compiler did not report its sysroot");
+  assert(
+    typeof target === "string" && target.length > 0,
+    "The selected Rust target or compiler host is required",
+  );
+  // Validate explicit flags without synthesizing an encoded value that masks
+  // Cargo's per-target flags. The compiler supplies its own matched default.
+  const targetName = target.endsWith(".json") ? NodePath.basename(target, ".json") : target;
+  const targetFlags = `CARGO_TARGET_${targetName.toUpperCase().replaceAll("-", "_")}_RUSTFLAGS`;
+  const plain = env.RUSTFLAGS ?? env[targetFlags] ?? env.CARGO_BUILD_RUSTFLAGS ?? "";
+  const encoded = env.CARGO_ENCODED_RUSTFLAGS ?? plain.split(/\s+/).filter(Boolean).join("\x1f");
+  flagsForSysroot(sysroot, encoded, "");
+  return { ...env, ...tools, RUSTUP_TOOLCHAIN: release };
 }
 
 function shellQuote(value) {

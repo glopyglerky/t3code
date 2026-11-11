@@ -1,0 +1,119 @@
+name: omdb target lifecycle acceptance
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  database:
+    name: omdb / ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x64
+            runner: ubuntu-24.04
+            architecture: x64
+            rust_target: x86_64-unknown-linux-gnu
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+            architecture: arm64
+            rust_target: aarch64-unknown-linux-gnu
+          - target: darwin-x64
+            runner: macos-15-intel
+            architecture: x64
+            rust_target: x86_64-apple-darwin
+          - target: darwin-arm64
+            runner: macos-15
+            architecture: arm64
+            rust_target: aarch64-apple-darwin
+          - target: win32-x64
+            runner: windows-2025
+            architecture: x64
+            rust_target: x86_64-pc-windows-msvc
+          - target: win32-arm64
+            runner: windows-11-arm
+            architecture: arm64
+            rust_target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      T3_CODE_LS_COMPILER: rustc
+      T3_CODE_LS_NATIVE_COMPONENTS: db
+      T3_CODE_LS_NATIVE_TARGET: ${{ matrix.target }}
+      GIT_TERMINAL_PROMPT: "0"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 26.12.1
+          architecture: ${{ matrix.architecture }}
+      - name: Select owned output paths
+        run: |
+          node --input-type=module -e '
+            import fs from "node:fs";
+            import path from "node:path";
+            for (const [name, leaf] of Object.entries({CARGO_TARGET_DIR:"omdb-cargo", T3_CODE_LS_TEST_RUNTIME:"omdb-runtime", T3_CODE_LS_TEST_TMPDIR:"omdb-proof"})) {
+              const value = path.join(process.env.RUNNER_TEMP, leaf);
+              fs.mkdirSync(value, {recursive:true});
+              fs.appendFileSync(process.env.GITHUB_ENV, `${name}=${value}\n`);
+            }
+          '
+      - name: Install the pinned native Rust target
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
+        with:
+          toolchain: 1.99.1-${{ matrix.rust_target }}
+      - name: Select the actual host triple for pinned compiler lookup
+        run: rustup set default-host '${{ matrix.rust_target }}'
+      - name: Fetch the immutable upstream oracle
+        run: |
+          upstream_commit="$(node -p 'JSON.parse(require("node:fs").readFileSync("upstream.lock.json", "utf8")).upstream.commit')"
+          [[ "$upstream_commit" =~ ^[0-9a-f]{40}$ ]]
+          git fetch --no-tags --depth=1 https://github.com/pingdotgg/t3code.git "$upstream_commit"
+      - name: Install locked application-adapter dependencies
+        run: node tools/install-server-tests.mjs
+      - name: Build the native database candidate
+        run: node tools/build-native.mjs "$RUNNER_TEMP/omdb-candidate"
+      - name: Execute actual target database acceptance
+        run: node tools/check-database-platform.mjs "$RUNNER_TEMP/omdb-candidate" "$RUNNER_TEMP/omdb-proof"
+      - name: Qualify default package layouts before exporting the bundle
+        run: node tools/check-database-package.mjs "$RUNNER_TEMP/omdb-candidate" "$RUNNER_TEMP/omdb-proof/candidate-package.json"
+      - name: Archive accepted binaries without losing Unix executable modes
+        working-directory: ${{ runner.temp }}
+        run: |
+          tar -cf 'omdb-native-${{ matrix.target }}.tar' -C omdb-candidate .
+          mkdir omdb-extracted
+          tar -xf 'omdb-native-${{ matrix.target }}.tar' -C omdb-extracted
+      - name: Consume the accepted bundle through the ordinary build hook
+        env:
+          T3_CODE_LS_NATIVE_DIR: ${{ runner.temp }}/omdb-extracted
+        run: node tools/build-native.mjs "$RUNNER_TEMP/omdb-packaged"
+      - name: Execute default database selection from CLI and desktop package layouts
+        run: node tools/check-database-package.mjs "$RUNNER_TEMP/omdb-packaged" "$RUNNER_TEMP/omdb-proof/package.json"
+      - name: Retain accepted target database bundle
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: omdb-native-${{ matrix.target }}
+          path: ${{ runner.temp }}/omdb-native-${{ matrix.target }}.tar
+          if-no-files-found: error
+          retention-days: 14
+      - name: Retain target execution evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: omdb-proof-${{ matrix.target }}
+          path: ${{ runner.temp }}/omdb-proof/*.json
+          if-no-files-found: warn
+          retention-days: 14

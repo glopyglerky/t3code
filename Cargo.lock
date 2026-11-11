@@ -2881,6 +2881,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "unicode-segmentation",
+ "url",
 ]
 
 [[package]]

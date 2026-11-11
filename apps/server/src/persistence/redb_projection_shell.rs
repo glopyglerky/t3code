@@ -290,20 +290,7 @@ impl ThreadData {
     async fn silent_runs(&self, session: &mut Session) -> Result<BTreeSet<String>> {
         let mut silent = BTreeSet::new();
         for run in &self.runs {
-            if run.col("status") == Some("failed") {
-                continue;
-            }
-            let Some(message) = run.pstr("userMessageId") else {
-                continue;
-            };
-            let prompt = point(session, MESSAGES, message).await?;
-            if prompt.is_some_and(|row| row.flag("nativeIdleCompactionMessage"))
-                && !self.items.iter().any(|item| {
-                    item.col("run_id") == run.col("run_id")
-                        && item.col("type") == Some("compaction")
-                        && item.col("status") == Some("failed")
-                })
-            {
+            if silent_run(session, run, &self.items).await? {
                 silent.insert(run.id(RUNS)?);
             }
         }
@@ -366,6 +353,85 @@ impl ThreadData {
             || thread.flag("nativeHasPullRequestWatch")
     }
 }
+
+async fn idle_compaction_run(session: &mut Session, run: &Meta) -> Result<bool> {
+    if run.col("status") == Some("failed") {
+        return Ok(false);
+    }
+    let Some(message) = run.pstr("userMessageId") else {
+        return Ok(false);
+    };
+    Ok(point(session, MESSAGES, message)
+        .await?
+        .is_some_and(|row| row.flag("nativeIdleCompactionMessage")))
+}
+
+fn failed_compaction(run: &Meta, items: &[Meta]) -> bool {
+    items.iter().any(|item| {
+        item.col("thread_id") == run.col("thread_id")
+            && item.col("run_id") == run.col("run_id")
+            && item.col("type") == Some("compaction")
+            && item.col("status") == Some("failed")
+    })
+}
+
+async fn silent_run(session: &mut Session, run: &Meta, items: &[Meta]) -> Result<bool> {
+    Ok(idle_compaction_run(session, run).await? && !failed_compaction(run, items))
+}
+
+/// History windows retain the same newest visible run that the shell presents.
+pub(super) async fn presented_run_id(
+    session: &mut Session,
+    thread: &str,
+) -> Result<Option<String>> {
+    let mut runs = related(session, RUNS, "thread_id", thread).await?;
+    sort_runs(&mut runs)?;
+    for run in runs {
+        if run.col("status") == Some("queued") && one(run.p("queueHeld")) {
+            continue;
+        }
+        if !idle_compaction_run(session, &run).await? {
+            return run.id(RUNS).map(Some);
+        }
+        let items = related(session, ITEMS, "run_id", &run.id(RUNS)?).await?;
+        if failed_compaction(&run, &items) {
+            return run.id(RUNS).map(Some);
+        }
+    }
+    Ok(None)
+}
+
+async fn background_wake(session: &mut Session, run: Option<&Meta>) -> Result<bool> {
+    let Some(run) = run else {
+        return Ok(false);
+    };
+    let Some(message_id) = run.pstr("userMessageId") else {
+        return Ok(false);
+    };
+    let Some(message) = point(session, MESSAGES, message_id).await? else {
+        return Ok(false);
+    };
+    // Only selected prompts need their notification payload. Existing compact
+    // read indexes remain usable without a rebuild when this field is added.
+    let payload: Value = serde_json::from_str(&full(session, MESSAGES, &message).await?)
+        .map_err(|_| Error::IncompatibleStore)?;
+    let notification = &payload["notification"];
+    let source = &notification["source"];
+    if !matches!(
+        source["kind"].as_str(),
+        Some("background_task" | "background_command" | "command" | "monitor")
+    ) || !source["work"].is_null()
+        || notification["outcome"] != "updated"
+        || !payload["delegatedCompletion"].is_null()
+    {
+        return Ok(false);
+    }
+    Ok(!related(session, MESSAGES, "run_id", &run.id(RUNS)?)
+        .await?
+        .iter()
+        .any(|message| message.pstr("createdBy") == Some("user")))
+}
+
 fn active(status: Option<&str>, waiting: bool) -> bool {
     matches!(status, Some("preparing" | "starting" | "running"))
         || (waiting && status == Some("waiting"))
@@ -516,12 +582,14 @@ async fn shell_thread(session: &mut Session, thread: &Meta) -> Result<Value> {
                 .unwrap_or_else(|| opt_col(Some(run), "requested_at"))
         })
         .unwrap_or(Value::Null);
+    let presented_background_wake = background_wake(session, presented).await?;
+    let blocked_background_wake = background_wake(session, blocked).await?;
     Ok(
         json!({"thread_id":id,"payload_json":full(session,THREADS,thread).await?,"forked_from_run_source_thread_id":source,
-        "latest_run_id":opt_col(presented,"run_id"),"latest_run_status":opt_col(presented,"status"),"latest_run_requested_at":opt_col(presented,"requested_at"),"latest_run_started_at":opt_p(presented,"startedAt"),"latest_run_completed_at":opt_col(presented,"completed_at"),"latest_run_stop_requested":u8::from(stop_requested(&data,presented)),
+        "latest_run_id":opt_col(presented,"run_id"),"latest_run_status":opt_col(presented,"status"),"latest_run_requested_at":opt_col(presented,"requested_at"),"latest_run_started_at":opt_p(presented,"startedAt"),"latest_run_completed_at":opt_col(presented,"completed_at"),"latest_run_stop_requested":u8::from(stop_requested(&data,presented)),"latest_run_background_wake":u8::from(presented_background_wake),
         "active_run_id":opt_col(active_run,"run_id"),"active_run_status":opt_col(active_run,"status"),"activity_run_status":opt_col(activity,"status"),"activity_run_started_at":activity_started,"last_error":last_error,
         "terminal_failure_payload_json":optional_full(session,ITEMS,failure(&data,presented.filter(|run|run.col("status")==Some("failed")))?).await?,
-        "blocking_run_id":opt_col(blocked,"run_id"),"blocking_run_requested_at":opt_col(blocked,"requested_at"),"blocking_run_started_at":opt_p(blocked,"startedAt"),"blocking_run_completed_at":opt_col(blocked,"completed_at"),"blocking_run_stop_requested":u8::from(stop_requested(&data,blocked)),"blocking_failure_payload_json":optional_full(session,ITEMS,failure(&data,blocked)?).await?,
+        "blocking_run_id":opt_col(blocked,"run_id"),"blocking_run_requested_at":opt_col(blocked,"requested_at"),"blocking_run_started_at":opt_p(blocked,"startedAt"),"blocking_run_completed_at":opt_col(blocked,"completed_at"),"blocking_run_stop_requested":u8::from(stop_requested(&data,blocked)),"blocking_run_background_wake":u8::from(blocked_background_wake),"blocking_failure_payload_json":optional_full(session,ITEMS,failure(&data,blocked)?).await?,
         "pending_request_payload_json":optional_full(session,REQUESTS,data.pending_request()).await?,"pending_secret_request_payload_json":optional_full(session,ITEMS,secret).await?,"pending_link_request_payload_json":optional_full(session,ITEMS,data.pending_link()).await?,
         "latest_user_message_at":opt_col(data.latest_message(false),"updated_at"),"latest_user_authored_message_at":opt_col(data.latest_message(true),"updated_at"),"has_actionable_proposed_plan":u8::from(data.plans.iter().any(|row|row.col("kind")==Some("proposed_plan")&&row.col("status")==Some("active")))}),
     )
@@ -675,7 +743,7 @@ async fn query(session: &mut Session, input: ProjectionShellQuery) -> Result<Val
         ProjectionShellQuery::RemoteTasks{}=>{Ok(json!(selected(session,SUBAGENTS,None).await?.into_iter().filter(|row|row.col("origin")==Some("app_owned")&&row.col("child_thread_id").is_none()&&row.flag("nativeOpenRemoteDelegatedTask")).map(|row|json!({"thread_id":row.col("thread_id"),"subagent_id":row.col("subagent_id")})).collect::<Vec<_>>()))}
         ProjectionShellQuery::ThreadsWithPullRequests{thread_id}=>{let mut result=Vec::new();for row in threads(session,thread_id.as_deref(),&ShellOptions{location:Some("active".into()),..Default::default()}).await?{if row.flag("nativeHasPullRequests"){result.push(json!({"payload_json":full(session,THREADS,&row).await?}));}}Ok(json!(result))}
         ProjectionShellQuery::Worktrees{include_archived}=>{let mut rows=threads(session,None,&ShellOptions{location:if include_archived{None}else{Some("active".into())},..Default::default()}).await?;rows.sort_by_key(|row|row.order);Ok(json!(rows.into_iter().filter_map(|row|row.pstr("worktreePath").map(|path|json!({"thread_id":row.col("thread_id"),"worktree_path":path}))).collect::<Vec<_>>()))}
-        ProjectionShellQuery::PullRequestThreads{thread_id,unsettled_only}=>{let options=ShellOptions{location:if thread_id.is_none(){Some("active".into())}else{None},unsettled_only:Some(unsettled_only),..Default::default()};let mut result=Vec::new();for row in threads(session,thread_id.as_deref(),&options).await?{result.push(json!({"payload_json":full(session,THREADS,&row).await?}));}Ok(json!(result))}
+        ProjectionShellQuery::PullRequestThreads{thread_id,unsettled_only}=>{let options=ShellOptions{unsettled_only:Some(unsettled_only),..Default::default()};let mut result=Vec::new();for row in threads(session,thread_id.as_deref(),&options).await?{if thread_id.is_none() && row.row.get("archived_at") != Some(&json!({"type":"null"})){continue;}result.push(json!({"payload_json":full(session,THREADS,&row).await?}));}Ok(json!(result))}
         ProjectionShellQuery::ActiveSubagents{}=>{let mut rows=threads(session,None,&ShellOptions{location:Some("active".into()),..Default::default()}).await?;rows.sort_by_key(|row|row.order);Ok(json!(rows.into_iter().filter(|row|row.p("lineage").get("relationshipToParent").and_then(Value::as_str)==Some("subagent")).map(|row|json!({"thread_id":row.col("thread_id")})).collect::<Vec<_>>()))}
         ProjectionShellQuery::CountThreads{}=>{
             let all=read_index::count_equal(session,THREADS,"all",&Value::Null).await?;

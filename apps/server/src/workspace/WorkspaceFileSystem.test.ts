@@ -279,16 +279,69 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
         const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
         const config = yield* ServerConfig.ServerConfig;
         const path = yield* Path.Path;
+        const fs = yield* FileSystem.FileSystem;
         const cwd = yield* makeTempDir;
         yield* writeTextFile(config.secretsDir, "example.bin", "example\n");
-        yield* writeTextFile(config.stateDir, "statev2.sqlite", "example\n");
+        const databaseFiles = [
+          "statev2.sqlite",
+          "statev2.omdb",
+          "statev2.omdb.precompact-test.omdb",
+        ];
+        for (const file of databaseFiles) {
+          yield* writeTextFile(config.stateDir, file, "example\n");
+        }
+        if (symlinksSupported) {
+          yield* fs.symlink(
+            path.join(config.stateDir, "statev2.omdb"),
+            path.join(config.stateDir, "state-alias"),
+          );
+        }
 
         for (const input of [
           { cwd, relativePath: path.join(config.secretsDir, "example.bin") },
-          { cwd: config.stateDir, relativePath: "statev2.sqlite" },
+          ...databaseFiles.map((relativePath) => ({ cwd: config.stateDir, relativePath })),
+          ...(symlinksSupported ? [{ cwd: config.stateDir, relativePath: "state-alias" }] : []),
         ]) {
           const error = yield* workspaceFileSystem.readFile(input).pipe(Effect.flip);
           expect(error).toBeInstanceOf(WorkspacePaths.WorkspacePathOutsideRootError);
+        }
+
+        const customDatabase = path.join(cwd, "application-data");
+        let configuredDatabase = customDatabase;
+        const customFiles = [customDatabase, `${customDatabase}.precompact-test.omdb`];
+        for (const file of customFiles) {
+          yield* fs.writeFileString(file, "private application data\n");
+        }
+        if (symlinksSupported) {
+          const configuredDirectory = yield* makeTempDir;
+          const directoryAlias = path.join(cwd, "configured-state");
+          yield* fs.symlink(configuredDirectory, directoryAlias);
+          yield* fs.symlink(customDatabase, path.join(configuredDirectory, "custom-alias"));
+          configuredDatabase = path.join(directoryAlias, "custom-alias");
+          const configuredBackup = `${configuredDatabase}.precompact-test.omdb`;
+          yield* fs.writeFileString(configuredBackup, "private application backup\n");
+          const backupAlias = path.join(cwd, "backup-alias");
+          yield* fs.symlink(configuredBackup, backupAlias);
+          customFiles.push(configuredDatabase, configuredBackup, backupAlias);
+        }
+        const customFileSystem = yield* WorkspaceFileSystem.make.pipe(
+          Effect.provideService(ServerConfig.ServerConfig, {
+            ...config,
+            dbPath: configuredDatabase,
+          }),
+          Effect.provide(layerKnownWorkspacesTest),
+        );
+        for (const relativePath of customFiles) {
+          const error = yield* customFileSystem.readFile({ cwd, relativePath }).pipe(Effect.flip);
+          expect(error).toBeInstanceOf(WorkspacePaths.WorkspacePathOutsideRootError);
+        }
+        for (const relativePath of [
+          "example.omdb",
+          "application-data-other.precompact-test.omdb",
+        ]) {
+          yield* writeTextFile(cwd, relativePath, "workspace data\n");
+          const ordinaryFile = yield* customFileSystem.readFile({ cwd, relativePath });
+          expect(ordinaryFile.contents).toBe("workspace data\n");
         }
       }),
     );

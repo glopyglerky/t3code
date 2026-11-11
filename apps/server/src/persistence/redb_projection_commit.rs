@@ -548,6 +548,7 @@ const SPECS: &[TableSpec] = &[
             ("created_at", T),
             ("updated_at", T),
             ("payload_json", T),
+            ("search_text", NT),
         ],
         fields: &[
             ("message_id", P("id")),
@@ -1437,6 +1438,11 @@ async fn upsert_projection(
             )),
         };
         row.insert((*column).into(), value);
+    }
+    if name == MESSAGES {
+        let readable =
+            crate::application_search::readable_search_text(payload_string(payload, "text")?);
+        row.insert("search_text".into(), nullable_cell(readable.as_deref()));
     }
     if name == SUBAGENTS {
         let state = payload

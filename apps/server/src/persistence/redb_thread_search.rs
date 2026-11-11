@@ -18,8 +18,11 @@ use crate::{Error, Result, Store, store_key};
 
 #[path = "redb_search_positions.rs"]
 mod position_codec;
+#[path = "redb_readable_search_text.rs"]
+mod readable;
 #[path = "redb_search_unicode.rs"]
 mod unicode;
+pub(crate) use readable::readable_search_text;
 
 const THREADS: &str = "orchestration_v2_projection_threads";
 const MESSAGES: &str = "orchestration_v2_projection_messages";
@@ -323,7 +326,7 @@ fn posting_keys(catalog: &ApplicationCatalog, posting: &Posting) -> Result<[Vec<
     ])
 }
 
-async fn has_index(tx: &mut Transaction, catalog: &ApplicationCatalog) -> Result<bool> {
+pub(crate) async fn has_index(tx: &mut Transaction, catalog: &ApplicationCatalog) -> Result<bool> {
     let Some(header) = tx.get(&metadata(catalog, "header")).await? else {
         // New, empty native databases have the same lexical index as a modern SQLite install.
         return Ok(true);
@@ -390,6 +393,20 @@ fn sql_text(value: &Value) -> Option<String> {
         Value::Bool(value) => Some(i64::from(*value).to_string()),
         value => Some(value.to_string()),
     }
+}
+pub(crate) fn message_text(row: &Map<String, Value>, payload: &Value) -> Result<Value> {
+    // Missing is only used while migration 81 reads its old, fenced row.
+    let readable = if row.contains_key("search_text") {
+        nullable(row, "search_text")?
+    } else {
+        None
+    };
+    Ok(readable
+        .map(Value::String)
+        .unwrap_or_else(|| extracted(payload.get("text"))))
+}
+fn indexed_text(row: &Map<String, Value>, payload: &Value) -> Result<Option<String>> {
+    Ok(sql_text(&message_text(row, payload)?).map(|text| text.replace(['’', '‘'], "'")))
 }
 fn is_one(value: Option<&Value>) -> bool {
     value == Some(&Value::Bool(true)) || value.and_then(Value::as_f64) == Some(1.0)
@@ -483,10 +500,7 @@ pub(crate) async fn replace_message(
         let new_payload = payload(new)?;
         if old_streaming == new_streaming
             && text(old, "role")? == text(new, "role")?
-            && sql_is(
-                extracted(old_payload.get("text")),
-                extracted(new_payload.get("text")),
-            )
+            && indexed_text(old, &old_payload)? == indexed_text(new, &new_payload)?
             && sql_is(
                 extracted(old_payload.get("createdBy")),
                 extracted(new_payload.get("createdBy")),
@@ -501,12 +515,12 @@ pub(crate) async fn replace_message(
     if let Some(new) = new {
         if indexable(tx, catalog, new).await? {
             let value = payload(new)?;
-            if let Some(text) = sql_text(&extracted(value.get("text"))) {
+            if !extracted(value.get("text")).is_null() {
                 // Even an insertion with fewer than three folded characters
                 // owns a generation. Its later DELETE must not remove older
                 // postings merely because its own vocabulary is empty.
                 insert = true;
-                let text = text.replace(['’', '‘'], "'");
+                let text = indexed_text(new, &value)?.ok_or(Error::IncompatibleStore)?;
                 for (offset, term) in unicode::trigram_iter(&text).enumerate() {
                     add_position(postings.entry(term).or_default(), offset as u64)?;
                 }
@@ -1092,7 +1106,7 @@ async fn message_hits(
         {
             continue;
         }
-        let raw_text = extracted(value.get("text"));
+        let raw_text = message_text(&row, &value)?;
         let text = sql_text(&raw_text).unwrap_or_default();
         let lower = text.to_ascii_lowercase();
         if substrings.iter().any(|token| !lower.contains(token))

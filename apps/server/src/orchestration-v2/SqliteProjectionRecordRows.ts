@@ -15,6 +15,9 @@ const ids = (values: ReadonlyArray<unknown>) => JSON.stringify(values);
 /** The original selected-record SQL, isolated from the shared decoding pipeline. */
 export const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
+  // An id filter reads by primary key instead of scanning every row of the thread.
+  const threadColumn = (selectedIds: ReadonlyArray<unknown> | undefined, column = "thread_id") =>
+    sql.literal(selectedIds === undefined ? column : `+${column}`);
   return {
     read: (query) =>
       sql
@@ -38,18 +41,21 @@ export const make = Effect.gen(function* () {
                 case "runs":
                   selected =
                     yield* sql<PayloadRow>`SELECT payload_json FROM orchestration_v2_projection_runs
-            WHERE thread_id = ${threadId}
+            WHERE ${threadColumn(filter.runIds)} = ${threadId}
               ${filter.runIds === undefined ? sql`` : sql`AND run_id IN (SELECT value FROM json_each(${ids(filter.runIds)}))`}
               ${
                 filter.runStatuses === undefined
-                  ? sql``
-                  : sql`AND (status IN (SELECT value FROM json_each(${ids(filter.runStatuses)}))
-                OR (${filter.includeLatestRun === true ? 1 : 0} = 1 AND run_id = (
+                  ? sql`ORDER BY ordinal ASC`
+                  : filter.includeLatestRun !== true
+                    ? sql`AND status IN (SELECT value FROM json_each(${ids(filter.runStatuses)}))
+                ORDER BY +ordinal ASC`
+                    : sql`AND (status IN (SELECT value FROM json_each(${ids(filter.runStatuses)}))
+                OR run_id = (
                   SELECT run_id FROM orchestration_v2_projection_runs WHERE thread_id = ${threadId}
                     AND (status <> 'cancelled' OR json_extract(payload_json, '$.startedAt') IS NOT NULL)
-                  ORDER BY ordinal DESC LIMIT 1)))`
-              }
-            ORDER BY ordinal ASC`;
+                  ORDER BY ordinal DESC LIMIT 1))
+                ORDER BY ordinal ASC`
+              }`;
                   break;
                 case "attempts":
                   selected =
@@ -59,7 +65,7 @@ export const make = Effect.gen(function* () {
                 case "nodes":
                   selected =
                     yield* sql<PayloadRow>`SELECT payload_json FROM orchestration_v2_projection_nodes AS node
-            WHERE node.thread_id = ${threadId}
+            WHERE ${threadColumn(filter.nodeIds, "node.thread_id")} = ${threadId}
               ${filter.nodeIds === undefined ? sql`` : sql`AND node.node_id IN (SELECT value FROM json_each(${ids(filter.nodeIds)}))`}
               ${
                 filter.omitSettledLeafNodes === true
@@ -76,7 +82,7 @@ export const make = Effect.gen(function* () {
                 case "subagents":
                   selected =
                     yield* sql<PayloadRow>`SELECT payload_json FROM orchestration_v2_projection_subagents AS subagent
-            WHERE thread_id = ${threadId}
+            WHERE ${threadColumn(filter.subagentIds)} = ${threadId}
               ${filter.subagentIds === undefined ? sql`` : sql`AND subagent_id IN (SELECT value FROM json_each(${ids(filter.subagentIds)}))`}
               ${filter.subagentRunIds === undefined ? sql`` : sql`AND run_id IN (SELECT value FROM json_each(${ids(filter.subagentRunIds)}))`}
               ${
@@ -137,7 +143,7 @@ export const make = Effect.gen(function* () {
                 case "messages":
                   selected =
                     yield* sql<PayloadRow>`SELECT payload_json FROM orchestration_v2_projection_messages
-            WHERE thread_id = ${threadId}
+            WHERE ${threadColumn(filter.messageIds)} = ${threadId}
               ${filter.messageIds === undefined ? sql`` : sql`AND message_id IN (SELECT value FROM json_each(${ids(filter.messageIds)}))`}
               ${filter.messageRoles === undefined ? sql`` : sql`AND role IN (SELECT value FROM json_each(${ids(filter.messageRoles)}))`}
               ${filter.monitorNotificationsOnly === true ? sql`AND json_extract(payload_json, '$.notification.source.kind') = 'monitor'` : sql``}

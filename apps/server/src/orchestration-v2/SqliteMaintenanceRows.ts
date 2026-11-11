@@ -10,7 +10,7 @@ import {
   toRowsError,
 } from "./MaintenanceRows.ts";
 
-export const make = Effect.gen(function* () {
+const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const read = (query: MaintenanceRead) => {
     switch (query.kind) {

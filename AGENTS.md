@@ -33,14 +33,15 @@ fall back to a preserved SQLite source after native activation. Iroh byte
 forwarding does not replace
 Connect account, pairing or client lifecycle behavior. Keep all working clients.
 
-Build full Rust with the verified packaged Lustr coordinator and produced BlueFe
-drivers recorded in toolchain.lock.json. Cargo is bootstrap Cargo. Native Lust's
-separate subset pin remains in lust-toolchain.json. Record the actual compilation
-route; coordinator forwarding to rustc-derived BlueFe is not native Lust coverage.
-Use pinned compiler artifacts in application CI; compiler bootstrap and release
-qualification belong in the compiler repositories. Preserve caller flags and
-select the matching produced target sysroot. Keep Cargo --locked and pnpm's frozen
-lockfile gate. Do not substitute unmatched Clippy or compiler drivers.
+Use native Lust for the supported subset with the immutable compiler identity in
+lust-toolchain.json. Until Lustr is ready, compile the rest with the stock Rust
+release pinned in rust-toolchain.toml. Record actual per-component compiler routes;
+stock rustc or coordinator forwarding is not native Lust coverage. Keep the
+optional matched Lustr/BlueFe package route separate and verified. Do not modify
+Lustr, BlueFe or their original Lust/Rust source to unblock application builds.
+Preserve caller flags and use the selected compiler's matching target sysroot.
+Keep Cargo --locked and pnpm's frozen lockfile gate. Do not substitute unmatched
+Clippy or compiler drivers.
 Keep generated output outside canonical source and clean owned disposable output.
 
 Use the generated CI plan to run affected Rust packages and reverse consumers,
@@ -97,8 +98,10 @@ preserve its body and append the footer. Never reopen or modify closed submissio
 or add speculative attribution comments. Carry this rule into worker handoffs.
 
 ```md
----
+***
+
 **AI attribution**
+
 - Models: <verified exact models and roles>
 - Harness: <verified actual harness chain>
 ```
@@ -111,7 +114,7 @@ or add speculative attribution comments. Carry this rule into worker handoffs.
 - Run authorized workers through T3's supported lifecycle APIs. Do not spawn workers for a bounded task assigned to work alone.
 - Never kill processes by name/path pattern. Stop only owned processes identified when spawned.
 - Never run tests against an installed application's state or remove user data.
-- Consume pinned and verified Lustr/BlueFe artifacts in isolated hosted directories. Application qualification must use the produced drivers and matching sysroot. Keep native Lust subset qualification distinct.
+- Consume pinned compiler artifacts in isolated hosted directories. The user's temporary policy permits stock rustc outside Lust's supported subset. Record the actual compiler and matching sysroot; keep native Lust subset qualification distinct.
 - Keep generated output outside the source checkout and bound build concurrency to the hosted runner's capacity. Do not touch another owner's source or builds.
 - Own generated output through completion/failure/cancellation. Retain source/history, a current deliverable, one useful rollback and concise hashes/logs. Remove disposable targets, dependencies and staging after checking actual processes, descriptors, mounts and Cargo locks; record available-space change. Do not clean another owner's scope.
 - Do not resume unrelated work, schedules or agents to perform housekeeping. Preserve source revisions, first failures, receipts and rollback boundaries.

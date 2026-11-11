@@ -35,6 +35,7 @@ def plan(mode="full-fork"):
 
 def needs(value):
     return {"plan": {"result": "success", "outputs": {}},
+            "database_platforms": {"result": "success" if value["gates"]["native"] else "skipped"},
             **{gate: {"result": "success" if selected else "skipped", "outputs": {}}
                for gate, selected in value["gates"].items()}}
 
@@ -48,6 +49,7 @@ class ReceiptIssuance(unittest.TestCase):
         result = ci_receipt.make_receipt(value, statuses, HEAD, "101")
         self.assertTrue(ci_history.valid_receipt(result, HEAD, TREE, POLICY))
         self.assertEqual(result["run_id"], 101)
+        self.assertEqual(result["database_platform_result"], "success")
         self.assertEqual(result["plan"]["adapter_ports"], ["project-commands"])
         self.assertNotIn("changed_paths", result["plan"])
         self.assertNotIn("reasons", result["plan"])
@@ -81,7 +83,7 @@ class ReceiptIssuance(unittest.TestCase):
 
     def test_missing_failed_cancelled_and_skipped_required_jobs_do_not_issue_evidence(self):
         value = plan()
-        for job in ("plan", *ci_history.GATES):
+        for job in ("plan", "database_platforms", *ci_history.GATES):
             for status in ("failure", "cancelled", "skipped", "queued", None):
                 with self.subTest(job=job, status=status):
                     statuses = needs(value)

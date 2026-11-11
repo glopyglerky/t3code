@@ -1,12 +1,12 @@
 #!/usr/bin/env node
-import * as Assert from "node:assert/strict";
-import * as FS from "node:fs/promises";
-import * as Path from "node:path";
+import * as NodeAssert from "node:assert/strict";
+import * as NodeFSP from "node:fs/promises";
+import * as NodePath from "node:path";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
-import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import { ATTACHMENT_ONLY_BOOTSTRAP_PROMPT } from "@t3tools/shared/composerContextReferences";
+import { serializeAssistantCitation } from "@t3tools/shared/assistantCitations";
 
 import * as ThreadSearch from "../apps/server/src/orchestration-v2/ThreadSearch.ts";
 import * as NativeThreadSearch from "../apps/server/src/orchestration-v2/NativeThreadSearch.ts";
@@ -28,8 +28,12 @@ import {
 } from "./redb-domain-fixture.mjs";
 
 const [executable, proofPath] = process.argv.slice(2);
-Assert.ok(executable && Path.isAbsolute(executable), "Pass an absolute native database executable");
-await FS.access(executable, FS.constants.X_OK);
+const encodeSearchRequest = Schema.encodeEffect(ThreadSearch.SearchRequest);
+NodeAssert.ok(
+  executable && NodePath.isAbsolute(executable),
+  "Pass an absolute native database executable",
+);
+await NodeFSP.access(executable, NodeFSP.constants.X_OK);
 const oracle = await loadUpstreamModule("apps/server/src/orchestration-v2/ThreadSearch.ts");
 const projectionOracle = await loadUpstreamModule(
   "apps/server/src/orchestration-v2/ProjectionStore.ts",
@@ -104,6 +108,19 @@ const link = (number) => ({
   number,
   url: `https://github.com/acme/search/pull/${number}`,
 });
+const citation = (text, extra = {}) =>
+  serializeAssistantCitation({
+    version: 1,
+    environmentId: "environment:citation",
+    threadId: main,
+    messageId: "source:citation",
+    text,
+    start: 0,
+    end: text.length,
+    prefix: "",
+    suffix: "",
+    ...extra,
+  });
 const seedEvents = [
   thread(main, { title: "SearchService implementation", branch: "fix/rust-search" }),
   thread(assistant, { title: "Trust the build" }),
@@ -187,6 +204,15 @@ const seedEvents = [
   ),
   message("message:positions", "positional ".repeat(180) + "tail-end"),
   message("message:negative", "negativeonly needle"),
+  message(
+    "message:citation",
+    citation("Cedar moth quotation", { comment: "Juniper branch comment" }),
+  ),
+  message("message:citation-unicode", citation("Quoted 🦊 café don't stop")),
+  message(
+    "message:invalid-citation",
+    citation("Malformed citatinalpha").replace("/source%3Acitation?", "/%ZZ?"),
+  ),
 ];
 const queries = [
   "needle",
@@ -223,6 +249,10 @@ const queries = [
   "hidden-address",
   "needle-secret",
   "positional tail-end",
+  "cedar moth",
+  "juniper branch",
+  "quoted 🦊",
+  "citatinalpha",
 ];
 const rawRequests = [
   { match: '"ab" "abc"' },
@@ -235,6 +265,8 @@ const rawRequests = [
   { match: '"straße"' },
   { match: '"positional" "tail-end"' },
   { match: '"negativeonly"' },
+  { match: '"cedar moth"' },
+  { match: null, substrings: ["juniper branch"] },
   { match: null, substrings: ["negativeonly"] },
   { match: '"needle"', excludedThreadIds: [main] },
   { match: '"needle"', projectId: otherProjectId },
@@ -277,7 +309,7 @@ async function withServices(kind, filename, fixture, use) {
             Effect.map((rows) => rows.length > 0),
           ),
         searchRows: (request) =>
-          Schema.encodeEffect(ThreadSearch.SearchRequest)(request).pipe(
+          encodeSearchRequest(request).pipe(
             Effect.flatMap((encoded) => oracle.module.messageHitsQuery(sql, encoded)),
           ),
       };
@@ -291,149 +323,159 @@ async function withServices(kind, filename, fixture, use) {
   );
 }
 
-function exercise({ search, rows, apply, transaction }) {
-  return Effect.gen(function* () {
-    const output = [];
-    for (const [index, query] of queries.entries()) {
+const exercise = Effect.fn("RedbThreadSearchGate.exercise")(function* ({
+  search,
+  rows,
+  apply,
+  transaction,
+}) {
+  const output = [];
+  for (const [index, query] of queries.entries()) {
+    output.push(normalized(yield* search.search({ query, ...(index === 2 ? { limit: 1 } : {}) })));
+  }
+  for (const query of [
+    "rust",
+    "SearchService",
+    "acme/search#4202",
+    "fix/rust-search",
+    "Elsewhere",
+  ]) {
+    output.push(normalized(yield* search.searchThreads({ query, limit: 5 })));
+    output.push(normalized(yield* search.searchThreads({ query, projectId, limit: 5 })));
+  }
+  for (const query of ["kestrel", "#4101", "acme/search#4202", "fixture unrelated", ""]) {
+    for (const projectIds of [undefined, [projectId], [otherProjectId]]) {
       output.push(
-        normalized(yield* search.search({ query, ...(index === 2 ? { limit: 1 } : {}) })),
+        normalized(
+          yield* search.searchOlderSettled({
+            query,
+            before,
+            projectIds,
+            environmentLabel: "Fixture",
+            messageThreadIds: [
+              "thread:recent",
+              "thread:old-note",
+              "thread:old-title",
+              "thread:old-note",
+              "missing",
+            ],
+          }),
+        ),
       );
     }
-    for (const query of [
-      "rust",
-      "SearchService",
-      "acme/search#4202",
-      "fix/rust-search",
-      "Elsewhere",
-    ]) {
-      output.push(normalized(yield* search.searchThreads({ query, limit: 5 })));
-      output.push(normalized(yield* search.searchThreads({ query, projectId, limit: 5 })));
-    }
-    for (const query of ["kestrel", "#4101", "acme/search#4202", "fixture unrelated", ""]) {
-      for (const projectIds of [undefined, [projectId], [otherProjectId]]) {
-        output.push(
-          normalized(
-            yield* search.searchOlderSettled({
-              query,
-              before,
-              projectIds,
-              environmentLabel: "Fixture",
-              messageThreadIds: [
-                "thread:recent",
-                "thread:old-note",
-                "thread:old-title",
-                "thread:old-note",
-                "missing",
-              ],
-            }),
-          ),
-        );
-      }
-    }
-    const indexed = yield* rows.hasIndex;
-    for (const request of rawRequests) {
-      if (!indexed && request.match !== null) continue;
-      output.push(normalized(yield* rows.searchRows(request)));
-    }
-    const update = (text, extra = {}) =>
-      apply(message("message:mutable", text, extra, mutationThread));
-    yield* update("unique draft", { streaming: true });
-    Assert.equal((yield* search.search({ query: "unique" })).matches.length, 0);
-    yield* update("unique finished Café 𐐀𐐁𐐂");
-    Assert.equal((yield* search.search({ query: "unique" })).matches.length, 1);
-    for (const query of ["unique", "café", "𐐨𐐩𐐪"])
-      output.push(normalized(yield* search.search({ query })));
-    yield* update("unique edited don’t stop");
-    Assert.equal((yield* search.search({ query: "finished" })).matches.length, 0);
-    output.push(normalized(yield* search.search({ query: "edited don't" })));
-    yield* update("unique edited don’t stop", { updatedAt: at(8) });
-    output.push(normalized(yield* search.search({ query: "edited" })));
-    const failed = yield* Effect.exit(
-      transaction(
-        Effect.gen(function* () {
-          yield* update("rolledback unique");
-          Assert.equal((yield* search.search({ query: "rolledback" })).matches.length, 1);
-          return yield* Effect.fail("roll back lexical postings");
-        }),
-      ),
-    );
-    Assert.ok(Exit.isFailure(failed));
-    Assert.equal((yield* search.search({ query: "rolledback" })).matches.length, 0);
-    output.push(normalized(yield* search.search({ query: "edited" })));
-    yield* update(ATTACHMENT_ONLY_BOOTSTRAP_PROMPT);
-    Assert.equal((yield* search.search({ query: "unique" })).matches.length, 0);
-    yield* apply(message("message:positions", "replacement only"));
-    Assert.equal(
-      (yield* search.search({ query: "positional" })).matches.length,
-      0,
-      "Editing an imported row atomically shadows all its old positions",
-    );
-    for (const length of [40000, 400000]) {
-      yield* update("a".repeat(length));
-      const repeated = yield* search.search({ query: "aaa" });
-      Assert.equal(
-        repeated.matches.length,
-        1,
-        "Long repeated model output remains writable and searchable",
-      );
-      output.push(normalized(repeated));
-    }
-    // More than the native transaction's 65,536 record cap in distinct terms.
-    // Ordinary per-term indexes still fail this case; bounded bucket fan-out must not.
-    const unicodeText = Array.from({ length: 70000 }, (_, index) =>
-      String.fromCodePoint(0x20000 + index),
-    ).join("");
-    const unicodeNeedle = Array.from({ length: 3 }, (_, index) =>
-      String.fromCodePoint(0x20000 + 35000 + index),
-    ).join("");
-    yield* update(unicodeText);
-    const unicodeRequest = {
-      match: indexed ? `"${unicodeNeedle}"` : null,
-      substrings: indexed ? [] : [unicodeNeedle],
-      shortSpellings: [],
-      projectId: null,
-      excludedThreadIds: [],
-    };
-    const unicodeHits = yield* rows.searchRows(unicodeRequest);
-    Assert.deepEqual(
-      unicodeHits.map((row) => row.messageId),
-      ["message:mutable"],
-    );
-    output.push(normalized(unicodeHits));
-    const failedLarge = yield* Effect.exit(
-      transaction(
-        Effect.gen(function* () {
-          yield* update("rolledback high cardinality");
-          return yield* Effect.fail("roll back bucket replacement");
-        }),
-      ),
-    );
-    Assert.ok(Exit.isFailure(failedLarge));
-    Assert.deepEqual(normalized(yield* rows.searchRows(unicodeRequest)), normalized(unicodeHits));
-    const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
-    let random = 0x12345678;
-    const dense = Array.from({ length: 1024 * 1024 }, () => {
-      random = (Math.imul(random, 1664525) + 1013904223) >>> 0;
-      return alphabet[(random >>> 16) % alphabet.length];
-    }).join("");
-    yield* update(`dense-entropy ${dense}`);
-    const denseHits = yield* search.search({ query: "dense-entropy" });
-    Assert.equal(
-      denseHits.matches.length,
+  }
+  const indexed = yield* rows.hasIndex;
+  for (const request of rawRequests) {
+    if (!indexed && request.match !== null) continue;
+    output.push(normalized(yield* rows.searchRows(request)));
+  }
+  const update = (text, extra = {}) =>
+    apply(message("message:mutable", text, extra, mutationThread));
+  yield* update("unique draft", { streaming: true });
+  NodeAssert.equal((yield* search.search({ query: "unique" })).matches.length, 0);
+  yield* update("unique finished Café 𐐀𐐁𐐂");
+  NodeAssert.equal((yield* search.search({ query: "unique" })).matches.length, 1);
+  for (const query of ["unique", "café", "𐐨𐐩𐐪"])
+    output.push(normalized(yield* search.search({ query })));
+  yield* update("unique edited don’t stop");
+  NodeAssert.equal((yield* search.search({ query: "finished" })).matches.length, 0);
+  output.push(normalized(yield* search.search({ query: "edited don't" })));
+  yield* update("unique edited don’t stop", { updatedAt: at(8) });
+  output.push(normalized(yield* search.search({ query: "edited" })));
+  const failed = yield* Effect.exit(
+    transaction(
+      Effect.gen(function* () {
+        yield* update("rolledback unique");
+        NodeAssert.equal((yield* search.search({ query: "rolledback" })).matches.length, 1);
+        return yield* Effect.fail("roll back lexical postings");
+      }),
+    ),
+  );
+  NodeAssert.ok(Exit.isFailure(failed));
+  NodeAssert.equal((yield* search.search({ query: "rolledback" })).matches.length, 0);
+  output.push(normalized(yield* search.search({ query: "edited" })));
+  yield* update(ATTACHMENT_ONLY_BOOTSTRAP_PROMPT);
+  NodeAssert.equal((yield* search.search({ query: "unique" })).matches.length, 0);
+  yield* update(citation("Peregrine falcon quote", { comment: "Spruce needle comment" }));
+  for (const query of ["peregrine falcon", "spruce needle"]) {
+    const result = yield* search.search({ query });
+    NodeAssert.equal(result.matches.length, 1, "Live citations index readable words and comments");
+    output.push(normalized(result));
+  }
+  yield* update("ordinary text after citation removal");
+  NodeAssert.equal((yield* search.search({ query: "peregrine falcon" })).matches.length, 0);
+  output.push(normalized(yield* search.search({ query: "after citation removal" })));
+  yield* apply(message("message:positions", "replacement only"));
+  NodeAssert.equal(
+    (yield* search.search({ query: "positional" })).matches.length,
+    0,
+    "Editing an imported row atomically shadows all its old positions",
+  );
+  for (const length of [40000, 400000]) {
+    yield* update("a".repeat(length));
+    const repeated = yield* search.search({ query: "aaa" });
+    NodeAssert.equal(
+      repeated.matches.length,
       1,
-      "One MiB of nonconsecutive dense positions stays within the atomic mutation budget",
+      "Long repeated model output remains writable and searchable",
     );
-    output.push(normalized(denseHits));
-    yield* update("final small message");
-    Assert.deepEqual(
-      yield* rows.searchRows(unicodeRequest),
-      [],
-      "Bucket-to-direct replacement deletes the previous live index",
-    );
-    output.push(normalized(yield* search.search({ query: "context" })));
-    return output;
-  });
-}
+    output.push(normalized(repeated));
+  }
+  // More than the native transaction's 65,536 record cap in distinct terms.
+  // Ordinary per-term indexes still fail this case; bounded bucket fan-out must not.
+  const unicodeText = Array.from({ length: 70000 }, (_, index) =>
+    String.fromCodePoint(0x20000 + index),
+  ).join("");
+  const unicodeNeedle = Array.from({ length: 3 }, (_, index) =>
+    String.fromCodePoint(0x20000 + 35000 + index),
+  ).join("");
+  yield* update(unicodeText);
+  const unicodeRequest = {
+    match: indexed ? `"${unicodeNeedle}"` : null,
+    substrings: indexed ? [] : [unicodeNeedle],
+    shortSpellings: [],
+    projectId: null,
+    excludedThreadIds: [],
+  };
+  const unicodeHits = yield* rows.searchRows(unicodeRequest);
+  NodeAssert.deepEqual(
+    unicodeHits.map((row) => row.messageId),
+    ["message:mutable"],
+  );
+  output.push(normalized(unicodeHits));
+  const failedLarge = yield* Effect.exit(
+    transaction(
+      Effect.gen(function* () {
+        yield* update("rolledback high cardinality");
+        return yield* Effect.fail("roll back bucket replacement");
+      }),
+    ),
+  );
+  NodeAssert.ok(Exit.isFailure(failedLarge));
+  NodeAssert.deepEqual(normalized(yield* rows.searchRows(unicodeRequest)), normalized(unicodeHits));
+  const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
+  let random = 0x12345678;
+  const dense = Array.from({ length: 1024 * 1024 }, () => {
+    random = (Math.imul(random, 1664525) + 1013904223) >>> 0;
+    return alphabet[(random >>> 16) % alphabet.length];
+  }).join("");
+  yield* update(`dense-entropy ${dense}`);
+  const denseHits = yield* search.search({ query: "dense-entropy" });
+  NodeAssert.equal(
+    denseHits.matches.length,
+    1,
+    "One MiB of nonconsecutive dense positions stays within the atomic mutation budget",
+  );
+  output.push(normalized(denseHits));
+  yield* update("final small message");
+  NodeAssert.deepEqual(
+    yield* rows.searchRows(unicodeRequest),
+    [],
+    "Bucket-to-direct replacement deletes the previous live index",
+  );
+  output.push(normalized(yield* search.search({ query: "context" })));
+  return output;
+});
 
 const fixtures = [];
 let sourceHash;
@@ -441,7 +483,7 @@ try {
   for (const indexed of [true, false]) {
     const fixture = await createFixture();
     fixtures.push(fixture);
-    const source = Path.join(fixture.root, "source.sqlite");
+    const source = NodePath.join(fixture.root, "source.sqlite");
     await createMigratedSqlite(source, (sql) =>
       Effect.gen(function* () {
         const projects = yield* ProjectStore.ProjectStoreV2.pipe(
@@ -472,35 +514,38 @@ try {
         }
       }),
     );
-    const upstream = Path.join(fixture.root, "upstream.sqlite");
-    const retained = Path.join(fixture.root, "retained.sqlite");
-    await FS.copyFile(source, upstream);
-    await FS.copyFile(source, retained);
-    sourceHash = hash(await FS.readFile(source));
-    const exported = Path.join(fixture.root, "source.ndjson");
+    const upstream = NodePath.join(fixture.root, "upstream.sqlite");
+    const retained = NodePath.join(fixture.root, "retained.sqlite");
+    await NodeFSP.copyFile(source, upstream);
+    await NodeFSP.copyFile(source, retained);
+    sourceHash = hash(await NodeFSP.readFile(source));
+    const exported = NodePath.join(fixture.root, "source.ndjson");
     exportSqliteState({ source, destination: exported });
     nativeRequest(executable, fixture, "initialize", {
       operation: "import_sqlite_application",
       path: exported,
     });
     const expected = await withServices("upstream", upstream, fixture, exercise);
-    Assert.deepEqual(
+    NodeAssert.deepEqual(
       await withServices("sqlite", retained, fixture, exercise),
       expected,
       `Retained search matches immutable source (indexed=${indexed})`,
     );
-    Assert.deepEqual(
+    NodeAssert.deepEqual(
       await withServices("native", source, fixture, exercise),
       expected,
       `Native search matches immutable source (indexed=${indexed})`,
     );
     await withServices("native", source, fixture, ({ search }) =>
       Effect.gen(function* () {
-        Assert.deepEqual(normalized(yield* search.search({ query: "context" })), expected.at(-1));
+        NodeAssert.deepEqual(
+          normalized(yield* search.search({ query: "context" })),
+          expected.at(-1),
+        );
       }),
     );
-    Assert.equal(
-      hash(await FS.readFile(source)),
+    NodeAssert.equal(
+      hash(await NodeFSP.readFile(source)),
       sourceHash,
       "Original SQLite source stays untouched",
     );
@@ -514,9 +559,9 @@ try {
     // surviving terms. Exercise this through the actual production writer.
     const fixture = await createFixture();
     fixtures.push(fixture);
-    const source = Path.join(fixture.root, "stale-transition-source.sqlite");
-    const upstream = Path.join(fixture.root, "stale-transition-upstream.sqlite");
-    const retained = Path.join(fixture.root, "stale-transition-retained.sqlite");
+    const source = NodePath.join(fixture.root, "stale-transition-source.sqlite");
+    const upstream = NodePath.join(fixture.root, "stale-transition-upstream.sqlite");
+    const retained = NodePath.join(fixture.root, "stale-transition-retained.sqlite");
     await createMigratedSqlite(source, (sql) =>
       Effect.gen(function* () {
         const projects = yield* ProjectStore.ProjectStoreV2.pipe(
@@ -530,15 +575,15 @@ try {
         yield* projections.apply(message("message:stale", "unindexed draft", { streaming: true }));
         const [stale] =
           yield* sql`SELECT rowid FROM orchestration_v2_projection_messages WHERE message_id='message:stale'`;
-        Assert.equal(stale.rowid, 1);
+        NodeAssert.equal(stale.rowid, 1);
         yield* sql`INSERT INTO orchestration_v2_message_search(rowid,text) VALUES(1,'oldtoken overlap')`;
         yield* sql`INSERT INTO orchestration_v2_message_search(rowid,text) VALUES(2,'orphanword overlap')`;
       }),
     );
-    await FS.copyFile(source, upstream);
-    await FS.copyFile(source, retained);
-    const sourceHashBefore = hash(await FS.readFile(source));
-    const exported = Path.join(fixture.root, "stale-transition-source.ndjson");
+    await NodeFSP.copyFile(source, upstream);
+    await NodeFSP.copyFile(source, retained);
+    const sourceHashBefore = hash(await NodeFSP.readFile(source));
+    const exported = NodePath.join(fixture.root, "stale-transition-source.ndjson");
     exportSqliteState({ source, destination: exported });
     nativeRequest(executable, fixture, "initialize", {
       operation: "import_sqlite_application",
@@ -561,59 +606,59 @@ try {
       projectId: null,
       excludedThreadIds: [],
     }));
-    const transitions = ({ rows, apply }) =>
-      Effect.gen(function* () {
-        const output = [];
-        const read = () =>
-          Effect.gen(function* () {
-            const result = [];
-            for (const request of requests)
-              result.push(normalized(yield* rows.searchRows(request)));
-            return result;
-          });
-        output.push(yield* read());
-        yield* apply(message("message:stale", "completed overlap"));
-        output.push(yield* read());
-        yield* apply(message("message:reuse", "newborn overlap"));
-        output.push(yield* read());
-        yield* apply(message("message:stale", "draft again", { streaming: true }));
-        output.push(yield* read());
-        yield* apply(message("message:stale", "finished final"));
-        yield* apply(message("message:reuse", "final replacement"));
-        output.push(yield* read());
-        return output;
+    const transitions = Effect.fn("RedbThreadSearchGate.staleSourceTransitions")(function* ({
+      rows,
+      apply,
+    }) {
+      const output = [];
+      const read = Effect.fn("RedbThreadSearchGate.readStaleSource")(function* () {
+        const result = [];
+        for (const request of requests) result.push(normalized(yield* rows.searchRows(request)));
+        return result;
       });
+      output.push(yield* read());
+      yield* apply(message("message:stale", "completed overlap"));
+      output.push(yield* read());
+      yield* apply(message("message:reuse", "newborn overlap"));
+      output.push(yield* read());
+      yield* apply(message("message:stale", "draft again", { streaming: true }));
+      output.push(yield* read());
+      yield* apply(message("message:stale", "finished final"));
+      yield* apply(message("message:reuse", "final replacement"));
+      output.push(yield* read());
+      return output;
+    });
     const expected = await withServices("upstream", upstream, fixture, transitions);
-    Assert.equal(
+    NodeAssert.equal(
       expected[1][0][0].messageId,
       "message:stale",
       "Insert without delete retains missing old terms",
     );
-    Assert.deepEqual(
+    NodeAssert.deepEqual(
       expected[1][3],
       [],
       "Overlapping term positions come from the latest insertion",
     );
-    Assert.equal(
+    NodeAssert.equal(
       expected[2][5][0].messageId,
       "message:reuse",
       "New messages can reuse an orphan FTS rowid",
     );
-    Assert.equal(
+    NodeAssert.equal(
       expected[3][0][0].messageId,
       "message:stale",
       "Delete retains terms absent from the latest insertion",
     );
-    Assert.deepEqual(expected[3][1], [], "Delete removes latest insertion terms");
-    Assert.equal(expected[4][0][0].messageId, "message:stale");
-    Assert.equal(expected[4][5][0].messageId, "message:reuse");
-    Assert.deepEqual(await withServices("sqlite", retained, fixture, transitions), expected);
-    Assert.deepEqual(
+    NodeAssert.deepEqual(expected[3][1], [], "Delete removes latest insertion terms");
+    NodeAssert.equal(expected[4][0][0].messageId, "message:stale");
+    NodeAssert.equal(expected[4][5][0].messageId, "message:reuse");
+    NodeAssert.deepEqual(await withServices("sqlite", retained, fixture, transitions), expected);
+    NodeAssert.deepEqual(
       await withServices("native", source, fixture, transitions),
       expected,
       "All 45 stale insertion, subsequent delete and orphan-rowid reuse queries match immutable SQLite",
     );
-    Assert.equal(hash(await FS.readFile(source)), sourceHashBefore);
+    NodeAssert.equal(hash(await NodeFSP.readFile(source)), sourceHashBefore);
     checks.push(
       "Insert-without-delete, overlapping positions, subsequent delete and orphan-rowid reuse preserve surviving historical terms across 45 real queries",
     );
@@ -624,12 +669,14 @@ try {
     // latest empty-token generation, and an orphan with no current generation.
     const fixture = await createFixture();
     fixtures.push(fixture);
-    const source = Path.join(fixture.root, "delete-witness-source.sqlite");
-    const upstream = Path.join(fixture.root, "delete-witness-upstream.sqlite");
-    const retained = Path.join(fixture.root, "delete-witness-retained.sqlite");
+    const source = NodePath.join(fixture.root, "delete-witness-source.sqlite");
+    const upstream = NodePath.join(fixture.root, "delete-witness-upstream.sqlite");
+    const retained = NodePath.join(fixture.root, "delete-witness-retained.sqlite");
     await createMigratedSqlite(source, (sql) =>
       Effect.gen(function* () {
-        const projects = yield* ProjectStore.ProjectStoreV2.pipe(Effect.provide(ProjectStore.layer));
+        const projects = yield* ProjectStore.ProjectStoreV2.pipe(
+          Effect.provide(ProjectStore.layer),
+        );
         const projections = yield* projectionOracle.module.ProjectionStoreV2.pipe(
           Effect.provide(projectionOracle.module.layer),
         );
@@ -641,24 +688,45 @@ try {
           yield* sql`DELETE FROM orchestration_v2_message_search WHERE rowid=${rowid}`;
           yield* sql`INSERT INTO orchestration_v2_message_search(rowid,text) VALUES(${rowid},'oldtoken overlap')`;
           yield* sql`INSERT INTO orchestration_v2_message_search(rowid,text) VALUES(${rowid},${text})`;
-          if (index === 2) yield* sql`DELETE FROM orchestration_v2_message_search WHERE rowid=${rowid}`;
+          if (index === 2)
+            yield* sql`DELETE FROM orchestration_v2_message_search WHERE rowid=${rowid}`;
         }
       }),
     );
-    await FS.copyFile(source, upstream);
-    await FS.copyFile(source, retained);
-    const beforeHash = hash(await FS.readFile(source));
-    const exported = Path.join(fixture.root, "delete-witness-source.ndjson");
+    await NodeFSP.copyFile(source, upstream);
+    await NodeFSP.copyFile(source, retained);
+    const beforeHash = hash(await NodeFSP.readFile(source));
+    const exported = NodePath.join(fixture.root, "delete-witness-source.ndjson");
     exportSqliteState({ source, destination: exported });
-    nativeRequest(executable, fixture, "initialize", { operation: "import_sqlite_application", path: exported });
-    const transitions = ({ rows, apply }) => Effect.gen(function* () {
+    nativeRequest(executable, fixture, "initialize", {
+      operation: "import_sqlite_application",
+      path: exported,
+    });
+    const transitions = Effect.fn("RedbThreadSearchGate.deleteWitnessTransitions")(function* ({
+      rows,
+      apply,
+    }) {
       const output = [];
-      const read = () => Effect.gen(function* () {
+      const read = Effect.fn("RedbThreadSearchGate.readDeleteWitness")(function* () {
         const results = [];
-        for (const text of ["oldtoken", "completed", "overlap", "oldtoken overlap", "replacement"]) {
-          results.push(normalized(yield* rows.searchRows({
-            match: `"${text}"`, substrings: [], shortSpellings: [], projectId: null, excludedThreadIds: [],
-          })));
+        for (const text of [
+          "oldtoken",
+          "completed",
+          "overlap",
+          "oldtoken overlap",
+          "replacement",
+        ]) {
+          results.push(
+            normalized(
+              yield* rows.searchRows({
+                match: `"${text}"`,
+                substrings: [],
+                shortSpellings: [],
+                projectId: null,
+                excludedThreadIds: [],
+              }),
+            ),
+          );
         }
         return results;
       });
@@ -678,21 +746,43 @@ try {
       return output;
     });
     const expected = await withServices("upstream", upstream, fixture, transitions);
-    Assert.equal(expected[1][0].length, 3, "First DELETE retains all old-only source generations");
-    Assert.equal(expected[1][1].length, 0, "First DELETE removes the current nonempty source generation");
-    Assert.equal(expected[1][2].length, 1, "An empty latest source generation leaves prior overlap positions intact");
-    Assert.equal(expected[3][0].length, 3, "Later native DELETE preserves witnessed historical source terms");
-    Assert.equal(expected[3][4].length, 0, "Later native DELETE removes its latest insertion");
-    Assert.deepEqual(await withServices("sqlite", retained, fixture, transitions), expected);
-    Assert.deepEqual(await withServices("native", source, fixture, transitions), expected);
-    Assert.equal(hash(await FS.readFile(source)), beforeHash, "Obtaining delete witnesses leaves original SQLite bytes unchanged");
-    checks.push("Already-duplicated source, empty-token current generation and orphan first DELETE match immutable SQLite across 20 queries");
+    NodeAssert.equal(
+      expected[1][0].length,
+      3,
+      "First DELETE retains all old-only source generations",
+    );
+    NodeAssert.equal(
+      expected[1][1].length,
+      0,
+      "First DELETE removes the current nonempty source generation",
+    );
+    NodeAssert.equal(
+      expected[1][2].length,
+      1,
+      "An empty latest source generation leaves prior overlap positions intact",
+    );
+    NodeAssert.equal(
+      expected[3][0].length,
+      3,
+      "Later native DELETE preserves witnessed historical source terms",
+    );
+    NodeAssert.equal(expected[3][4].length, 0, "Later native DELETE removes its latest insertion");
+    NodeAssert.deepEqual(await withServices("sqlite", retained, fixture, transitions), expected);
+    NodeAssert.deepEqual(await withServices("native", source, fixture, transitions), expected);
+    NodeAssert.equal(
+      hash(await NodeFSP.readFile(source)),
+      beforeHash,
+      "Obtaining delete witnesses leaves original SQLite bytes unchanged",
+    );
+    checks.push(
+      "Already-duplicated source, empty-token current generation and orphan first DELETE match immutable SQLite across 20 queries",
+    );
   }
   {
     const fixture = await createFixture();
     fixtures.push(fixture);
-    const source = Path.join(fixture.root, "bounded-source.sqlite");
-    const unicodeSource = await FS.readFile(
+    const source = NodePath.join(fixture.root, "bounded-source.sqlite");
+    const unicodeSource = await NodeFSP.readFile(
       new URL("../apps/server/src/persistence/redb_search_unicode.rs", import.meta.url),
       "utf8",
     );
@@ -768,8 +858,8 @@ try {
         yield* insert(240000, "scan:newest", "newest sentinel");
       }),
     );
-    const sourceHashBefore = hash(await FS.readFile(source));
-    const exported = Path.join(fixture.root, "bounded-source.ndjson");
+    const sourceHashBefore = hash(await NodeFSP.readFile(source));
+    const exported = NodePath.join(fixture.root, "bounded-source.ndjson");
     exportSqliteState({ source, destination: exported });
     nativeRequest(executable, fixture, "initialize", {
       operation: "import_sqlite_application",
@@ -794,48 +884,53 @@ try {
         query(group.map((word) => `"${word.replaceAll('"', '""')}"`).join(" ")),
       ),
     ];
-    const evaluate = ({ rows }) =>
-      Effect.gen(function* () {
-        const output = [];
-        for (const request of boundedRequests)
-          output.push(normalized(yield* rows.searchRows(request)));
-        return output;
-      });
+    const evaluate = Effect.fn("RedbThreadSearchGate.evaluateBoundedRequests")(function* ({
+      rows,
+    }) {
+      const output = [];
+      for (const request of boundedRequests)
+        output.push(normalized(yield* rows.searchRows(request)));
+      return output;
+    });
     const expected = await withServices("upstream", source, fixture, evaluate);
-    Assert.deepEqual(expected[0], [], "10,000 orphan candidates consume the original index budget");
-    Assert.deepEqual(
+    NodeAssert.deepEqual(
+      expected[0],
+      [],
+      "10,000 orphan candidates consume the original index budget",
+    );
+    NodeAssert.deepEqual(
       expected[1].map((row) => row.messageId),
       ["boundary:included"],
       "The 10,000th candidate itself is included",
     );
-    Assert.equal(expected[2].length, 2000, "Raw hit limit is exactly 2,000");
-    Assert.deepEqual(
+    NodeAssert.equal(expected[2].length, 2000, "Raw hit limit is exactly 2,000");
+    NodeAssert.deepEqual(
       expected[3].map((row) => row.messageId),
       ["cap:eligible"],
       "Thread exclusions precede the hit budget",
     );
-    Assert.deepEqual(
+    NodeAssert.deepEqual(
       expected[4].map((row) => row.messageId),
       ["scan:included"],
       "Fallback scans use rowid distance, not row count",
     );
-    Assert.deepEqual(
+    NodeAssert.deepEqual(
       expected[5],
       [],
       "A multi-trigram query can consume thousands of orphan matches",
     );
     for (const [index, result] of expected.slice(6).entries()) {
-      Assert.deepEqual(
+      NodeAssert.deepEqual(
         result.map((row) => row.messageId),
         [`unicode:${index}`],
       );
     }
-    Assert.deepEqual(
+    NodeAssert.deepEqual(
       await withServices("native", source, fixture, evaluate),
       expected,
       "Native bounded candidates and every Unicode fold-rule boundary match SQLite",
     );
-    Assert.equal(hash(await FS.readFile(source)), sourceHashBefore);
+    NodeAssert.equal(hash(await NodeFSP.readFile(source)), sourceHashBefore);
     checks.push(
       "Exact 10,000 candidate, 2,000 filtered-hit and 20,000 source-rowid-distance bounds, including orphan postings and numeric gaps",
     );
@@ -847,6 +942,7 @@ try {
     "Exact trigram phrases, quote escaping, Unicode legacy case/diacritic folding, CJK scans and short non-ASCII spellings",
     "Signed source rowids, negative cutoff, stale placeholder and orphan index entries preserve candidate membership",
     "Streaming completion, edited text, unchanged-text updates, repeated token positions and attachment placeholders preserve trigger semantics",
+    "Readable assistant-citation words, comments and Unicode match upstream on import, live updates and removal; invalid links stay literal",
     "40k/400k repeated output, 70k distinct Unicode trigrams and 1MiB dense nonconsecutive positions remain atomic through edits and compact-layout changes",
     "A four-trigram query over 5,000 orphan documents preserves the immutable read snapshot without accumulating writable conflict observations",
     "Transaction rollback and helper reopen preserve native lexical postings without querying SQLite",
@@ -863,6 +959,7 @@ try {
       "apps/server/src/orchestration-v2/ThreadSearchRows.ts",
       "apps/server/src/orchestration-v2/NativeThreadSearch.ts",
       "apps/server/src/persistence/redb_thread_search.rs",
+      "apps/server/src/persistence/redb_readable_search_text.rs",
       "apps/server/src/persistence/redb_search_unicode.rs",
       "apps/server/src/persistence/redb_search_positions.rs",
       "apps/server/src/persistence/redb_projection_commit.rs",

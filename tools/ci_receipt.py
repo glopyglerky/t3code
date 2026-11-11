@@ -94,22 +94,24 @@ def make_receipt(plan: object, needs: object, head: str, run_id: str | None = No
         if mode == "full-fork":
             require(all(gates.values()), "Full qualification must require every gate")
 
-    require(isinstance(needs, dict) and set(needs) == {"plan", *GATES},
-            "CI_NEEDS must contain exactly plan, native, adapters and application")
+    require(isinstance(needs, dict) and set(needs) == {"plan", "database_platforms", *GATES},
+            "CI_NEEDS must contain plan, database_platforms, native, adapters and application")
     results = {}
     for job, entry in needs.items():
         require(isinstance(entry, dict), f"Missing result for {job}")
         result = entry.get("result")
         require(result in ("success", "skipped"), f"Job {job} did not succeed or skip")
-        if job == "plan" or gates[job]:
+        required = job == "plan" or gates["native" if job == "database_platforms" else job]
+        if required:
             require(result == "success", f"Required job {job} did not succeed")
-        if job != "plan":
+        if job in GATES:
             results[job] = result
 
     output = {
         "schema_version": 1, "source_commit": head, "source_tree": plan["source_tree"],
         "policy_digest": plan["policy_digest"], "status": "passed",
         "plan": {key: plan[key] for key in PLAN_FIELDS}, "gate_results": results,
+        "database_platform_result": needs["database_platforms"]["result"],
     }
     if run_id:
         require(bool(re.fullmatch(r"[1-9][0-9]*", run_id)), "CI_RUN_ID must be a positive run ID")

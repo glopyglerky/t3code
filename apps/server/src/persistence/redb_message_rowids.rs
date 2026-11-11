@@ -122,6 +122,47 @@ pub(crate) async fn rowid(
     Ok(value.rowid)
 }
 
+/// Migration can run before an imported candidate has completed preparation.
+/// Native writers require ready identities; otherwise only the immutable source
+/// witness can establish SQLite's hidden rowid, never a new allocation.
+pub(crate) async fn migration_rowid(
+    tx: &mut Transaction,
+    catalog: &ApplicationCatalog,
+    row: &crate::application::ApplicationRow,
+) -> Result<i64> {
+    let message_id = text(&row.row, "message_id")?;
+    if state(tx, catalog).await?.is_some_and(|state| state.ready) {
+        return rowid(tx, catalog, &message_id).await;
+    }
+    let witness_key = store_key(&format!(
+        "application/generation/{}/metadata/source/{}",
+        catalog.generation,
+        request_digest(&json!([TABLE, row.key]))
+    ));
+    let witness: Value = decode(
+        &tx.get(&witness_key)
+            .await?
+            .ok_or_else(|| invalid("migration requires a witnessed hidden message rowid"))?,
+    )?;
+    let raw = witness["rowid"].as_str().ok_or(Error::IncompatibleStore)?;
+    let rowid: i64 = raw.parse().map_err(|_| Error::IncompatibleStore)?;
+    if rowid.to_string() != raw || witness["table"] != TABLE || witness["key"] != json!(row.key) {
+        return Err(Error::IncompatibleStore);
+    }
+    let identity = Identity { message_id, rowid };
+    let existing_id = tx.get(&id_key(catalog, &identity.message_id)).await?;
+    let existing_ordinal = tx.get(&ordinal_key(catalog, rowid)).await?;
+    for existing in [&existing_id, &existing_ordinal].into_iter().flatten() {
+        if decode::<Identity>(existing)? != identity {
+            return Err(Error::IncompatibleStore);
+        }
+    }
+    if existing_id.is_some() != existing_ordinal.is_some() {
+        return Err(Error::IncompatibleStore);
+    }
+    Ok(rowid)
+}
+
 pub(crate) async fn identity(
     tx: &mut Transaction,
     catalog: &ApplicationCatalog,

@@ -1,4 +1,4 @@
-name: Rust components with packaged Lustr and BlueFe
+name: Rust components with native Lust and pinned rustc
 
 on:
   workflow_call:
@@ -8,7 +8,7 @@ on:
         default: '["t3-code-ls-app","t3-code-ls-core","t3-code-ls-storage","t3-code-ls-transport","t3code-ls-tools"]'
       component_tests:
         type: string
-        default: '[]'
+        default: "[]"
       source_guards:
         type: boolean
         default: true
@@ -24,7 +24,7 @@ on:
       component_tests:
         description: JSON array of mapped component acceptance scripts
         type: string
-        default: '[]'
+        default: "[]"
       source_guards:
         description: Validate migration accounting
         type: boolean
@@ -40,7 +40,7 @@ permissions:
 jobs:
   qualify:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       CARGO_BUILD_JOBS: "2"
       CARGO_INCREMENTAL: "0"
@@ -49,6 +49,8 @@ jobs:
       GIT_TERMINAL_PROMPT: "0"
       CI_RUST_PACKAGES: ${{ inputs.packages }}
       CI_COMPONENT_TESTS: ${{ inputs.component_tests }}
+      T3_CODE_LS_COMPILER: rustc
+      RUSTUP_TOOLCHAIN: 1.99.1
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -68,19 +70,10 @@ jobs:
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
               output.write(f"key={scope}\n")
           PY
-      - name: Cache immutable compiler downloads
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      - name: Install pinned rustc for code outside the Lust subset
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
         with:
-          key: bluefe-package-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchain.lock.json') }}
-          path: |
-            ${{ runner.temp }}/t3code-ls-toolchains/preview-2026.11.09-2/bluefe-lustr-preview-2026.11.09-2-x86_64-unknown-linux-gnu.tar.zst
-            ${{ runner.temp }}/t3code-ls-toolchains/preview-2026.11.09-2/source-components.json
-            ${{ runner.temp }}/t3code-ls-toolchains/preview-2026.11.09-2/payload-manifest.json
-            ${{ runner.temp }}/t3code-ls-toolchains/preview-2026.11.09-2/platform.json
-            ${{ runner.temp }}/t3code-ls-toolchains/preview-2026.11.09-2/qualification.json
-            ${{ runner.temp }}/t3code-ls-toolchains/preview-2026.11.09-2/SHA256SUMS
-      - name: Install and verify the pinned compiler package
-        run: node tools/install-toolchain.mjs --destination "$RUNNER_TEMP/t3code-ls-toolchains/preview-2026.11.09-2"
+          toolchain: 1.99.1
       - name: Cache Cargo sources and selected build outputs
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -92,23 +85,23 @@ jobs:
           restore-keys: |
             cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchain.lock.json', 'rust-toolchain.toml', 'Cargo.lock') }}-${{ steps.scope.outputs.key }}-
       - name: Fetch immutable migration source references
-        if: inputs.source_guards
+        if: inputs.source_guards || inputs.stage_native
         run: node tools/fetch-migration-sources.mjs
       - name: Test selected Rust packages and reverse consumers
         run: python3 tools/test-rust.py --packages "$CI_RUST_PACKAGES"
       - name: Validate source retention and upstream provenance
         if: inputs.source_guards
         run: |
-          "$T3_CODE_LS_TOOLCHAIN/bin/lustr" --bluefe-root "$T3_CODE_LS_TOOLCHAIN" run --locked -p t3code-ls-tools -- check-source
-          "$T3_CODE_LS_TOOLCHAIN/bin/lustr" --bluefe-root "$T3_CODE_LS_TOOLCHAIN" run --locked -p t3code-ls-tools -- check-upstream-readme
+          cargo run --locked -p t3code-ls-tools -- check-source
+          cargo run --locked -p t3code-ls-tools -- check-upstream-readme
       - name: Cache component test dependency downloads
-        if: inputs.component_tests != '[]'
+        if: inputs.component_tests != '[]' || inputs.stage_native
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.npm
           key: component-npm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tools/server-test-runtime/package-lock.json') }}
       - name: Install the locked component acceptance runtime
-        if: inputs.component_tests != '[]'
+        if: inputs.component_tests != '[]' || inputs.stage_native
         run: |
           echo "T3_CODE_LS_TEST_RUNTIME=$RUNNER_TEMP/component-test-runtime" >> "$GITHUB_ENV"
           T3_CODE_LS_TEST_RUNTIME="$RUNNER_TEMP/component-test-runtime" node tools/install-server-tests.mjs
@@ -123,6 +116,36 @@ jobs:
           path: ${{ runner.temp }}/component-proof/
           if-no-files-found: warn
           retention-days: 14
+      - name: Fetch the unchanged pinned native Lust source
+        if: inputs.stage_native
+        run: |
+          revision="$(node -p 'JSON.parse(require("node:fs").readFileSync("lust-toolchain.json", "utf8")).revision')"
+          [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
+          git init "$RUNNER_TEMP/lust-source"
+          git -C "$RUNNER_TEMP/lust-source" fetch --no-tags --depth=1 https://github.com/glopyglerky/lustr.git "$revision"
+          git -C "$RUNNER_TEMP/lust-source" checkout --detach FETCH_HEAD
+      - name: Check native Lust coverage and qualify supported application code
+        if: inputs.stage_native
+        run: |
+          python3 tools/check-lust.py --source "$RUNNER_TEMP/lust-source" --receipt "$RUNNER_TEMP/lust-native-proof.json" --artifacts "$RUNNER_TEMP/lust-components" --allow-unsupported-fallback
+          node --input-type=module <<'JS'
+          import fs from "node:fs";
+          import path from "node:path";
+          const receiptPath = path.join(process.env.RUNNER_TEMP, "lust-native-proof.json");
+          const receipt = JSON.parse(fs.readFileSync(receiptPath, "utf8"));
+          if (receipt.status === "passed") {
+            fs.appendFileSync(process.env.GITHUB_ENV,
+              `T3_CODE_LS_LUST_DIR=${path.join(process.env.RUNNER_TEMP, "lust-components")}\nT3_CODE_LS_LUST_RECEIPT=${receiptPath}\n`);
+            console.log("Using the native Lust application artifacts qualified by this receipt.");
+          } else if (receipt.status === "unsupported" &&
+              (receipt.artifacts === undefined || (Array.isArray(receipt.artifacts) && receipt.artifacts.length === 0))) {
+            const message = "The pinned native Lust compiler reports unsupported application code. This build uses the pinned rustc route for those helpers; no native Lust application artifacts are claimed.";
+            console.log(message);
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${message}\n`);
+          } else {
+            throw new Error("Native Lust qualification did not produce a passed or artifact-free unsupported receipt");
+          }
+          JS
       - name: Stage the complete application helper bundle
         if: inputs.stage_native
         run: node tools/build-native.mjs
@@ -138,10 +161,10 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: packaged-toolchain-proof
+          name: compiler-route-proof
           path: |
             toolchain.lock.json
             lust-toolchain.json
-            ${{ runner.temp }}/t3code-ls-toolchains/preview-2026.11.09-2/installation-proof.json
+            ${{ runner.temp }}/lust-native-proof.json
           if-no-files-found: warn
           retention-days: 14

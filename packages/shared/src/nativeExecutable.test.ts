@@ -30,6 +30,23 @@ describe("native implementation selection", () => {
     expect(isQualifiedNativeHost("linux", "arm64", "2.41")).toBe(false);
   });
 
+  it("requires an accepted database package instead of silently selecting SQLite", () => {
+    for (const [platform, architecture] of [
+      ["win32", "x64"],
+      ["win32", "arm64"],
+      ["darwin", "x64"],
+      ["darwin", "arm64"],
+      ["linux", "arm64"],
+    ] as const) {
+      expect(() => selectNativeExecutable("db", undefined, platform, architecture)).toThrow(
+        "omdb database bundle",
+      );
+      expect(
+        selectNativeExecutable("db", undefined, platform, architecture, "upstream"),
+      ).toBeUndefined();
+    }
+  });
+
   it("selects an upstream baseline explicitly and rejects unknown modes", () => {
     expect(
       selectNativeExecutable("project", undefined, "linux", "x64", "upstream"),

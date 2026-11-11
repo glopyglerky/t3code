@@ -19,6 +19,11 @@ const OlderIdsRequest = Schema.Struct({
   threadIds: TokenList,
   projectIds: Schema.NullOr(TokenList),
 });
+const encodeSearchRequest = Schema.encodeEffect(Search.SearchRequest);
+const encodeOpenRequest = Schema.encodeEffect(OpenRequest);
+const encodeTitleRequest = Schema.encodeEffect(TitleRequest);
+const encodeOlderTitleRequest = Schema.encodeEffect(OlderTitleRequest);
+const encodeOlderIdsRequest = Schema.encodeEffect(OlderIdsRequest);
 
 export const makeRows = Effect.gen(function* () {
   const client = yield* RedbClient;
@@ -32,7 +37,7 @@ export const makeRows = Effect.gen(function* () {
   return {
     hasIndex: query({ kind: "has_index" }, Schema.Boolean),
     searchRows: (input) =>
-      Schema.encodeEffect(Search.SearchRequest)(input).pipe(
+      encodeSearchRequest(input).pipe(
         Effect.flatMap((request) =>
           query(
             {
@@ -48,7 +53,7 @@ export const makeRows = Effect.gen(function* () {
         ),
       ),
     threadOpens: (input) =>
-      Schema.encodeEffect(OpenRequest)(input).pipe(
+      encodeOpenRequest(input).pipe(
         Effect.flatMap(({ threadIds }) =>
           query(
             { kind: "thread_opens", thread_ids: threadIds },
@@ -57,7 +62,7 @@ export const makeRows = Effect.gen(function* () {
         ),
       ),
     titleCandidates: (input) =>
-      Schema.encodeEffect(TitleRequest)(input).pipe(
+      encodeTitleRequest(input).pipe(
         Effect.flatMap(({ projectId }) =>
           query(
             { kind: "title_candidates", project_id: projectId },
@@ -66,7 +71,7 @@ export const makeRows = Effect.gen(function* () {
         ),
       ),
     olderSettledTitleCandidates: (input) =>
-      Schema.encodeEffect(OlderTitleRequest)(input).pipe(
+      encodeOlderTitleRequest(input).pipe(
         Effect.flatMap(({ before, projectIds }) =>
           query(
             { kind: "older_settled_titles", before, project_ids: projectIds },
@@ -75,7 +80,7 @@ export const makeRows = Effect.gen(function* () {
         ),
       ),
     olderSettledIds: (input) =>
-      Schema.encodeEffect(OlderIdsRequest)(input).pipe(
+      encodeOlderIdsRequest(input).pipe(
         Effect.flatMap(({ before, threadIds, projectIds }) =>
           query(
             { kind: "older_settled_ids", before, thread_ids: threadIds, project_ids: projectIds },
@@ -87,5 +92,5 @@ export const makeRows = Effect.gen(function* () {
   } satisfies ThreadSearchRows;
 });
 
-export const make = makeRows.pipe(Effect.flatMap(Search.makeWithRows));
+const make = makeRows.pipe(Effect.flatMap(Search.makeWithRows));
 export const layer = Layer.effect(Search.ThreadSearch, make);

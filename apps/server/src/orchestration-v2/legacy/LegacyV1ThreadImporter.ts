@@ -627,7 +627,7 @@ export const makeFromRows = Effect.fn("LegacyV1ThreadImporter.makeFromRows")(fun
   });
 });
 
-export const make = Effect.gen(function* () {
+const make = Effect.gen(function* () {
   return yield* makeFromRows(yield* makeSqliteRows);
 });
 

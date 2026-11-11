@@ -54,7 +54,7 @@ const MessageRow = Schema.Struct({
   ordinal: Schema.Number,
 });
 
-export const make = Effect.gen(function* () {
+const make = Effect.gen(function* () {
   const client = yield* RedbClient.RedbClient;
   while (!(yield* client.prepareEvents).prepared) yield* Effect.yieldNow;
   while (!(yield* client.preparePositions).prepared) yield* Effect.yieldNow;

@@ -30,6 +30,7 @@ export const RowPage = Schema.Struct({
   next: Schema.NullOr(Schema.String),
 });
 export type RowPage = typeof RowPage.Type;
+const decodeJson = Schema.decodeUnknownEffect(Schema.Json);
 
 const applicationOperations = {
   application_events_append: "write",
@@ -354,98 +355,97 @@ export const make = Effect.gen(function* () {
       }),
     );
 
-  const root = <A, E, R>(
+  const root: <A, E, R>(
     effect: Effect.Effect<A, E, R>,
     mode: "read" | "write",
-  ): Effect.Effect<A, E | RedbClientError, R> =>
-    Effect.gen(function* () {
-      yield* outsideSqlTransaction;
-      const activePublications = yield* CurrentCommitPublication;
-      if (mode === "write" && activePublications.includes(clientIdentity)) {
-        return yield* new RedbTransactionError({ reason: "publication-write-reentry" });
-      }
-      const publications: Array<Effect.Effect<void>> = [];
-      const operation = Effect.uninterruptibleMask((restore) =>
-        database
-          .withSession((session) =>
-            Effect.gen(function* () {
-              if (transactionSequence >= Number.MAX_SAFE_INTEGER)
-                return yield* new RedbTransactionError({ reason: "transaction-id-exhausted" });
-              const id = `application:${++transactionSequence}`;
-              const begun = yield* restore(
-                session.request(
-                  { operation: "application_begin", transaction_id: id, mode },
-                  Begun,
-                ),
-              );
-              if (begun.transaction_id !== id) {
-                yield* session.discard;
-                return yield* new NativeDatabase.NativeDatabaseOutcomeUnknown({
-                  stage: "response",
-                });
-              }
-              const transaction: Transaction = {
-                client: clientIdentity,
-                ownerId: yield* Effect.withFiber((fiber) => Effect.succeed(fiber.id)),
-                id,
-                session,
-                active: true,
-                failure: undefined,
-                savepointSequence: 0,
-                currentScope: undefined,
-              };
-              const scope: TransactionScope = {
-                transaction,
-                active: true,
-                failure: undefined,
-                afterCommit: [],
-              };
-              transaction.currentScope = scope;
-              const exit = yield* Effect.exit(
-                restore(effect).pipe(Effect.provideService(CurrentTransaction, scope)),
-              );
-              scope.active = false;
-              transaction.active = false;
-              transaction.currentScope = undefined;
-              if (
-                Exit.isFailure(exit) ||
-                transaction.failure !== undefined ||
-                scope.failure !== undefined
-              ) {
-                // Fatal native errors can already have removed the transaction.
-                // Closing the helper also drops any remaining writer reservation.
-                yield* session
-                  .request({ operation: "application_rollback", transaction_id: id }, RolledBack)
-                  .pipe(Effect.catch(() => session.discard));
-                if (transaction.failure !== undefined) return yield* transaction.failure;
-                if (Exit.isFailure(exit)) return yield* Effect.failCause(exit.cause);
-                if (scope.failure !== undefined) return yield* scope.failure;
-              }
-              // The commit acknowledgement is the only success boundary. An uncertain
-              // outcome propagates unchanged and never causes another commit or fallback.
-              yield* session.request(
-                { operation: "application_commit", transaction_id: id },
-                Committed,
-              );
-              publications.push(...scope.afterCommit);
-              return exit.value;
-            }),
-          )
-          .pipe(
-            Effect.tap(() =>
-              Effect.forEach(publications, (publish) => publish, { discard: true }).pipe(
-                Effect.provideService(CurrentCommitPublication, [
-                  ...activePublications,
-                  clientIdentity,
-                ]),
-              ),
+  ) => Effect.Effect<A, E | RedbClientError, R> = Effect.fn("RedbClient.root")(function* <A, E, R>(
+    effect: Effect.Effect<A, E, R>,
+    mode: "read" | "write",
+  ) {
+    yield* outsideSqlTransaction;
+    const activePublications = yield* CurrentCommitPublication;
+    if (mode === "write" && activePublications.includes(clientIdentity)) {
+      return yield* new RedbTransactionError({ reason: "publication-write-reentry" });
+    }
+    const publications: Array<Effect.Effect<void>> = [];
+    const operation = Effect.uninterruptibleMask((restore) =>
+      database
+        .withSession((session) =>
+          Effect.gen(function* () {
+            if (transactionSequence >= Number.MAX_SAFE_INTEGER)
+              return yield* new RedbTransactionError({ reason: "transaction-id-exhausted" });
+            const id = `application:${++transactionSequence}`;
+            const begun = yield* restore(
+              session.request({ operation: "application_begin", transaction_id: id, mode }, Begun),
+            );
+            if (begun.transaction_id !== id) {
+              yield* session.discard;
+              return yield* new NativeDatabase.NativeDatabaseOutcomeUnknown({
+                stage: "response",
+              });
+            }
+            const transaction: Transaction = {
+              client: clientIdentity,
+              ownerId: yield* Effect.withFiber((fiber) => Effect.succeed(fiber.id)),
+              id,
+              session,
+              active: true,
+              failure: undefined,
+              savepointSequence: 0,
+              currentScope: undefined,
+            };
+            const scope: TransactionScope = {
+              transaction,
+              active: true,
+              failure: undefined,
+              afterCommit: [],
+            };
+            transaction.currentScope = scope;
+            const exit = yield* Effect.exit(
+              restore(effect).pipe(Effect.provideService(CurrentTransaction, scope)),
+            );
+            scope.active = false;
+            transaction.active = false;
+            transaction.currentScope = undefined;
+            if (
+              Exit.isFailure(exit) ||
+              transaction.failure !== undefined ||
+              scope.failure !== undefined
+            ) {
+              // Fatal native errors can already have removed the transaction.
+              // Closing the helper also drops any remaining writer reservation.
+              yield* session
+                .request({ operation: "application_rollback", transaction_id: id }, RolledBack)
+                .pipe(Effect.catch(() => session.discard));
+              if (transaction.failure !== undefined) return yield* transaction.failure;
+              if (Exit.isFailure(exit)) return yield* Effect.failCause(exit.cause);
+              if (scope.failure !== undefined) return yield* scope.failure;
+            }
+            // The commit acknowledgement is the only success boundary. An uncertain
+            // outcome propagates unchanged and never causes another commit or fallback.
+            yield* session.request(
+              { operation: "application_commit", transaction_id: id },
+              Committed,
+            );
+            publications.push(...scope.afterCommit);
+            return exit.value;
+          }),
+        )
+        .pipe(
+          Effect.tap(() =>
+            Effect.forEach(publications, (publish) => publish, { discard: true }).pipe(
+              Effect.provideService(CurrentCommitPublication, [
+                ...activePublications,
+                clientIdentity,
+              ]),
             ),
           ),
-      );
-      // Acquire before the session: a waiting writer must not hold the connection
-      // that an acknowledged owner's publication uses for a durable read.
-      return yield* mode === "write" ? operation.pipe(commitLane.withPermit) : operation;
-    });
+        ),
+    );
+    // Acquire before the session: a waiting writer must not hold the connection
+    // that an acknowledged owner's publication uses for a durable read.
+    return yield* mode === "write" ? operation.pipe(commitLane.withPermit) : operation;
+  });
 
   const withTransaction: RedbClientShape["withTransaction"] = Effect.fn(
     "RedbClient.withTransaction",
@@ -469,33 +469,35 @@ export const make = Effect.gen(function* () {
     return yield* nested(scope, effect);
   });
 
-  const inTransaction = <A>(
+  const inTransaction: <A>(
     run: (transaction: Transaction) => Effect.Effect<A, NativeDatabase.NativeDatabaseError>,
     mode: "read" | "write",
-  ): Effect.Effect<A, RedbClientError> =>
-    Effect.gen(function* () {
-      const scope = yield* CurrentTransaction;
-      if (scope === undefined) return yield* root(inTransaction(run, mode), mode);
-      yield* authorize(scope);
-      const transaction = scope.transaction;
-      return yield* outsideSqlTransaction.pipe(
-        Effect.andThen(run(transaction)),
-        Effect.catch((error) => {
-          // Recoverable statement errors invalidate only this savepoint. The
-          // wrapper must still roll it back if the body catches the error.
-          scope.failure ??= error;
-          if (terminal(error)) transaction.failure ??= error;
-          return Effect.fail(error);
-        }),
-      );
-    });
+  ) => Effect.Effect<A, RedbClientError> = Effect.fn("RedbClient.inTransaction")(function* <A>(
+    run: (transaction: Transaction) => Effect.Effect<A, NativeDatabase.NativeDatabaseError>,
+    mode: "read" | "write",
+  ) {
+    const scope = yield* CurrentTransaction;
+    if (scope === undefined) return yield* root(inTransaction(run, mode), mode);
+    yield* authorize(scope);
+    const transaction = scope.transaction;
+    return yield* outsideSqlTransaction.pipe(
+      Effect.andThen(run(transaction)),
+      Effect.catch((error) => {
+        // Recoverable statement errors invalidate only this savepoint. The
+        // wrapper must still roll it back if the body catches the error.
+        scope.failure ??= error;
+        if (terminal(error)) transaction.failure ??= error;
+        return Effect.fail(error);
+      }),
+    );
+  });
 
   const send = <A>(
     transaction: Transaction,
     input: Record<string, unknown>,
     response: Schema.Decoder<A>,
   ) =>
-    Schema.decodeUnknownEffect(Schema.Json)(input).pipe(
+    decodeJson(input).pipe(
       Effect.mapError(
         (cause) => new NativeDatabase.NativeDatabaseInputError({ stage: "request", cause }),
       ),
@@ -642,4 +644,5 @@ export const make = Effect.gen(function* () {
   });
 });
 
+/** @public Layer constructor for callers that provide an existing NativeDatabase. */
 export const layer = Layer.effect(RedbClient, make);

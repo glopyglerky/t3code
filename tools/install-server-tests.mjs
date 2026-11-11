@@ -1,8 +1,11 @@
 #!/usr/bin/env node
+/* oxlint-disable t3code/no-global-process-runtime -- The standalone dependency installer runs before the application's Effect runtime exists and must select host-specific process and link behavior. */
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFSP from "node:fs/promises";
+import * as NodeModule from "node:module";
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
+import { alignRuntimeEffect } from "./server-test-runtime-identity.mjs";
 
 const root = NodeURL.fileURLToPath(new URL("../", import.meta.url));
 const manifests = NodeURL.fileURLToPath(new URL("./server-test-runtime/", import.meta.url));
@@ -12,10 +15,33 @@ if (runtime !== manifests) {
   for (const name of ["package.json", "package-lock.json"])
     await NodeFSP.copyFile(NodePath.join(manifests, name), NodePath.join(runtime, name));
 }
-NodeChildProcess.execFileSync("npm", ["ci", "--ignore-scripts", "--no-audit", "--no-fund"], {
-  cwd: runtime,
-  stdio: "inherit",
+const npmArguments = ["ci", "--ignore-scripts", "--no-audit", "--no-fund"];
+NodeChildProcess.execFileSync(
+  process.platform === "win32" ? "cmd.exe" : "npm",
+  process.platform === "win32" ? ["/d", "/s", "/c", "npm", ...npmArguments] : npmArguments,
+  {
+    cwd: runtime,
+    stdio: "inherit",
+  },
+);
+
+// Full workspace installs and the scoped npm runtime must share Effect's class
+// and schema identity, even when they contain the exact same package version.
+const requireRuntime = NodeModule.createRequire(
+  NodePath.join(NodePath.resolve(runtime), "package.json"),
+);
+const { parse } = requireRuntime("yaml");
+const workspaceConfig = parse(
+  await NodeFSP.readFile(NodePath.join(root, "pnpm-workspace.yaml"), "utf8"),
+);
+const effect = await alignRuntimeEffect({
+  repository: root,
+  runtime,
+  workspacePatterns: workspaceConfig.packages,
 });
+console.log(
+  `Effect ${effect.version}: ${effect.mode === "workspace" ? "reusing the workspace singleton" : "using the isolated runtime singleton"}.`,
+);
 
 // Production adapters and recovery imports reach Markdown and provider SDKs.
 // Apply the same pinned patches as the workspace installation before importing.
@@ -58,7 +84,7 @@ async function linkIfMissing(name, target) {
     if (error.code !== "ENOENT") throw error;
   }
   await NodeFSP.mkdir(NodePath.join(link, ".."), { recursive: true });
-  await NodeFSP.symlink(target, link, "dir");
+  await NodeFSP.symlink(target, link, process.platform === "win32" ? "junction" : "dir");
 }
 
 const manifest = JSON.parse(await NodeFSP.readFile(NodePath.join(runtime, "package.json"), "utf8"));

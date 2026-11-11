@@ -6,7 +6,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as DatabaseMaintenance from "./DatabaseMaintenance.ts";
 import { DatabaseStorageBackend, DatabaseStorageBackendError } from "./DatabaseStorageBackend.ts";
 
-export const make = Effect.gen(function* () {
+const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;

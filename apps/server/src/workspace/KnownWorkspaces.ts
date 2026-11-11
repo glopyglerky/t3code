@@ -137,6 +137,7 @@ export const makeWithRows = Effect.gen(function* () {
   return KnownWorkspaces.of({ contains, assertContains });
 });
 
+/** @public Retained upstream SQLite constructor alongside the backend-injected layer. */
 export const make = makeWithRows.pipe(Effect.provide(layerSqlite));
 export const layerWithRows = Layer.effect(KnownWorkspaces, makeWithRows);
 export const layer = Layer.effect(KnownWorkspaces, make);

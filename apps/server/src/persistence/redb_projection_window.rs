@@ -754,6 +754,14 @@ pub(super) async fn query(
     } else {
         None
     };
+    let presented_run = if fields.contains(&ProjectionRecordField::Runs)
+        && window.anchor_item_id.is_none()
+        && window.required_run_id.is_none()
+    {
+        super::super::shell::presented_run_id(session, &input.thread_id).await?
+    } else {
+        None
+    };
     for field in fields {
         let mut rows = match field {
             ProjectionRecordField::TurnItems => retained.rows.iter().map(cloned).collect(),
@@ -831,6 +839,7 @@ pub(super) async fn query(
                     status(&row, &ACTIVE_RUNS)?
                         || cohort_runs.contains(&id(&row, RUNS)?)
                         || Some(id(&row, RUNS)?) == window.required_run_id
+                        || presented_run.as_ref() == Some(&id(&row, RUNS)?)
                         || latest_started.as_ref() == Some(&id(&row, RUNS)?)
                         || latest_todo
                             .as_ref()

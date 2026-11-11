@@ -14,14 +14,31 @@ export const makeIsServerInternalPath = Effect.gen(function* () {
   // Native realpath returns the on-disk letter case.
   const realPath = (value: string) =>
     Effect.promise(() => NodeFSP.realpath(value).catch(() => path.resolve(value)));
+  const configuredDatabase = path.resolve(config.dbPath);
   return Effect.fn("ServerInternalPaths.isServerInternalPath")(function* (filePath: string) {
-    const [file, stateDir, secretsDir] = yield* Effect.all(
-      [realPath(filePath), realPath(config.stateDir), realPath(config.secretsDir)],
+    const [file, stateDir, secretsDir, database, configuredDatabaseDirectory] = yield* Effect.all(
+      [
+        realPath(filePath),
+        realPath(config.stateDir),
+        realPath(config.secretsDir),
+        realPath(config.dbPath),
+        realPath(path.dirname(configuredDatabase)),
+      ],
       { concurrency: "unbounded" },
     );
+    const filename = path.basename(file);
+    // Maintenance names backups beside the supplied path, which may be a symlink.
+    const isDatabaseBackup = (databasePath: string) =>
+      path.dirname(file) === path.dirname(databasePath) &&
+      filename.startsWith(`${path.basename(databasePath)}.precompact-`) &&
+      filename.endsWith(".omdb");
     return (
+      file === database ||
+      isDatabaseBackup(database) ||
+      isDatabaseBackup(path.join(configuredDatabaseDirectory, path.basename(configuredDatabase))) ||
       isWithinRoot(path, file, secretsDir) ||
-      (path.dirname(file) === stateDir && path.basename(file).includes(".sqlite")) ||
+      (path.dirname(file) === stateDir &&
+        (filename.includes(".sqlite") || filename.includes(".omdb"))) ||
       // macOS does not resolve `/dev/fd/N` to the open file's path.
       isWithinRoot(path, file, "/dev/fd")
     );

@@ -8,6 +8,151 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeNet from "node:net";
 
 NodeTest.test(
+  "database-only packages require target-specific acceptance and retain other upstream helpers",
+  async () => {
+    const { nativeHash, stageNativeArtifacts, nativeArtifactFiles } =
+      await import("./native-artifacts.mjs");
+    const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-database-package-"));
+    try {
+      const source = NodePath.join(root, "source");
+      NodeFS.mkdirSync(source);
+      NodeFS.writeFileSync(NodePath.join(source, "t3-code-ls-db"), "database fixture", {
+        mode: 0o755,
+      });
+      const digest = nativeHash(NodePath.join(source, "t3-code-ls-db"));
+      const upstream = JSON.parse(
+        NodeFS.readFileSync(new URL("../upstream.lock.json", import.meta.url), "utf8"),
+      ).upstream.commit;
+      const sourceCommit = NodeChildProcess.execFileSync("git", ["rev-parse", "HEAD"], {
+        encoding: "utf8",
+      }).trim();
+      const manifest = {
+        schema: 2,
+        target: "darwin-arm64",
+        rustTarget: "aarch64-apple-darwin",
+        implementation: "database-only",
+        sourceCommit,
+        upstreamCommit: upstream,
+        files: { "t3-code-ls-db": digest },
+        compiler: {
+          route: "rustc",
+          toolchain: "1.99.1",
+          version: "rustc fixture",
+          cargoVersion: "cargo fixture",
+          executableSha256: "2".repeat(64),
+        },
+        databaseAcceptance: { status: "candidate" },
+      };
+      const save = () =>
+        NodeFS.writeFileSync(NodePath.join(source, "manifest.json"), JSON.stringify(manifest));
+      save();
+      NodeAssert.throws(() => nativeArtifactFiles(source, "darwin-arm64"), /acceptance/);
+      manifest.databaseAcceptance = {
+        status: "passed",
+        target: "darwin-arm64",
+        sourceCommit,
+        upstreamCommit: upstream,
+        executableSha256: digest,
+        checks: ["storage-tests", "startup", "production", "transactions", "restart-and-ownership"],
+      };
+      save();
+      NodeAssert.throws(() => nativeArtifactFiles(source, "darwin-arm64"), /package acceptance/);
+      const installed = NodePath.join(root, "installed");
+      const selector = NodePath.join(installed, "packages/shared/src/nativeExecutable.ts");
+      NodeFS.mkdirSync(NodePath.dirname(selector), { recursive: true });
+      NodeFS.copyFileSync(
+        new URL("../packages/shared/src/nativeExecutable.ts", import.meta.url),
+        selector,
+      );
+      stageNativeArtifacts(source, NodePath.join(installed, "bin"), "darwin-arm64", {
+        lifecycleOnly: true,
+      });
+      const { selectNativeExecutable } = await import(NodeURL.pathToFileURL(selector).href);
+      NodeAssert.throws(
+        () => selectNativeExecutable("db", undefined, "darwin", "arm64"),
+        /package acceptance/,
+      );
+      manifest.packageAcceptance = {
+        status: "passed",
+        target: "darwin-arm64",
+        sourceCommit,
+        upstreamCommit: upstream,
+        executableSha256: digest,
+        checks: ["source-package", "cli-sidecar", "desktop-asar"],
+      };
+      for (const invalid of [
+        { status: "candidate" },
+        { target: "darwin-x64" },
+        { sourceCommit: "0".repeat(40) },
+        { upstreamCommit: "0".repeat(40) },
+        { executableSha256: "0".repeat(64) },
+        { checks: ["source-package", "cli-sidecar"] },
+      ]) {
+        const accepted = manifest.packageAcceptance;
+        manifest.packageAcceptance = { ...accepted, ...invalid };
+        save();
+        NodeAssert.throws(() => nativeArtifactFiles(source, "darwin-arm64"), /package acceptance/);
+        manifest.packageAcceptance = accepted;
+      }
+      save();
+      stageNativeArtifacts(source, NodePath.join(installed, "bin"), "darwin-arm64");
+      NodeAssert.equal(
+        selectNativeExecutable("db", undefined, "darwin", "arm64"),
+        NodePath.join(installed, "bin", "t3-code-ls-db"),
+      );
+      NodeAssert.equal(selectNativeExecutable("provider", undefined, "darwin", "arm64"), undefined);
+      NodeAssert.equal(selectNativeExecutable("generate", undefined, "darwin", "arm64"), undefined);
+      NodeAssert.equal(
+        selectNativeExecutable("db", undefined, "darwin", "arm64", "upstream"),
+        undefined,
+      );
+      const supplied = {
+        ...process.env,
+        T3_CODE_LS_NATIVE_DIR: source,
+        T3_CODE_LS_NATIVE_TARGET: "darwin-arm64",
+      };
+      for (const name of [
+        "T3_CODE_LS_IMPLEMENTATION",
+        "T3_CODE_LS_NATIVE_COMPONENTS",
+        "T3_CODE_LS_TOOLCHAIN",
+        "T3_CODE_LS_SYSROOT",
+      ])
+        delete supplied[name];
+      const prequalified = NodeChildProcess.spawnSync(
+        process.execPath,
+        [
+          NodeURL.fileURLToPath(new URL("./build-native.mjs", import.meta.url)),
+          NodePath.join(root, "prequalified"),
+        ],
+        { env: supplied, encoding: "utf8" },
+      );
+      NodeAssert.equal(prequalified.status, 0, prequalified.stderr);
+      NodeAssert.throws(() => nativeArtifactFiles(source, "win32-arm64"), /do not match/);
+      const stale = NodePath.join(root, "stale");
+      NodeFS.mkdirSync(stale);
+      NodeFS.writeFileSync(NodePath.join(stale, "t3-code-ls-provider"), "unrelated old helper");
+      NodeAssert.throws(
+        () => stageNativeArtifacts(source, stale, "darwin-arm64"),
+        /clean.*directory/,
+      );
+      manifest.sourceCommit = "3".repeat(40);
+      save();
+      NodeAssert.throws(() => nativeArtifactFiles(source, "darwin-arm64"), /acceptance/);
+      manifest.sourceCommit = sourceCommit;
+      manifest.databaseAcceptance.checks.pop();
+      save();
+      NodeAssert.throws(() => nativeArtifactFiles(source, "darwin-arm64"), /acceptance/);
+      manifest.databaseAcceptance.checks.push("restart-and-ownership");
+      save();
+      NodeFS.appendFileSync(NodePath.join(source, "t3-code-ls-db"), "changed after acceptance");
+      NodeAssert.throws(() => nativeArtifactFiles(source, "darwin-arm64"), /hash/);
+    } finally {
+      NodeFS.rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
+NodeTest.test(
   "bundled and SEA modules resolve executable sidecars, including unpacked ASARs",
   async () => {
     const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-native-path-"));
@@ -84,6 +229,7 @@ NodeFS.writeFileSync(p.join(dir, 'packages.json'), JSON.stringify(packages));
       );
       const env = {
         ...process.env,
+        T3_CODE_LS_COMPILER: "lustr",
         T3_CODE_LS_TOOLCHAIN: toolchain,
         T3_CODE_LS_NATIVE_TARGET: "linux-x64",
         CARGO_BUILD_TARGET: "x86_64-unknown-linux-gnu",
@@ -98,7 +244,11 @@ NodeFS.writeFileSync(p.join(dir, 'packages.json'), JSON.stringify(packages));
       );
       NodeAssert.equal(run.status, 0, run.stderr);
       NodeAssert.deepEqual(
-        JSON.parse(NodeFS.readFileSync(NodePath.join(target, "x86_64-unknown-linux-gnu/release/packages.json"))),
+        JSON.parse(
+          NodeFS.readFileSync(
+            NodePath.join(target, "x86_64-unknown-linux-gnu/release/packages.json"),
+          ),
+        ),
         ["t3-code-ls-core", "t3-code-ls-storage"],
       );
       const manifest = JSON.parse(NodeFS.readFileSync(NodePath.join(output, "manifest.json")));
@@ -173,7 +323,7 @@ NodeFS.writeFileSync(p.join(dir, 'packages.json'), JSON.stringify(packages));
         },
       );
       NodeAssert.notEqual(cross.status, 0);
-      NodeAssert.match(cross.stderr, /not qualified/);
+      NodeAssert.match(cross.stderr, /Cannot qualify.*this host/);
     } finally {
       NodeFS.rmSync(root, { recursive: true, force: true });
     }
@@ -181,15 +331,136 @@ NodeFS.writeFileSync(p.join(dir, 'packages.json'), JSON.stringify(packages));
 );
 
 NodeTest.test(
-  "unqualified platforms package retained service implementations and reject native overrides",
+  "stock Rust build helper preserves target flags and rejects mismatched sysroots",
   async () => {
-    const {
-      nativeTargets,
-      nativeTargetQualified,
-      isQualifiedNativeHost,
-      stageNativeArtifacts,
-      nativeArtifactFiles,
-    } = await import("./native-artifacts.mjs");
+    const { nativeComponents, nativeTargets } = await import("./native-artifacts.mjs");
+    const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-stock-flags-"));
+    try {
+      const compiler = NodePath.join(root, "compiler");
+      const bin = NodePath.join(compiler, "bin");
+      const target = NodePath.join(root, "cargo");
+      const output = NodePath.join(root, "native-bin");
+      const capture = NodePath.join(root, "build-environment.json");
+      const rustTarget = "x86_64-unknown-linux-gnu";
+      // oxlint-disable-next-line t3code/no-global-process-runtime -- The fixture compiler must report the actual subprocess host; no Effect context crosses this boundary.
+      const compilerHost = nativeTargets[`${NodeOS.platform()}-${NodeOS.arch()}`];
+      const flagKey = "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS";
+      const library = NodePath.join(compiler, "lib/rustlib", rustTarget, "lib");
+      NodeFS.mkdirSync(bin, { recursive: true });
+      NodeFS.mkdirSync(library, { recursive: true });
+      const script = (name, body) =>
+        NodeFS.writeFileSync(NodePath.join(bin, name), `#!${process.execPath}\n${body}\n`, {
+          mode: 0o755,
+        });
+      script(
+        "rustup",
+        `if (process.argv[2] !== 'which') process.exit(31);
+process.stdout.write(require('node:path').join(${JSON.stringify(bin)}, process.argv.at(-1)));`,
+      );
+      script(
+        "rustc",
+        `const args = process.argv.slice(2);
+if (args[0] === '-vV') process.stdout.write(${JSON.stringify(`rustc 1.99.1\nrelease: 1.99.1\nhost: ${compilerHost}`)});
+else if (args[1] === 'sysroot') process.stdout.write(${JSON.stringify(compiler)});
+else if (args[1] === 'target-libdir') process.stdout.write(${JSON.stringify(library)});
+else process.exit(32);`,
+      );
+      script("rustdoc", "process.exit(0);");
+      script(
+        "cargo",
+        `const fs = require('node:fs'), path = require('node:path');
+const args = process.argv.slice(2);
+if (args[0] === '-V') { process.stdout.write('cargo 1.99.1'); process.exit(0); }
+if (args[0] !== 'build') process.exit(33);
+const dir = path.join(args[args.indexOf('--target-dir') + 1], args[args.indexOf('--target') + 1], 'release');
+fs.mkdirSync(dir, { recursive: true });
+for (const name of ${JSON.stringify(nativeComponents)}) fs.writeFileSync(path.join(dir, 't3-code-ls-' + name), '#!/bin/sh\\nexit 0\\n', { mode: 0o755 });
+fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({
+  encoded: process.env.CARGO_ENCODED_RUSTFLAGS,
+  plain: process.env.RUSTFLAGS,
+  targetFlags: process.env.${flagKey},
+  target: process.env.CARGO_BUILD_TARGET,
+  arguments: args
+}));`,
+      );
+      const env = { ...process.env };
+      for (const name of Object.keys(env)) {
+        if (
+          name.startsWith("T3_CODE_LS_") ||
+          /^CARGO_TARGET_.*_RUSTFLAGS$/.test(name) ||
+          [
+            "CARGO",
+            "RUSTC",
+            "RUSTDOC",
+            "RUSTFLAGS",
+            "CARGO_ENCODED_RUSTFLAGS",
+            "CARGO_BUILD_RUSTFLAGS",
+            "RUSTC_WRAPPER",
+            "RUSTC_WORKSPACE_WRAPPER",
+            "CARGO_BUILD_RUSTC_WRAPPER",
+            "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
+          ].includes(name)
+        )
+          delete env[name];
+      }
+      Object.assign(env, {
+        PATH: `${bin}${NodePath.delimiter}${process.env.PATH}`,
+        T3_CODE_LS_COMPILER: "rustc",
+        T3_CODE_LS_NATIVE_TARGET: "linux-x64",
+        CARGO_BUILD_TARGET: rustTarget,
+        CARGO_TARGET_DIR: target,
+        [flagKey]: "  -C opt-level=1  ",
+      });
+      const run = (extra = {}) =>
+        NodeChildProcess.spawnSync(
+          process.execPath,
+          [NodeURL.fileURLToPath(new URL("./build-native.mjs", import.meta.url)), output],
+          { env: { ...env, ...extra }, encoding: "utf8" },
+        );
+      const read = () => JSON.parse(NodeFS.readFileSync(capture, "utf8"));
+      const baseline = run();
+      NodeAssert.equal(baseline.status, 0, baseline.stderr);
+      NodeAssert.equal(Object.hasOwn(read(), "encoded"), false);
+      NodeAssert.equal(Object.hasOwn(read(), "plain"), false);
+      NodeAssert.equal(read().targetFlags, env[flagKey]);
+      NodeAssert.equal(read().target, rustTarget);
+      NodeAssert.equal(read().arguments[read().arguments.indexOf("--target") + 1], rustTarget);
+      const selectedFlags = `--sysroot=${compiler}  -C opt-level=1`;
+      const matching = run({ [flagKey]: selectedFlags });
+      NodeAssert.equal(matching.status, 0, matching.stderr);
+      NodeAssert.equal(read().targetFlags, selectedFlags);
+      for (const globals of [
+        { RUSTFLAGS: " -C opt-level=2 " },
+        { RUSTFLAGS: "" },
+        { CARGO_ENCODED_RUSTFLAGS: "", RUSTFLAGS: "--sysroot=/other" },
+      ]) {
+        const result = run({ ...globals, [flagKey]: "--sysroot=/other" });
+        NodeAssert.equal(result.status, 0, result.stderr);
+        NodeAssert.equal(read().encoded, globals.CARGO_ENCODED_RUSTFLAGS);
+        NodeAssert.equal(read().plain, globals.RUSTFLAGS);
+      }
+      const before = NodeFS.readFileSync(capture, "utf8");
+      for (const flags of [
+        "--sysroot=/other -C opt-level=1",
+        "--sysroot",
+        `--sysroot=${compiler} --sysroot ${compiler}`,
+      ]) {
+        const result = run({ [flagKey]: flags });
+        NodeAssert.notEqual(result.status, 0);
+        NodeAssert.match(result.stderr, /sysroot/);
+        NodeAssert.equal(NodeFS.readFileSync(capture, "utf8"), before);
+      }
+    } finally {
+      NodeFS.rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
+NodeTest.test(
+  "explicit upstream packages retain service implementations and reject native overrides",
+  async () => {
+    const { nativeTargets, isQualifiedNativeHost, stageNativeArtifacts, nativeArtifactFiles } =
+      await import("./native-artifacts.mjs");
     const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-upstream-platform-"));
     try {
       NodeAssert.equal(isQualifiedNativeHost("linux", "x64", "2.38"), false);
@@ -205,7 +476,7 @@ NodeTest.test(
           )
             delete env[name];
         }
-        env.T3_CODE_LS_IMPLEMENTATION = nativeTargetQualified(target) ? "upstream" : undefined;
+        env.T3_CODE_LS_IMPLEMENTATION = "upstream";
         const run = (extra = {}) =>
           NodeChildProcess.spawnSync(
             process.execPath,

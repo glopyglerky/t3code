@@ -1,7 +1,11 @@
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeCrypto from "node:crypto";
-import { isQualifiedNativeHost } from "../packages/shared/src/nativeExecutable.ts";
+import {
+  isQualifiedNativeHost,
+  supportedNativeTargets,
+  databaseArtifactFiles,
+} from "../packages/shared/src/nativeExecutable.ts";
 
 export { isQualifiedNativeHost };
 
@@ -17,14 +21,7 @@ export const nativeComponents = [
   "project-store",
   "db",
 ];
-export const nativeTargets = {
-  "linux-x64": "x86_64-unknown-linux-gnu",
-  "linux-arm64": "aarch64-unknown-linux-gnu",
-  "darwin-x64": "x86_64-apple-darwin",
-  "darwin-arm64": "aarch64-apple-darwin",
-  "win32-x64": "x86_64-pc-windows-msvc",
-  "win32-arm64": "aarch64-pc-windows-msvc",
-};
+export const nativeTargets = supportedNativeTargets;
 // Qualified service-helper scope. Other product targets keep their upstream implementations.
 export const nativeQualifiedTargets = ["linux-x64"];
 export const nativeTargetQualified = (target) => nativeQualifiedTargets.includes(target);
@@ -85,7 +82,7 @@ export function stageUpstreamManifest(destination, target, selection = "unqualif
   );
 }
 
-export function nativeArtifactFiles(source, target) {
+export function nativeArtifactFiles(source, target, options = {}) {
   const manifest = JSON.parse(
     NodeFS.readFileSync(NodePath.resolve(source, "manifest.json"), "utf8"),
   );
@@ -116,6 +113,18 @@ export function nativeArtifactFiles(source, target) {
     }
     return ["manifest.json"];
   }
+  if (manifest.implementation === "database-only") {
+    if (manifest.upstreamCommit !== upstreamCommit())
+      throw new Error("Database acceptance belongs to another upstream revision");
+    const files = databaseArtifactFiles(manifest, source, target, options);
+    for (const component of nativeComponents) {
+      for (const file of [nativeFile(component, "linux-x64"), nativeFile(component, "win32-x64")]) {
+        if (!files.includes(file) && NodeFS.existsSync(NodePath.join(source, file)))
+          throw new Error(`Database-only bundle contains an unrelated native component: ${file}`);
+      }
+    }
+    return files;
+  }
   if (!nativeTargetQualified(target))
     throw new Error(
       `Native service components are not qualified for ${target}; retain upstream implementations`,
@@ -142,14 +151,20 @@ export function nativeArtifactFiles(source, target) {
   return [...nativeComponents.map((component) => nativeFile(component, target)), "manifest.json"];
 }
 
-export function stageNativeArtifacts(source, destination, target) {
-  const files = nativeArtifactFiles(source, target);
+export function stageNativeArtifacts(source, destination, target, options = {}) {
+  const files = nativeArtifactFiles(source, target, options);
   if (files.length === 1) {
     const manifest = JSON.parse(
       NodeFS.readFileSync(NodePath.join(source, "manifest.json"), "utf8"),
     );
     stageUpstreamManifest(destination, target, manifest.selection);
     return;
+  }
+  for (const component of nativeComponents) {
+    for (const file of [nativeFile(component, "linux-x64"), nativeFile(component, "win32-x64")]) {
+      if (!files.includes(file) && NodeFS.existsSync(NodePath.join(destination, file)))
+        throw new Error(`Use a clean native output directory; unrelated component: ${file}`);
+    }
   }
   NodeFS.mkdirSync(destination, { recursive: true });
   for (const file of files) {

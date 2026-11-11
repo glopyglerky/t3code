@@ -49,9 +49,11 @@ jobs:
           python3 -m unittest discover -s tools -p 'test_ci*.py'
           python3 -m unittest discover -s tools -p test_nightly.py
           python3 -m unittest discover -s tools -p test_plan_porting.py
+          python3 -m unittest discover -s tools -p test_check_lust.py
           node --test \
             tools/install-toolchain.test.mjs \
             tools/native-packaging.test.mjs \
+            tools/server-test-runtime-identity.test.mjs \
             tools/fetch-migration-sources.test.mjs \
             tools/hybrid-checks.test.mjs \
             tools/check-acceptance.test.mjs \
@@ -87,6 +89,12 @@ jobs:
       component_tests: ${{ needs.plan.outputs.component_tests }}
       source_guards: ${{ needs.plan.outputs.source_guards == 'true' }}
       stage_native: ${{ needs.plan.outputs.stage_native == 'true' }}
+
+  database_platforms:
+    name: Native omdb platform compatibility
+    needs: plan
+    if: needs.plan.outputs.native == 'true'
+    uses: ./.github/workflows/database-platforms.yml
 
   adapters:
     name: Affected production adapters
@@ -188,6 +196,8 @@ jobs:
         run: node node_modules/@effect/tsgo/dist/effect-tsgo.cjs tsrs --noEmit -p tools/hybrid-client-persistence-tsconfig.json
       - name: Test fork client acceptance assertions
         run: node --test apps/web/scripts/hybrid-client-turn.test.ts apps/web/scripts/hybrid-client-database.test.ts
+      - name: Check native database files stay private
+        run: pnpm --filter t3 exec vp test run src/workspace/WorkspaceFileSystem.test.ts src/assets/AssetAccess.test.ts -t 'does not (read|issue URLs for) server state files'
       - name: Check native selection and build the integration bundles
         run: node tools/check-hybrid.mjs --application "$RUNNER_TEMP/hybrid-proof"
       - name: Exercise the client with Rust services and durable recovery
@@ -205,7 +215,7 @@ jobs:
 
   qualification:
     name: Record verified qualification
-    needs: [plan, native, adapters, application]
+    needs: [plan, native, database_platforms, adapters, application]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5

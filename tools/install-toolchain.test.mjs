@@ -10,6 +10,7 @@ import {
   archiveInventory,
   flagsForSysroot,
   hostLauncher,
+  stockRustEnvironment,
   verifyVersion,
 } from "./install-toolchain.mjs";
 
@@ -150,3 +151,140 @@ NodeTest.test(
     );
   },
 );
+
+NodeTest.test(
+  "stock Rust validation preserves flags and targets before selecting matched tools",
+  () => {
+    const tools = {
+      CARGO: "/pinned/bin/cargo",
+      RUSTC: "/pinned/bin/rustc",
+      RUSTDOC: "/pinned/bin/rustdoc",
+    };
+    const selection = {
+      tools,
+      sysroot: "/pinned",
+      release: "1.99.1",
+      target: "aarch64-apple-darwin",
+    };
+    const env = {
+      CARGO_ENCODED_RUSTFLAGS: "--sysroot\x1f/pinned\x1f-C\x1flink-arg=a b\x1f",
+      RUSTFLAGS: "ignored because encoded flags win",
+      CARGO_BUILD_TARGET: "aarch64-apple-darwin",
+      RUSTC: tools.RUSTC,
+      RUSTC_WRAPPER: "",
+    };
+    const before = { ...env };
+    NodeAssert.deepEqual(stockRustEnvironment(env, selection), {
+      ...before,
+      ...tools,
+      RUSTUP_TOOLCHAIN: "1.99.1",
+    });
+    NodeAssert.deepEqual(env, before);
+    for (const RUSTFLAGS of ["-C opt-level=1", "--sysroot=/pinned -C opt-level=1"])
+      NodeAssert.equal(stockRustEnvironment({ RUSTFLAGS }, selection).RUSTFLAGS, RUSTFLAGS);
+    NodeAssert.equal(
+      Object.hasOwn(stockRustEnvironment({}, selection), "CARGO_ENCODED_RUSTFLAGS"),
+      false,
+    );
+    for (const name of [
+      ...Object.keys(tools),
+      "RUSTC_WRAPPER",
+      "RUSTC_WORKSPACE_WRAPPER",
+      "CARGO_BUILD_RUSTC_WRAPPER",
+      "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
+      "T3_CODE_LS_TOOLCHAIN",
+      "T3_CODE_LS_SYSROOT",
+      "T3_CODE_LS_COMPILER",
+    ]) {
+      const invalid = { [name]: "/other" };
+      NodeAssert.throws(() => stockRustEnvironment(invalid, selection), /conflicts/);
+      NodeAssert.deepEqual(invalid, { [name]: "/other" });
+    }
+    NodeAssert.throws(() => stockRustEnvironment({}, { ...selection, release: "stable" }));
+  },
+);
+
+NodeTest.test("stock Rust sysroot validation follows Cargo encoded flag precedence", () => {
+  const selection = {
+    tools: {},
+    sysroot: "/pinned",
+    release: "1.99.1",
+    target: "x86_64-unknown-linux-gnu",
+  };
+  for (const encoded of [
+    "--sysroot",
+    "--sysroot=",
+    "--sysroot\x1f/other",
+    "--sysroot=/pinned\x1f--sysroot\x1f/pinned",
+  ])
+    NodeAssert.throws(
+      () =>
+        stockRustEnvironment(
+          {
+            CARGO_ENCODED_RUSTFLAGS: encoded,
+            RUSTFLAGS: "--sysroot=/pinned",
+          },
+          selection,
+        ),
+      /sysroot/,
+    );
+  NodeAssert.equal(
+    stockRustEnvironment(
+      {
+        CARGO_ENCODED_RUSTFLAGS: "",
+        RUSTFLAGS: "--sysroot=/other",
+      },
+      selection,
+    ).CARGO_ENCODED_RUSTFLAGS,
+    "",
+  );
+  NodeAssert.equal(
+    flagsForSysroot("/pinned", "-C\x1flink-arg=a b\x1f"),
+    "-C\x1flink-arg=a b\x1f\x1f--sysroot\x1f/pinned",
+  );
+});
+
+NodeTest.test("stock Rust validates only the effective selected-target flags", () => {
+  const selection = {
+    tools: {},
+    sysroot: "/pinned",
+    release: "1.99.1",
+    target: "x86_64-unknown-linux-gnu",
+  };
+  const key = "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS";
+  const benign = { [key]: "  --sysroot=/pinned  -C opt-level=1  " };
+  NodeAssert.deepEqual(stockRustEnvironment(benign, selection), {
+    ...benign,
+    RUSTUP_TOOLCHAIN: "1.99.1",
+  });
+  for (const flags of [
+    "--sysroot=/other -C opt-level=1",
+    "--sysroot",
+    "--sysroot=/pinned --sysroot /pinned",
+  ])
+    NodeAssert.throws(() => stockRustEnvironment({ [key]: flags }, selection), /sysroot/);
+  for (const globals of [
+    { CARGO_ENCODED_RUSTFLAGS: "" },
+    { RUSTFLAGS: "" },
+    { CARGO_ENCODED_RUSTFLAGS: "-C\x1flink-arg=a b", RUSTFLAGS: "--sysroot=/other" },
+  ]) {
+    const env = { [key]: "--sysroot=/other", ...globals };
+    NodeAssert.deepEqual(stockRustEnvironment(env, selection), {
+      ...env,
+      RUSTUP_TOOLCHAIN: "1.99.1",
+    });
+  }
+  NodeAssert.throws(
+    () => stockRustEnvironment({ CARGO_BUILD_RUSTFLAGS: "--sysroot=/other" }, selection),
+    /sysroot/,
+  );
+  const unused = { CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS: "--sysroot=/other" };
+  NodeAssert.deepEqual(stockRustEnvironment(unused, selection), {
+    ...unused,
+    RUSTUP_TOOLCHAIN: "1.99.1",
+  });
+  NodeAssert.throws(
+    () => stockRustEnvironment(unused, { ...selection, target: "aarch64-apple-darwin" }),
+    /sysroot/,
+  );
+});

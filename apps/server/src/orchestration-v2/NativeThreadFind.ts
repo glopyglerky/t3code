@@ -9,6 +9,8 @@ import type { ThreadFindRows } from "./ThreadFindRows.ts";
 const ActiveThreads = Schema.Array(Schema.Struct({ cwd: Schema.NullOr(Schema.String) }));
 const Sources = Schema.Array(Schema.Struct({ threadId: ThreadId, id: TurnItemId }));
 const ThreadIds = Schema.Array(ThreadId);
+const encodeSources = Schema.encodeEffect(Sources);
+const encodeThreadIds = Schema.encodeEffect(ThreadIds);
 const Payloads = Schema.Array(
   Schema.Struct({
     thread_id: Schema.String,
@@ -19,7 +21,7 @@ const Payloads = Schema.Array(
   }),
 );
 
-export const makeRows = Effect.gen(function* () {
+const makeRows = Effect.gen(function* () {
   const client = yield* RedbClient;
   while (!(yield* client.prepareProjectionReads).prepared) yield* Effect.yieldNow;
   while (!(yield* client.prepareEvents).prepared) yield* Effect.yieldNow;
@@ -31,7 +33,7 @@ export const makeRows = Effect.gen(function* () {
         ActiveThreads,
       ),
     payloads: (sources) =>
-      Schema.encodeEffect(Sources)(sources).pipe(
+      encodeSources(sources).pipe(
         Effect.flatMap((encoded) =>
           client.request(
             "application_thread_find_read",
@@ -46,7 +48,7 @@ export const makeRows = Effect.gen(function* () {
         ),
       ),
     revision: (threadIds) =>
-      Schema.encodeEffect(ThreadIds)(threadIds).pipe(
+      encodeThreadIds(threadIds).pipe(
         Effect.flatMap((ids) =>
           client.request(
             "application_thread_find_read",

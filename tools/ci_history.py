@@ -134,6 +134,9 @@ def valid_receipt(receipt: object, commit: str, tree: str, policy_digest: str) -
     gates = plan.get("gates")
     if not isinstance(gates, dict) or set(gates) != set(GATES) or set(results) != set(GATES):
         return False
+    platform_result = receipt.get("database_platform_result")
+    if platform_result not in (("success",) if gates["native"] else ("success", "skipped")):
+        return False
     return all(type(gates[gate]) is bool and
                results[gate] in (("success",) if gates[gate] else ("success", "skipped"))
                for gate in GATES)

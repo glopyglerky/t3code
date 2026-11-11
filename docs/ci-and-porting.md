@@ -6,17 +6,30 @@ Upstream `pingdotgg/t3code`'s default branch is trusted as working. CI qualifies
 
 The qualification planner compares the current commit with a verified successful ancestor. It reads Cargo dependencies and [the port map](../port-map.json) to select work.
 
-| Change | Qualification |
-| --- | --- |
-| Rust implementation | Changed crates and their reverse dependency consumers, plus affected production adapters and the native client flow when execution changes |
-| Mapped adapter or shared contract | Affected Rust ports, adapter typechecks and differential checks, and client/server integration |
-| Port tests only | Relevant Rust, mapped component acceptance, or adapter tests without rebuilding the client solely for a test change |
-| Unmodified upstream implementation imported at its exact Git identity | No independent upstream test run; mapped contracts and fork integration still select their checks |
-| Port-map changes limited to integrated and reviewed commits and source history | Source guard; every other mapping value must be unchanged, and actual runtime changes still select their checks |
-| Documentation only | Planning and lightweight tooling checks |
-| Shared locks, compiler pins, CI policy, or an unclassified fork integration change | Full fork qualification |
+| Change                                                                             | Qualification                                                                                                                              |
+| ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| Rust implementation                                                                | Changed crates and their reverse dependency consumers, plus affected production adapters and the native client flow when execution changes |
+| Mapped adapter or shared contract                                                  | Affected Rust ports, adapter typechecks and differential checks, and client/server integration                                             |
+| Port tests only                                                                    | Relevant Rust, mapped component acceptance, or adapter tests without rebuilding the client solely for a test change                        |
+| Unmodified upstream implementation imported at its exact Git identity              | No independent upstream test run; mapped contracts and fork integration still select their checks                                          |
+| Port-map changes limited to integrated and reviewed commits and source history     | Source guard; every other mapping value must be unchanged, and actual runtime changes still select their checks                            |
+| Documentation only                                                                 | Planning and lightweight tooling checks                                                                                                    |
+| Shared locks, compiler pins, CI policy, or an unclassified fork integration change | Full fork qualification                                                                                                                    |
 
 Full fork qualification covers the Rust workspace, production adapters, and the retained client with Rust services. Adapter checks use controlled fixtures and the trusted upstream implementation as a parity reference. The client flow checks onboarding, a provider approval and completed response, reload, and recovery after server restart. It uses no paid provider turns.
+
+The native gate also requires the omdb platform workflow: Linux, macOS and Windows
+on x86_64 and ARM64, using actual target runners rather than cross-compilation as
+a substitute for execution. Each target checks startup/import, transactions,
+ownership, CLI restart and the packaged database selector. A database-only bundle
+becomes selectable only with a receipt bound to its target, executable and source
+commit. The qualification receipt cannot pass or be reused with a missing, failed
+or skipped required platform matrix.
+
+The temporary compiler policy is native Lust for the subset its pinned compiler
+supports, and pinned stock rustc for the rest. Optional Lustr/BlueFe remains a
+separate route. Reports identify the actual compiler rather than attributing
+stock Rust builds to Lust.
 
 Mapped component acceptance scripts have explicit executable requirements. CI builds those targets with the pinned compiler and runs changed scripts; a full qualification runs all mapped component checks. Unknown test mappings fail planning. Builds retain the verified compiler package and locked Cargo and pnpm dependency gates. Expensive jobs run only when selected.
 

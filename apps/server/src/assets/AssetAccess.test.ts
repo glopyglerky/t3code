@@ -657,10 +657,15 @@ describe("AssetAccess", () => {
       const stateFile = path.join(config.secretsDir, "example.bin");
       yield* fs.makeDirectory(config.secretsDir, { recursive: true });
       yield* fs.writeFile(stateFile, new Uint8Array(32).fill(7));
-      yield* fs.writeFileString(config.dbPath, "SQLite format 3");
+      const databaseFiles = ["statev2.sqlite", "statev2.omdb", "statev2.omdb.precompact-test.omdb"];
+      for (const file of databaseFiles) {
+        yield* fs.writeFileString(path.join(config.stateDir, file), "private application data");
+      }
       const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-media-state-" });
       const alias = path.join(root, "alias");
       yield* fs.symlink(stateFile, alias);
+      const nativeAlias = path.join(config.stateDir, "state-alias.pdf");
+      yield* fs.symlink(path.join(config.stateDir, "statev2.omdb"), nativeAlias);
       const threadId = ThreadId.make("thread-1");
       for (const resource of [
         { _tag: "media-file", threadId, path: stateFile, disposition: "attachment" },
@@ -672,10 +677,69 @@ describe("AssetAccess", () => {
           disposition: "attachment",
         },
         { _tag: "media-file", threadId, path: config.dbPath },
-        { _tag: "draft-workspace-file", cwd: config.stateDir, path: "statev2.sqlite" },
+        { _tag: "media-file", threadId, path: nativeAlias },
       ] as const) {
         const error = yield* issueAssetUrl({ resource }).pipe(Effect.flip);
         expect(error._tag).toBe("AssetWorkspaceAssetNotFoundError");
+      }
+      for (const file of databaseFiles) {
+        for (const resource of [
+          { _tag: "media-file", threadId, path: path.join(config.stateDir, file) },
+          { _tag: "draft-workspace-file", cwd: config.stateDir, path: file },
+        ] as const) {
+          const error = yield* issueAssetUrl({ resource }).pipe(Effect.flip);
+          expect(error._tag).toBe(
+            resource._tag === "draft-workspace-file" && file.includes(".omdb")
+              ? "AssetPreviewTypeValidationError"
+              : "AssetWorkspaceAssetNotFoundError",
+          );
+        }
+      }
+      const aliasError = yield* issueAssetUrl({
+        resource: { _tag: "draft-workspace-file", cwd: config.stateDir, path: "state-alias.pdf" },
+      }).pipe(Effect.flip);
+      expect(aliasError._tag).toBe("AssetWorkspaceAssetNotFoundError");
+
+      const customDatabase = path.join(root, "application-data.pdf");
+      const configuredDirectory = path.join(root, "custom-state");
+      const directoryAlias = path.join(root, "configured-state");
+      yield* fs.makeDirectory(configuredDirectory);
+      yield* fs.symlink(configuredDirectory, directoryAlias);
+      const customAlias = path.join(directoryAlias, "custom-alias");
+      yield* fs.writeFileString(customDatabase, "private application data");
+      yield* fs.symlink(customDatabase, customAlias);
+      const customBackup = `${customDatabase}.precompact-test.omdb`;
+      const configuredBackup = `${customAlias}.precompact-test.omdb`;
+      for (const backup of [customBackup, configuredBackup]) {
+        yield* fs.writeFileString(backup, "private application backup");
+      }
+      const backupAlias = path.join(root, "backup-preview.pdf");
+      yield* fs.symlink(configuredBackup, backupAlias);
+      const customConfig = { ...config, dbPath: customAlias };
+      for (const file of [
+        customDatabase,
+        customAlias,
+        customBackup,
+        configuredBackup,
+        backupAlias,
+      ]) {
+        const error = yield* issueAssetUrl({
+          resource: { _tag: "media-file", threadId, path: file, disposition: "attachment" },
+        }).pipe(Effect.provideService(ServerConfig.ServerConfig, customConfig), Effect.flip);
+        expect(error._tag).toBe("AssetWorkspaceAssetNotFoundError");
+      }
+      const backupPreviewError = yield* issueAssetUrl({
+        resource: { _tag: "draft-workspace-file", cwd: root, path: "backup-preview.pdf" },
+      }).pipe(Effect.provideService(ServerConfig.ServerConfig, customConfig), Effect.flip);
+      expect(backupPreviewError._tag).toBe("AssetWorkspaceAssetNotFoundError");
+
+      for (const file of ["example.omdb", "application-data.pdf-other.precompact-test.omdb"]) {
+        const ordinaryFile = path.join(root, file);
+        yield* fs.writeFileString(ordinaryFile, "workspace data");
+        const ordinaryAsset = yield* issueAssetUrl({
+          resource: { _tag: "media-file", threadId, path: ordinaryFile, disposition: "attachment" },
+        }).pipe(Effect.provideService(ServerConfig.ServerConfig, customConfig));
+        expect(ordinaryAsset.relativeUrl.startsWith(`${ASSET_ROUTE_PREFIX}/`)).toBe(true);
       }
 
       const icon = path.join(config.baseDir, "icon.png");

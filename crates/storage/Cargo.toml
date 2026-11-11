@@ -15,9 +15,17 @@ same-file = "=1.0.6"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
 sha2 = "=0.11.1"
-tokio = { version = "=1.54.1", features = ["macros", "rt-multi-thread", "sync", "process", "io-util", "time"] }
+tokio = { version = "=1.54.1", features = [
+  "macros",
+  "rt-multi-thread",
+  "sync",
+  "process",
+  "io-util",
+  "time",
+] }
 t3-code-ls-core = { path = "../core" }
 unicode-segmentation = "=1.13.3"
+url = "=2.5.8"
 
 [dev-dependencies]
 getrandom = "=0.4.3"

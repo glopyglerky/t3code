@@ -4,6 +4,17 @@
   "rules": { "types": "off", "nsTypes": "off" },
   // These executables are supplied by the OS or installed separately from npm.
   "ignoreBinaries": ["eas", "file", "mkfifo", "pkill", "pkg-config", "plutil", "sips"],
+  // Source retention keeps these upstream release/reference inputs even though
+  // this fork no longer runs their original workflows. They are not entrypoints.
+  "ignore": [
+    ".github/scripts/mirror-play-apk.cjs",
+    "apps/web/scripts/verify-built-boot.ts",
+    "scripts/resolve-nightly-release.ts",
+    "scripts/smoke-cli-archive.ts",
+    "tools/oracles/CommandPolicy.ts",
+    "tools/oracles/GuestShareDecider.ts",
+    "tools/oracles/ProjectCommands.ts",
+  ],
   "workspaces": {
     ".": {
       // Keep vendored reference repositories outside the root project.
@@ -31,13 +42,17 @@
         "linux-after-pack.ts",
         "mobile-behavior/run.ts",
         "mobile-native-client.ts",
+        // e2e loads its config and the scenarios by path, and starts the app script.
+        "e2e.config.ts",
+        "prove-scenario.ts",
+        "scenarios/*.ts",
         "setup-worktree.ts",
         "sign-macos.ts",
         "prepare-server-compile-cache.cjs",
         "smoke-desktop-app.ts",
         "verify-windows-desktop-artifact.ts",
       ],
-      "ignoreDependencies": ["agent-device", "esbuild"],
+      "ignoreDependencies": ["esbuild"],
       // The `t3` npm package's files: copied into the package, never imported.
       // knip-schemas.test.ts writes a throwaway project to .knip-test-*, which a
       // knip run beside it in check:changed must not report.
@@ -54,11 +69,9 @@
         "scripts/update-test-shard-weights.ts",
         "scripts/verify-background-live.ts",
         "src/provider/testFixtures/*.mjs",
-        // CI qualifies native storage adapters before production storage selects them.
-        "../../tools/check-native-database.mjs",
-        "../../tools/check-native-outbox-worker.mjs",
-        "../../tools/check-maintenance-adapter.mjs",
-        "../../tools/check-generation-adapter.mjs",
+        // The fork's acceptance manifest and workflows execute these Node CLIs
+        // by path. Include their actual imports when checking adapter exports.
+        "../../tools/check-*.mjs",
         // graphqlgen reads its config.
         "graphql.config.ts",
       ],

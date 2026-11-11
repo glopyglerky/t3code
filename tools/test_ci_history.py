@@ -26,6 +26,7 @@ def receipt(commit="b" * 40, tree="c" * 40, gates=None):
         "plan": {"head": commit, "gates": gates},
         "gate_results": {name: "success" if required else "skipped"
                          for name, required in gates.items()},
+        "database_platform_result": "success" if gates["native"] else "skipped",
     }
 
 
@@ -62,6 +63,9 @@ class ReceiptValidation(unittest.TestCase):
             lambda value: value["gate_results"].update(native="skipped"),
             lambda value: value["gate_results"].update(application="failure"),
             lambda value: value["gate_results"].update(extra="success"),
+            lambda value: value.pop("database_platform_result"),
+            lambda value: value.update(database_platform_result="skipped"),
+            lambda value: value.update(database_platform_result="failure"),
         ]
         for mutate in mutations:
             value = copy.deepcopy(original)

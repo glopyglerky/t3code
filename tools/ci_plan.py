@@ -36,6 +36,8 @@ POLICY_FILES = {
     "tools/fetch-migration-sources.mjs", "tools/nightly.py",
     "tools/ci_receipt.py", "tools/test-rust.py",
     "tools/acceptance-checks.json", "tools/check-acceptance.mjs",
+    "tools/check-database-platform.mjs", "tools/check-database-package.mjs", "tools/check-lust.py",
+    "tools/pinned_rust.py", "tools/server-test-runtime-identity.mjs",
 }
 REPORTING_TOOLS = {"tools/plan-porting.py", "tools/sync-readme.py", "tools/verify-upstream.py"}
 GLOBAL_INPUTS = {

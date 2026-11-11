@@ -203,12 +203,14 @@ impl Store {
             };
             let mut receipt: ApplicationImportReceipt =
                 serde_json::from_slice(&bytes).map_err(|_| Error::IncompatibleStore)?;
-            let catalog: ApplicationCatalog = serde_json::from_slice(
+            // Receipt introspection must understand the current reader floor
+            // and a validated pending upgrade, so startup can verify its exact
+            // source boundary before resuming. This does not open row access.
+            let catalog = crate::application_bootstrap::inspect_catalog(
                 &tx.get(&schema_key())
                     .await?
                     .ok_or(Error::IncompatibleStore)?,
-            )
-            .map_err(|_| Error::IncompatibleStore)?;
+            )?;
             validate_schema(&catalog.schema).map_err(|_| Error::IncompatibleStore)?;
             if receipt.generation != receipt.summary.export_sha256
                 || catalog.generation != receipt.generation

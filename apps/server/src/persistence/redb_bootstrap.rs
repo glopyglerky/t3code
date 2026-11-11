@@ -9,7 +9,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::time::Duration;
 
-#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[path = "redb_schema_upgrade.rs"]
+mod schema_upgrade;
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Migration {
     pub id: String,
     pub name: String,
@@ -39,6 +42,49 @@ fn definition() -> Result<Definition> {
     Ok(definition)
 }
 
+/// Only schema/migration introspection may read a pending upgrade. Application
+/// transactions continue to use decode_catalog and fail closed at its fence.
+pub(crate) fn inspect_catalog(bytes: &[u8]) -> Result<ApplicationCatalog> {
+    decode_catalog(bytes).or_else(|_| schema_upgrade::pending_catalog(bytes))
+}
+
+async fn read_migrations(
+    tx: &mut crate::backend::Transaction,
+    catalog: &ApplicationCatalog,
+) -> Result<Vec<Migration>> {
+    let prefix = row_prefix(&catalog.generation, "effect_sql_migrations")?;
+    let mut end = prefix.clone();
+    *end.last_mut().ok_or(Error::IncompatibleStore)? += 1;
+    let mut cursor = prefix;
+    let mut result = Vec::new();
+    loop {
+        let page = tx.scan(&cursor, &end, 128).await?;
+        let count = page.len();
+        for (key, bytes) in page {
+            let row = decode_row(
+                catalog,
+                table(catalog, "effect_sql_migrations")?,
+                &key,
+                &bytes,
+            )?;
+            result.push(Migration {
+                id: integer(&row.row, "migration_id")?.to_string(),
+                name: text(&row.row, "name")?,
+            });
+            cursor = key;
+            cursor.push(0);
+        }
+        if result.len() > 4096 {
+            return Err(Error::IncompatibleStore);
+        }
+        if count < 128 {
+            break;
+        }
+    }
+    result.sort_by_key(|entry| entry.id.parse::<i64>().unwrap_or(i64::MAX));
+    Ok(result)
+}
+
 impl Store {
     pub async fn application_migrations(&self) -> Result<Vec<Migration>> {
         let mut tx = self.db.begin_read_only().await?;
@@ -46,37 +92,8 @@ impl Store {
             tx.rollback().await?;
             return Ok(Vec::new());
         };
-        let catalog = decode_catalog(&bytes)?;
-        let prefix = row_prefix(&catalog.generation, "effect_sql_migrations")?;
-        let mut end = prefix.clone();
-        *end.last_mut().ok_or(Error::IncompatibleStore)? += 1;
-        let mut cursor = prefix.clone();
-        let mut result = Vec::new();
-        loop {
-            let page = tx.scan(&cursor, &end, 128).await?;
-            let count = page.len();
-            for (key, bytes) in page {
-                let row = decode_row(
-                    &catalog,
-                    table(&catalog, "effect_sql_migrations")?,
-                    &key,
-                    &bytes,
-                )?;
-                result.push(Migration {
-                    id: integer(&row.row, "migration_id")?.to_string(),
-                    name: text(&row.row, "name")?,
-                });
-                cursor = key;
-                cursor.push(0);
-            }
-            if count < 128 {
-                break;
-            }
-            if result.len() > 4096 {
-                return Err(Error::IncompatibleStore);
-            }
-        }
-        result.sort_by_key(|entry| entry.id.parse::<i64>().unwrap_or(i64::MAX));
+        let catalog = inspect_catalog(&bytes)?;
+        let result = read_migrations(&mut tx, &catalog).await?;
         tx.rollback().await?;
         Ok(result)
     }
@@ -90,9 +107,15 @@ impl Store {
             .begin_reserved(Duration::from_secs(5), Duration::from_secs(300))
             .await?;
         if let Some(bytes) = tx.get(&schema_key()).await? {
-            let catalog = decode_catalog(&bytes)?;
+            let catalog = inspect_catalog(&bytes)?;
             if catalog.schema != definition.schema {
-                return Err(Error::Invalid("Native application schema does not match this build; migrate the source with its matching build before importing".into()));
+                tx.rollback().await?;
+                schema_upgrade::upgrade(self, &definition).await?;
+                return Ok(BootstrapResult {
+                    initialized: false,
+                    migrations: definition.migrations,
+                    schema_version: 1,
+                });
             }
             tx.rollback().await?;
             if self.application_migrations().await? != definition.migrations {
@@ -154,7 +177,7 @@ mod tests {
         store.shutdown().await.unwrap();
         let before = std::fs::read(fixture.path()).unwrap();
         let read_only = Store::open_read_only(fixture.path()).await.unwrap();
-        assert_eq!(read_only.application_migrations().await.unwrap().len(), 80);
+        assert_eq!(read_only.application_migrations().await.unwrap().len(), 81);
         assert!(read_only.bootstrap_application().await.is_err());
         read_only.shutdown().await.unwrap();
         assert_eq!(std::fs::read(fixture.path()).unwrap(), before);
@@ -170,10 +193,10 @@ mod tests {
         let store = fixture.initialize().await;
         let first = store.bootstrap_application().await.unwrap();
         assert!(first.initialized);
-        assert_eq!(first.migrations.len(), 80);
+        assert_eq!(first.migrations.len(), 81);
         assert!(store.prepare_application_search().await.unwrap().prepared);
         assert!(!store.bootstrap_application().await.unwrap().initialized);
-        assert_eq!(store.application_migrations().await.unwrap().len(), 80);
+        assert_eq!(store.application_migrations().await.unwrap().len(), 81);
         while !store
             .prepare_application_message_rowids()
             .await

@@ -15,6 +15,7 @@ export type ProjectionLookup =
       readonly record_ids: ReadonlyArray<string>;
     }
   | { readonly kind: "run_message"; readonly thread_id: string; readonly run_id: string }
+  | { readonly kind: "run"; readonly thread_id: string; readonly run_id: string }
   | { readonly kind: "can_start_queued_run"; readonly thread_id: string }
   | { readonly kind: "held_queued_runs"; readonly thread_id: string }
   | { readonly kind: "message_count"; readonly thread_id: string }

@@ -13,9 +13,9 @@ export class SqliteNativeMigrationError extends Schema.TaggedError<SqliteNativeM
   { path: Schema.String, cause: Schema.Defect() },
 ) {}
 
-/** All SQL migrations run on a private backup. Never mutate the retained source. */
-export const snapshotForNativeImport = Effect.fn("snapshotForNativeImport")(function* (
+const snapshotForNativeImportWithMode = Effect.fn("snapshotForNativeImportWithMode")(function* (
   source: string,
+  mode: "preserve-schema" | "migrate",
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -39,10 +39,20 @@ export const snapshotForNativeImport = Effect.fn("snapshotForNativeImport")(func
     },
     catch: (cause) => new SqliteNativeMigrationError({ path: source, cause }),
   });
-  yield* runMigrations().pipe(Effect.provide(NodeSqliteClient.layer({ filename: copied })));
+  if (mode === "migrate") {
+    yield* runMigrations().pipe(Effect.provide(NodeSqliteClient.layer({ filename: copied })));
+  }
   const summary = yield* Effect.try({
     try: () => exportSqliteState({ source: copied, destination: exported }),
     catch: (cause) => new SqliteNativeMigrationError({ path: source, cause }),
   });
   return { path: exported, sha256: summary.sha256 };
 });
+
+/** All SQL migrations run on a private backup. Never mutate the retained source. */
+export const snapshotForNativeImport = (source: string) =>
+  snapshotForNativeImportWithMode(source, "migrate");
+
+/** Verify an existing import at its original schema before native bootstrap upgrades it. */
+export const snapshotForExistingNativeImport = (source: string) =>
+  snapshotForNativeImportWithMode(source, "preserve-schema");

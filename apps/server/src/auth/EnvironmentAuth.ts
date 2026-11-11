@@ -1472,7 +1472,7 @@ const revokePairedClientsThePolicyDisallows = Effect.fn(
   }
 });
 
-export const layerFromStores = Layer.effect(EnvironmentAuth, make).pipe(
+const layerFromStores = Layer.effect(EnvironmentAuth, make).pipe(
   Layer.provideMerge(EnvironmentAuthPolicy.layer),
 );
 export const layer = layerFromStores.pipe(

@@ -2,6 +2,7 @@ import { IDLE_COMPACTION_TEXT, type ThreadId, type GuestShareId } from "@t3tools
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
+import type * as Statement from "effect/sql/Statement";
 import type {
   ShellThreadRow,
   ShellRunRow,
@@ -16,8 +17,7 @@ import type { ProjectionShellRows } from "./ProjectionShellRows.ts";
 type PayloadRow = { readonly payload_json: string };
 const encodeIdList = Schema.encodeSync(Schema.fromJsonString(Schema.Array(Schema.String)));
 
-export const make = Effect.gen(function* () {
-  const sql = yield* SqlClient.SqlClient;
+function shellRunPredicates(sql: SqlClient.SqlClient) {
   // Mirror idleCompactionOf, including JavaScript trim whitespace.
   const isIdleCompactionMessage = (alias: string) => {
     const payload = sql.literal(`${alias}.payload_json`);
@@ -54,6 +54,45 @@ export const make = Effect.gen(function* () {
         )
       )`;
   };
+  return { isIdleCompactionMessage, isSilentShellRun };
+}
+
+/** The same latest visible run is retained by the shell and unanchored history windows. */
+export const presentedShellRunId = (sql: SqlClient.SqlClient, threadId: Statement.Fragment) => {
+  const { isSilentShellRun } = shellRunPredicates(sql);
+  return sql`(
+      SELECT candidate.run_id
+      FROM orchestration_v2_projection_runs candidate
+      WHERE candidate.thread_id = ${threadId}
+        AND NOT (
+          candidate.status = 'queued'
+          AND json_extract(candidate.payload_json, '$.queueHeld') IS 1
+        )
+        AND NOT ${isSilentShellRun("candidate")}
+      ORDER BY candidate.ordinal DESC, candidate.run_id DESC
+      LIMIT 1
+    )`;
+};
+
+export const make = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  const { isIdleCompactionMessage, isSilentShellRun } = shellRunPredicates(sql);
+  const isBackgroundWakeShellRun = (alias: string) => {
+    const run = sql.literal(alias);
+    return sql`EXISTS (
+        SELECT 1 FROM orchestration_v2_projection_messages wake
+        WHERE wake.message_id = json_extract(${run}.payload_json, '$.userMessageId')
+          AND json_extract(wake.payload_json, '$.notification.source.kind')
+            IN ('background_task', 'background_command', 'command', 'monitor')
+          AND json_extract(wake.payload_json, '$.notification.source.work') IS NULL
+          AND json_extract(wake.payload_json, '$.notification.outcome') = 'updated'
+          AND json_extract(wake.payload_json, '$.delegatedCompletion') IS NULL
+      ) AND NOT EXISTS (
+        SELECT 1 FROM orchestration_v2_projection_messages steer
+        WHERE steer.run_id = ${run}.run_id
+          AND json_extract(steer.payload_json, '$.createdBy') = 'user'
+      )`;
+  };
 
   const selectShellThreadRows = (
     threadId?: ThreadId,
@@ -87,6 +126,7 @@ export const make = Effect.gen(function* () {
                 WHERE stop_request.thread_id = t.thread_id AND stop_request.run_id = presented.run_id
                   AND stop_request.type = 'run_interrupt_request'
               ) AS latest_run_stop_requested,
+              ${isBackgroundWakeShellRun("presented")} AS latest_run_background_wake,
               active.run_id AS active_run_id,
               active.status AS active_run_status,
               (
@@ -144,6 +184,7 @@ export const make = Effect.gen(function* () {
                 WHERE stop_request.thread_id = t.thread_id AND stop_request.run_id = blocked.run_id
                   AND stop_request.type = 'run_interrupt_request'
               ) AS blocking_run_stop_requested,
+              ${isBackgroundWakeShellRun("blocked")} AS blocking_run_background_wake,
               (
                 SELECT item.payload_json
                 FROM orchestration_v2_projection_turn_items item
@@ -221,19 +262,8 @@ export const make = Effect.gen(function* () {
               ORDER BY r.ordinal DESC, r.run_id DESC
               LIMIT 1
             )
-            -- The newest run not waiting in a held queue, matching latestUnheldRun.
-            LEFT JOIN orchestration_v2_projection_runs presented ON presented.run_id = (
-              SELECT candidate.run_id
-              FROM orchestration_v2_projection_runs candidate
-              WHERE candidate.thread_id = t.thread_id
-                AND NOT (
-                  candidate.status = 'queued'
-                  AND json_extract(candidate.payload_json, '$.queueHeld') IS 1
-                )
-                AND NOT ${isSilentShellRun("candidate")}
-              ORDER BY candidate.ordinal DESC, candidate.run_id DESC
-              LIMIT 1
-            )
+            LEFT JOIN orchestration_v2_projection_runs presented
+              ON presented.run_id = ${presentedShellRunId(sql, sql.literal("t.thread_id"))}
             LEFT JOIN orchestration_v2_projection_runs blocked ON blocked.run_id = (
               SELECT candidate.run_id
               FROM orchestration_v2_projection_runs candidate
@@ -475,7 +505,7 @@ export const make = Effect.gen(function* () {
           SELECT t.payload_json FROM orchestration_v2_projection_threads t
           WHERE t.deleted_at IS NULL${
             threadId === undefined
-              ? sql` AND json_extract(t.payload_json, '$.archivedAt') IS NULL`
+              ? sql` AND t.archived_at IS NULL`
               : sql` AND t.thread_id = ${threadId}`
           }${
             unsettledOnly

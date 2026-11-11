@@ -36,6 +36,10 @@ pub enum ProjectionLookup {
         thread_id: String,
         run_id: String,
     },
+    Run {
+        thread_id: String,
+        run_id: String,
+    },
     CanStartQueuedRun {
         thread_id: String,
     },
@@ -192,6 +196,9 @@ async fn query(session: &mut Session, query: ProjectionLookup) -> Result<LookupR
                         .extend(owned_payload(session, MESSAGES, &id, Some(&thread_id)).await?);
                 }
             }
+        }
+        ProjectionLookup::Run { thread_id, run_id } => {
+            return required_payload(session, RUNS, &thread_id, &run_id).await;
         }
         ProjectionLookup::RunMessage { thread_id, run_id } => {
             result.owner_exists = owns_row(session, THREADS, &thread_id, &thread_id).await?;

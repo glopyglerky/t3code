@@ -192,13 +192,41 @@ fn validate_catalog(catalog: &ApplicationCatalog) -> Result<()> {
 
 pub(crate) fn encode_catalog(catalog: &ApplicationCatalog) -> Result<Vec<u8>> {
     validate_catalog(catalog)?;
-    bounded_encode(catalog)
+    let mut encoded = serde_json::to_value(catalog).map_err(|_| Error::IncompatibleStore)?;
+    if catalog.schema.tables.iter().any(|table| {
+        table.name == "orchestration_v2_projection_messages"
+            && table.columns.iter().any(|column| column == "search_text")
+    }) {
+        // Older binaries deny unknown catalog fields. They must not serve or
+        // mutate a database whose message/index semantics they cannot preserve.
+        encoded["minimum_reader_migration"] = json!(81);
+    }
+    bounded_encode(&encoded)
 }
 
 pub(crate) fn decode_catalog(bytes: &[u8]) -> Result<ApplicationCatalog> {
+    let mut encoded: Value = serde_json::from_slice(bytes).map_err(|_| Error::IncompatibleStore)?;
+    let minimum = encoded
+        .as_object_mut()
+        .ok_or(Error::IncompatibleStore)?
+        .remove("minimum_reader_migration");
+    if minimum
+        .as_ref()
+        .is_some_and(|minimum| minimum != &json!(81))
+    {
+        return Err(Error::IncompatibleStore);
+    }
     let catalog: ApplicationCatalog =
-        serde_json::from_slice(bytes).map_err(|_| Error::IncompatibleStore)?;
+        serde_json::from_value(encoded).map_err(|_| Error::IncompatibleStore)?;
     validate_catalog(&catalog).map_err(|_| Error::IncompatibleStore)?;
+    if minimum.is_some()
+        && !catalog.schema.tables.iter().any(|table| {
+            table.name == "orchestration_v2_projection_messages"
+                && table.columns.iter().any(|column| column == "search_text")
+        })
+    {
+        return Err(Error::IncompatibleStore);
+    }
     Ok(catalog)
 }
 
@@ -303,7 +331,9 @@ impl ApplicationTransactions {
             .db
             .read(&schema_key())
             .await?
-            .map(|bytes| decode_catalog(&bytes).map(|catalog| catalog.schema))
+            .map(|bytes| {
+                crate::application_bootstrap::inspect_catalog(&bytes).map(|catalog| catalog.schema)
+            })
             .transpose()
     }
 

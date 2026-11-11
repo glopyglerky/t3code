@@ -74,6 +74,7 @@ export function isNativeMaintenanceCommand(message: {
 /**
  * A goal command sent into active work stops that work when it starts or
  * replaces goal work, or ends a goal that is driving the run.
+ * @public Retained upstream helper and source-extracted dispatch oracle contract.
  */
 export function goalCommandStopsActiveRun(
   command: OrchestrationV2GoalCommand,

@@ -292,7 +292,7 @@ export class StorageCleanup extends Context.Service<
   }
 >()("t3/storageCleanup") {}
 
-export const makeWithPersistenceReads = Effect.gen(function* () {
+const makeWithPersistenceReads = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
   const settingsService = yield* Settings.ServerSettingsService;
   const projectStore = yield* ProjectStore.ProjectStoreV2;

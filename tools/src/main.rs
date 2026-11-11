@@ -4,6 +4,7 @@ use serde_json::Value;
 use std::{
     env,
     error::Error,
+    ffi::OsStr,
     fs,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -74,28 +75,198 @@ fn unique_boundary(document: &[u8], marker: &[u8]) -> Result<usize> {
     }
     Ok(positions[0])
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CompilerRoute {
+    Rustc,
+    Lustr,
+}
+
+fn compiler_route(requested: Option<&str>, has_package: bool) -> Result<CompilerRoute> {
+    match requested.unwrap_or(if has_package { "lustr" } else { "rustc" }) {
+        "rustc" => Ok(CompilerRoute::Rustc),
+        "lustr" => Ok(CompilerRoute::Lustr),
+        _ => Err("T3_CODE_LS_COMPILER must be rustc or lustr".into()),
+    }
+}
+
+fn pinned_rust_release(document: &str) -> Result<String> {
+    let mut toolchain = false;
+    let mut release = None;
+    for line in document.lines().map(str::trim) {
+        if line.starts_with('[') {
+            toolchain = line == "[toolchain]";
+        } else if toolchain {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            if key.trim() != "channel" {
+                continue;
+            }
+            if release.is_some() {
+                return Err("duplicate Rust release pin".into());
+            }
+            let value = value.split('#').next().unwrap_or_default().trim();
+            let value = value
+                .strip_prefix('"')
+                .and_then(|value| value.strip_suffix('"'));
+            let Some(value) = value else {
+                return Err("pin a complete Rust release in rust-toolchain.toml".into());
+            };
+            let parts = value.split('.').collect::<Vec<_>>();
+            if parts.len() != 3
+                || parts
+                    .iter()
+                    .any(|part| part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()))
+            {
+                return Err("pin a complete Rust release in rust-toolchain.toml".into());
+            }
+            release = Some(value.to_owned());
+        }
+    }
+    release.ok_or_else(|| "missing Rust release pin in rust-toolchain.toml".into())
+}
+
+fn version_field<'a>(version: &'a str, name: &str) -> Option<&'a str> {
+    version.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        (key == name).then_some(value.trim())
+    })
+}
+
+fn build_target(requested: Option<String>, cargo: Option<String>, version: &str) -> Result<String> {
+    if let (Some(requested), Some(cargo)) = (&requested, &cargo) {
+        if requested != cargo {
+            return Err("CARGO_BUILD_TARGET conflicts with T3_CODE_LS_RUST_TARGET".into());
+        }
+    }
+    requested
+        .or(cargo)
+        .or_else(|| version_field(version, "host").map(str::to_owned))
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "missing Rust compilation target".into())
+}
+
+fn pinned_tool(release: &str, tool: &str) -> Result<PathBuf> {
+    let path = String::from_utf8(output(Command::new("rustup").current_dir(root()).args([
+        "which",
+        "--toolchain",
+        release,
+        tool,
+    ]))?)?;
+    Ok(PathBuf::from(path.trim()).canonicalize()?)
+}
+
+fn check_tool_override(variable: &str, selected: &Path) -> Result<()> {
+    if let Some(value) = env::var_os(variable) {
+        if PathBuf::from(value).canonicalize()? != selected.canonicalize()? {
+            return Err(format!("{variable} conflicts with the selected compiler package").into());
+        }
+    }
+    Ok(())
+}
+
+fn check_compiler_wrapper(variable: &str, value: Option<&OsStr>) -> Result<()> {
+    if value.is_some_and(|value| !value.is_empty()) {
+        return Err(format!("{variable} conflicts with the verified compiler route").into());
+    }
+    Ok(())
+}
+
 fn build() -> Result<()> {
-    let toolchain = PathBuf::from(env::var("T3_CODE_LS_TOOLCHAIN")?).canonicalize()?;
-    let compiler = toolchain.join("bin/rustc");
-    let sysroot = PathBuf::from(
-        env::var_os("T3_CODE_LS_SYSROOT").unwrap_or_else(|| toolchain.clone().into_os_string()),
-    )
-    .canonicalize()?;
-    let version = String::from_utf8(output(Command::new(&compiler).arg("-vV"))?)?;
-    let target = env::var("T3_CODE_LS_RUST_TARGET").or_else(|_| {
-        version
-            .lines()
-            .find_map(|line| line.strip_prefix("host: "))
-            .map(str::to_owned)
-            .ok_or(env::VarError::NotPresent)
-    })?;
+    for variable in [
+        "RUSTC_WRAPPER",
+        "RUSTC_WORKSPACE_WRAPPER",
+        "CARGO_BUILD_RUSTC_WRAPPER",
+        "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
+    ] {
+        check_compiler_wrapper(variable, env::var_os(variable).as_deref())?;
+    }
+    let route = compiler_route(
+        env::var("T3_CODE_LS_COMPILER").ok().as_deref(),
+        env::var_os("T3_CODE_LS_TOOLCHAIN").is_some(),
+    )?;
+    let (mut command, compiler, rustdoc, sysroot, version) = match route {
+        CompilerRoute::Rustc => {
+            if env::var_os("T3_CODE_LS_TOOLCHAIN").is_some()
+                || env::var_os("T3_CODE_LS_SYSROOT").is_some()
+            {
+                return Err(
+                    "stock rustc selection conflicts with a Lustr package or sysroot override"
+                        .into(),
+                );
+            }
+            let release =
+                pinned_rust_release(&fs::read_to_string(root().join("rust-toolchain.toml"))?)?;
+            let compiler = pinned_tool(&release, "rustc")?;
+            let cargo = pinned_tool(&release, "cargo")?;
+            let rustdoc = pinned_tool(&release, "rustdoc")?;
+            for (variable, selected) in [
+                ("RUSTC", &compiler),
+                ("CARGO", &cargo),
+                ("RUSTDOC", &rustdoc),
+            ] {
+                check_tool_override(variable, selected)?;
+            }
+            let version = String::from_utf8(output(Command::new(&compiler).arg("-vV"))?)?;
+            if version_field(&version, "release") != Some(release.as_str()) {
+                return Err("installed rustc does not match rust-toolchain.toml".into());
+            }
+            let sysroot = String::from_utf8(output(
+                Command::new(&compiler).args(["--print", "sysroot"]),
+            )?)?;
+            let sysroot = PathBuf::from(sysroot.trim()).canonicalize()?;
+            let mut command = Command::new(&cargo);
+            command
+                .env("CARGO", &cargo)
+                .env("RUSTUP_TOOLCHAIN", &release);
+            (command, compiler, rustdoc, sysroot, version)
+        }
+        CompilerRoute::Lustr => {
+            let toolchain = PathBuf::from(env::var("T3_CODE_LS_TOOLCHAIN")?).canonicalize()?;
+            let compiler = toolchain.join("bin/rustc");
+            let rustdoc = toolchain.join("bin/rustdoc");
+            let cargo = toolchain.join("bin/cargo");
+            let sysroot = PathBuf::from(
+                env::var_os("T3_CODE_LS_SYSROOT")
+                    .unwrap_or_else(|| toolchain.clone().into_os_string()),
+            )
+            .canonicalize()?;
+            let version = String::from_utf8(output(Command::new(&compiler).arg("-vV"))?)?;
+            let pin: Value =
+                serde_json::from_slice(&fs::read(root().join("toolchain.lock.json"))?)?;
+            for field in ["compiler_revision", "host"] {
+                let expected = pin["compatibility"][field]
+                    .as_str()
+                    .ok_or("missing Lustr compiler identity")?;
+                let key = if field == "compiler_revision" {
+                    "commit-hash"
+                } else {
+                    field
+                };
+                if version_field(&version, key) != Some(expected) {
+                    return Err("Lustr compiler identity does not match toolchain.lock.json".into());
+                }
+            }
+            let mut command = Command::new(toolchain.join("bin/lustr"));
+            command
+                .arg("--bluefe-root")
+                .arg(&toolchain)
+                .env("CARGO", cargo);
+            (command, compiler, rustdoc, sysroot, version)
+        }
+    };
+    let target = build_target(
+        env::var("T3_CODE_LS_RUST_TARGET").ok(),
+        env::var("CARGO_BUILD_TARGET").ok(),
+        &version,
+    )?;
     if !sysroot
         .join("lib/rustlib")
         .join(&target)
         .join("lib")
         .is_dir()
     {
-        return Err(format!("missing produced sysroot for {target}").into());
+        return Err(format!("missing selected compiler's target sysroot for {target}").into());
     }
     let target_dir = PathBuf::from(env::var("CARGO_TARGET_DIR")?);
     if !target_dir.is_absolute() {
@@ -113,11 +284,8 @@ fn build() -> Result<()> {
         env::var("RUSTFLAGS").ok(),
         &sysroot,
     )?;
-    let mut command = Command::new(toolchain.join("bin/lustr"));
     command
         .current_dir(root())
-        .args(["--bluefe-root"])
-        .arg(&toolchain)
         .args([
             "build",
             "--locked",
@@ -131,7 +299,7 @@ fn build() -> Result<()> {
         .arg(&target_dir)
         .arg("--message-format=json")
         .env("RUSTC", &compiler)
-        .env("RUSTDOC", toolchain.join("bin/rustdoc"))
+        .env("RUSTDOC", &rustdoc)
         .env("CARGO_ENCODED_RUSTFLAGS", flags)
         .stderr(Stdio::inherit());
     let compiled = output(&mut command)?;
@@ -160,9 +328,11 @@ fn build() -> Result<()> {
     }
     fs::write(
         destination.join("manifest.json"),
-        serde_json::to_vec_pretty(
-            &serde_json::json!({"target":target,"executables":files,"compiler":version}),
-        )?,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "target":target,"executables":files,"compiler":version,
+            "compilerRoute":match route { CompilerRoute::Rustc => "rustc", CompilerRoute::Lustr => "bluefe-rustc-via-lustr" },
+            "sysroot":sysroot,
+        }))?,
     )?;
     println!(
         "Staged {} Rust executables in {}",
@@ -181,14 +351,28 @@ fn rust_flags(encoded: Option<String>, plain: Option<String>, sysroot: &Path) ->
             .map(str::to_owned)
             .collect(),
     };
-    if flags
-        .iter()
-        .any(|flag| flag == "--sysroot" || flag.starts_with("--sysroot="))
-    {
-        return Err("select sysroot with T3_CODE_LS_SYSROOT".into());
+    let expected = sysroot.to_str().ok_or("sysroot must be UTF-8")?;
+    let mut selected = false;
+    let mut index = 0;
+    while index < flags.len() {
+        let value = if flags[index] == "--sysroot" {
+            index += 1;
+            Some(flags.get(index).ok_or("missing --sysroot value")?.as_str())
+        } else {
+            flags[index].strip_prefix("--sysroot=")
+        };
+        if let Some(value) = value {
+            if selected || value != expected {
+                return Err("conflicting or repeated explicit sysroot selection".into());
+            }
+            selected = true;
+        }
+        index += 1;
     }
-    flags.push("--sysroot".into());
-    flags.push(sysroot.to_str().ok_or("sysroot must be UTF-8")?.into());
+    if !selected {
+        flags.push("--sysroot".into());
+        flags.push(expected.into());
+    }
     Ok(flags.join("\x1f"))
 }
 fn run() -> Result<()> {
@@ -209,6 +393,75 @@ fn main() {
 mod tests {
     use super::*;
     #[test]
+    fn compiler_selection_defaults_to_pinned_stock_without_changing_explicit_routes() {
+        assert_eq!(compiler_route(None, false).unwrap(), CompilerRoute::Rustc);
+        assert_eq!(compiler_route(None, true).unwrap(), CompilerRoute::Lustr);
+        assert_eq!(
+            compiler_route(Some("rustc"), true).unwrap(),
+            CompilerRoute::Rustc
+        );
+        assert_eq!(
+            compiler_route(Some("lustr"), false).unwrap(),
+            CompilerRoute::Lustr
+        );
+        assert!(compiler_route(Some("nightly"), false).is_err());
+        assert!(compiler_route(Some(""), false).is_err());
+    }
+    #[test]
+    fn compiler_wrappers_cannot_replace_verified_tools() {
+        assert!(check_compiler_wrapper("RUSTC_WRAPPER", None).is_ok());
+        assert!(check_compiler_wrapper("RUSTC_WRAPPER", Some(OsStr::new(""))).is_ok());
+        assert!(
+            check_compiler_wrapper("RUSTC_WRAPPER", Some(OsStr::new("other-compiler"))).is_err()
+        );
+    }
+    #[test]
+    fn stock_compiler_requires_an_exact_release_pin() {
+        assert_eq!(
+            pinned_rust_release(
+                "[toolchain]\nchannel = \"1.99.1\" # pinned\nprofile = \"minimal\""
+            )
+            .unwrap(),
+            "1.99.1"
+        );
+        for pin in ["stable", "nightly", "1.99", "1.99.1-beta", "1..1", ""] {
+            assert!(pinned_rust_release(&format!("[toolchain]\nchannel = \"{pin}\"")).is_err());
+        }
+        assert!(pinned_rust_release("[other]\nchannel = \"1.99.1\"").is_err());
+        assert!(
+            pinned_rust_release("[toolchain]\nchannel = \"1.99.1\"\nchannel = \"1.99.2\"").is_err()
+        );
+    }
+    #[test]
+    fn target_selection_preserves_cargo_targets_and_rejects_conflicts() {
+        let version = "rustc 1.99.1\r\nhost: x86_64-unknown-linux-gnu\r\nrelease: 1.99.1\r\n";
+        assert_eq!(version_field(version, "release"), Some("1.99.1"));
+        assert_eq!(
+            build_target(None, None, version).unwrap(),
+            "x86_64-unknown-linux-gnu"
+        );
+        assert_eq!(
+            build_target(None, Some("aarch64-apple-darwin".into()), version).unwrap(),
+            "aarch64-apple-darwin"
+        );
+        assert_eq!(
+            build_target(
+                Some("x86_64-pc-windows-msvc".into()),
+                Some("x86_64-pc-windows-msvc".into()),
+                version
+            )
+            .unwrap(),
+            "x86_64-pc-windows-msvc"
+        );
+        assert!(build_target(
+            Some("aarch64-apple-darwin".into()),
+            Some("x86_64-unknown-linux-gnu".into()),
+            version
+        )
+        .is_err());
+        assert!(build_target(None, None, "rustc without host").is_err());
+    }
+    #[test]
     fn flags_preserve_encoded_values_and_reject_competing_sysroots() {
         assert_eq!(
             rust_flags(
@@ -219,14 +472,42 @@ mod tests {
             .unwrap(),
             "-C\x1flink-arg=a b\x1f--sysroot\x1f/produced"
         );
-        assert!(
+        assert!(rust_flags(
+            Some("--sysroot=/other".into()),
+            None,
+            Path::new("/produced")
+        )
+        .is_err());
+        assert_eq!(
             rust_flags(
-                Some("--sysroot=/other".into()),
+                Some("--sysroot\x1f/produced\x1f-C\x1flink-arg=a b".into()),
                 None,
                 Path::new("/produced")
             )
-            .is_err()
+            .unwrap(),
+            "--sysroot\x1f/produced\x1f-C\x1flink-arg=a b"
         );
+        assert_eq!(
+            rust_flags(
+                Some("--sysroot=/produced".into()),
+                None,
+                Path::new("/produced")
+            )
+            .unwrap(),
+            "--sysroot=/produced"
+        );
+        assert_eq!(
+            rust_flags(
+                Some(String::new()),
+                Some("-C opt-level=2".into()),
+                Path::new("/produced")
+            )
+            .unwrap(),
+            "--sysroot\x1f/produced"
+        );
+        for flags in ["--sysroot", "--sysroot\x1f/produced\x1f--sysroot=/produced"] {
+            assert!(rust_flags(Some(flags.into()), None, Path::new("/produced")).is_err());
+        }
     }
     #[test]
     fn ambiguous_readme_boundaries_are_rejected() {
