@@ -7,7 +7,10 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 import { nativeArtifactFiles, nativeHash, stageNativeArtifacts } from "./native-artifacts.mjs";
-import { databasePackageChecks } from "../packages/shared/src/nativeExecutable.ts";
+import {
+  databaseArtifactFiles,
+  databasePackageChecks,
+} from "../packages/shared/src/nativeExecutable.ts";
 
 const repository = NodeURL.fileURLToPath(new URL("../", import.meta.url));
 const git = (...args) =>
@@ -116,7 +119,7 @@ try {
     databasePackageChecks,
   );
   const databaseFile = `t3-code-ls-db${target.startsWith("win32-") ? ".exe" : ""}`;
-  manifest.packageAcceptance = {
+  const packageAcceptance = {
     status: "passed",
     target,
     sourceCommit,
@@ -124,11 +127,14 @@ try {
     executableSha256: manifest.files[databaseFile],
     checks: [...databasePackageChecks],
   };
-  saveManifest();
   // Exercise the unmodified default selector and reopen through its result.
-  // Any failure revokes this receipt before the candidate can be exported.
+  // Provisional receipts stay in owned probe copies, never the exportable source.
   for (const { name, bundle, database, selectNativeExecutable } of probes) {
-    stageNativeArtifacts(source, bundle, target);
+    NodeFS.writeFileSync(
+      NodePath.join(bundle, "manifest.json"),
+      JSON.stringify({ ...manifest, packageAcceptance }, null, 2) + "\n",
+    );
+    nativeArtifactFiles(bundle, target);
     const executable = selectNativeExecutable("db");
     NodeAssert.equal(NodePath.dirname(executable), bundle);
     NodeAssert.equal(selectNativeExecutable("provider"), undefined);
@@ -143,7 +149,10 @@ try {
   );
   NodeAssert.equal(git("rev-parse", "HEAD"), sourceCommit);
   NodeAssert.equal(git("status", "--porcelain", "--untracked-files=normal"), "");
-  nativeArtifactFiles(source, target);
+  // A killed probe cannot leave the supplied bundle with an unearned receipt.
+  manifest.packageAcceptance = packageAcceptance;
+  databaseArtifactFiles(manifest, source, target);
+  saveManifest();
   report.bundleSha256 = nativeHash(manifestPath);
   report.status = "passed";
   save();

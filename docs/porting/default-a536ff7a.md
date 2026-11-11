@@ -73,7 +73,9 @@ Automatic builds run the package probe before caching or staging. Ordinary
 selection rejects lifecycle-only candidates; the package receipt must match the
 source, upstream revision, target and database executable hash. The owned probe
 first executes each layout directly, then checks normal default selection and
-reopen with the completed receipt. A failure revokes that receipt before export.
+reopen using provisional receipts inside its owned copies. Only after all checks
+pass does it publish the source bundle's receipt; interruption cannot leave an
+unqualified source bundle marked as passed.
 The full fork workflow must pass on the candidate before main can be advanced.
 
 This record describes implementation and required qualification, not an invented
