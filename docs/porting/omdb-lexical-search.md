@@ -45,7 +45,8 @@ general Unicode normalization:
 | Source | Immutable Git blob | Use |
 | --- | --- | --- |
 | [sqlite/sqlite: ext/fts5/fts5_unicode2.c](https://github.com/sqlite/sqlite/blob/master/ext/fts5/fts5_unicode2.c) | `2133d5d5b894c35fbbe642a32ee027ca15ddab33` | Legacy Unicode fold and complex Latin diacritic tables |
-| [sqlite/sqlite: ext/fts5/fts5_tokenize.c](https://github.com/sqlite/sqlite/blob/master/ext/fts5/fts5_tokenize.c) | `94132272fb6e3a7a04c4108f7cd4ddd2a1e4c42d` | Trigram positions and UTF-8 scalar handling |
+| [sqlite/sqlite: ext/fts5/fts5_tokenize.c](https://github.com/sqlite/sqlite/blob/master/ext/fts5/fts5_tokenize.c) | `94132272fb6e3a7a04c4108f7cd4ddd2a1e4c42d` | Trigram positions |
+| [sqlite/sqlite: src/utf.c](https://github.com/sqlite/sqlite/blob/version-3.54.0/src/utf.c) | `e8bb63979703241b038cac37a686de2fbe9616b2` | Scalar decoding used by the pinned Node 26 SQLite 3.54 amalgamation |
 
 The links identify the upstream files; the Git blob IDs identify the exact
 translated bytes. SQLite's blessing is retained in `redb_search_unicode.rs`:
@@ -55,8 +56,9 @@ translated bytes. SQLite's blessing is retained in `redb_search_unicode.rs`:
 > May you share freely, never taking more than you give.
 
 In particular, trigram `remove_diacritics=1` uses SQLite's fold mode 2. Dropped
-combining marks do not consume trigram positions. SQLite's UTF-8 reader replaces
-U+FFFE and U+FFFF with U+FFFD; other planes' noncharacters are unchanged. The
+combining marks do not consume trigram positions. The pinned SQLite 3.54
+amalgamation preserves U+FFFE and U+FFFF as distinct scalars, as well as other
+planes' noncharacters. Rust strings already exclude malformed UTF-8 and surrogates. The
 application's curly-apostrophe replacement occurs before indexing.
 
 ## Live writes and bounded index size
