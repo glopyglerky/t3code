@@ -122,8 +122,42 @@ const create = (commandId, projectId, workspaceRoot) => ({
 });
 
 try {
+  for (const mode of ["local", "read-only-local", "exclusive-local"]) {
+    // Open failures are request-correlated protocol errors, not an unsolicited
+    // transport exit. They must still leave the missing database untouched.
+    const rejected = NodeChildProcess.spawnSync(database, [mode, fixture.databasePath], {
+      cwd: root,
+      input: '{"operation":"snapshot"}\n{"operation":"snapshot"}\n',
+      encoding: "utf8",
+      env: {},
+      timeout: 10_000,
+    });
+    NodeAssert.equal(rejected.status, 0, rejected.stderr);
+    NodeAssert.equal(rejected.stderr, "");
+    const frames = rejected.stdout.trimEnd().split("\n");
+    NodeAssert.equal(frames.length, 1);
+    const response = JSON.parse(frames[0]);
+    NodeAssert.deepEqual(Object.keys(response).sort(), ["error", "ok"]);
+    NodeAssert.equal(response.ok, false);
+    NodeAssert.equal(response.error.kind, "database_error");
+    NodeAssert.equal(typeof response.error.message, "string");
+    NodeAssert.notEqual(response.error.message, "");
+    NodeAssert.deepEqual(await NodeFSP.readdir(root), []);
+
+    const noRequest = NodeChildProcess.spawnSync(database, [mode, fixture.databasePath], {
+      cwd: root,
+      input: "",
+      encoding: "utf8",
+      env: {},
+      timeout: 10_000,
+    });
+    NodeAssert.equal(noRequest.status, 0, noRequest.stderr);
+    NodeAssert.equal(noRequest.stdout, "");
+    NodeAssert.equal(noRequest.stderr, "");
+    NodeAssert.deepEqual(await NodeFSP.readdir(root), []);
+  }
+  checked("missing-store opens return one typed rejection only after a request and create no files");
   for (const args of [
-    ["local", fixture.databasePath],
     ["initialize-loopback", "ws://127.0.0.1:8000"],
     ["loopback", "ws://127.0.0.1:8000"],
     ["remote", "wss://example.invalid"],
@@ -140,7 +174,7 @@ try {
     NodeAssert.notEqual(rejected.stderr, "");
     NodeAssert.deepEqual(await NodeFSP.readdir(root), []);
   }
-  checked("ordinary open requires an existing store and removed network modes cannot create one");
+  checked("removed network modes fail as invalid CLI arguments and cannot create a store");
   let left = client("initialize");
   NodeAssert.deepEqual(await snapshot(left), { revision: 0, last_sequence: 0, projections: [] });
   let right = client();
@@ -667,7 +701,7 @@ try {
     boundaries: [
       "one local database file; serialized write transactions; no distributed HA",
       "Lust planner and projector; Cargo-built embedded database host",
-      "standalone native store; existing application remains SQLite",
+      "standalone command-store gate; production omdb composition is qualified separately",
       "archive recovery restores NDJSON, not a live application database",
       "no throughput or power-failure durability claim",
     ],
