@@ -57,6 +57,7 @@ jobs:
             tools/fetch-migration-sources.test.mjs \
             tools/hybrid-checks.test.mjs \
             tools/check-acceptance.test.mjs \
+            tools/check-runtime-arguments.test.mjs \
             tools/omdb-source.test.mjs
       - name: Plan work against the trusted upstream default branch
         run: python3 tools/plan-porting.py --repo-root "$GITHUB_WORKSPACE" --fetch-default --output "$RUNNER_TEMP/porting-plan.json" --summary "$GITHUB_STEP_SUMMARY"

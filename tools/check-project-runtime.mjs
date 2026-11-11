@@ -1,5 +1,6 @@
 import * as NodeAssert from "node:assert/strict";
 import * as NodeChildProcess from "node:child_process";
+import { checkArgumentRejection } from "./check-runtime-arguments.mjs";
 import {
   projectCases,
   projectOracle,
@@ -88,7 +89,8 @@ for (const [label, input] of [
 ]) {
   rejected(label, input);
 }
-rejected("unexpected argv", validFrame, "invalid request", ["--help"]);
+checkArgumentRejection(executable, ["--help"], validFrame, "t3-code-ls-project: invalid request\n");
+checks++;
 NodeAssert.deepEqual(succeeded(" \t" + validFrame.trimEnd() + " \t\n"), projectOracle(valid));
 const unicode = copy(valid);
 unicode.command.title = "💬";

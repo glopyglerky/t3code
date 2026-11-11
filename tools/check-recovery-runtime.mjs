@@ -4,6 +4,7 @@ import * as NodeModule from "node:module";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import { upstreamSource } from "./upstream-source.mjs";
+import { checkArgumentRejection } from "./check-runtime-arguments.mjs";
 
 const executable = process.argv[2];
 NodeAssert.ok(executable, "Pass the native recovery executable");
@@ -345,7 +346,13 @@ for (const changes of [
   { projection: { nodes: [], subagents: [], turnItems: [] } },
 ])
   rejected("invalid envelope or required field", JSON.stringify({ ...empty, ...changes }) + "\n");
-rejected("unsupported command arguments", valid + "\n", "invalid request", ["unexpected"]);
+checkArgumentRejection(
+  executable,
+  ["unexpected"],
+  valid + "\n",
+  "t3-code-ls-recovery: invalid request\n",
+);
+checks++;
 rejected("duplicate envelope keys", valid.slice(0, -1) + ',"version":1}\n', "duplicate object key");
 rejected(
   "escaped duplicate keys",
