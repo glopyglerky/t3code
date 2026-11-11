@@ -2,7 +2,7 @@ name: Rust port qualification
 
 on:
   push:
-    branches: [main, "codex/t3code-ls-hybrid-*"]
+    branches: [main, "codex/t3code-ls-hybrid-*", "ci/*"]
   workflow_dispatch:
     inputs:
       full:
