@@ -18,6 +18,8 @@ pub mod application_positions;
 pub mod application_projections;
 #[path = "../../../apps/server/src/orchestration-v2/redb_project_rows.rs"]
 pub mod application_projects;
+#[path = "../../../apps/server/src/pullRequest/redb_pull_request_rows.rs"]
+pub mod application_pull_requests;
 #[path = "../../../apps/server/src/persistence/redb_command_receipts.rs"]
 pub mod application_receipts;
 #[path = "../../../apps/server/src/persistence/redb_application_rows.rs"]

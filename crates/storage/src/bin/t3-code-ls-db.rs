@@ -14,6 +14,7 @@ use t3_code_ls_storage::application_projections::{
     ProjectionApply, ProjectionGuard, ProjectionRead,
 };
 use t3_code_ls_storage::application_projects::{ProjectRecord, ProjectSelection};
+use t3_code_ls_storage::application_pull_requests::{FileUpdate, GuideKey, ViewedScope};
 use t3_code_ls_storage::application_receipts::ReceiptRow;
 use t3_code_ls_storage::outbox::{self, EnqueueEffect};
 use t3_code_ls_storage::project_service::{ProjectRequest, execute_project};
@@ -137,6 +138,26 @@ enum Request {
     ApplicationProjectsUpsert {
         transaction_id: String,
         row: ProjectRecord,
+    },
+    ApplicationViewedFilesPrepare {},
+    ApplicationGuideGet {
+        transaction_id: String,
+        key: GuideKey,
+    },
+    ApplicationGuidePut {
+        transaction_id: String,
+        key: GuideKey,
+        guide_json: String,
+    },
+    ApplicationViewedFilesList {
+        transaction_id: String,
+        scope: ViewedScope,
+    },
+    ApplicationViewedFilesSet {
+        transaction_id: String,
+        scope: ViewedScope,
+        files: Vec<FileUpdate>,
+        viewed_at: String,
     },
     ApplicationProjectionsPrepare {},
     ApplicationProjectionsApply {
@@ -331,6 +352,7 @@ impl Request {
             | Self::ApplicationReceiptsPrepare { .. }
             | Self::ApplicationPositionsPrepare { .. }
             | Self::ApplicationProjectsPrepare { .. }
+            | Self::ApplicationViewedFilesPrepare { .. }
             | Self::ApplicationProjectionsPrepare { .. }
             | Self::ApplicationOutboxPrepare { .. }
             | Self::ImportSqliteApplication { .. }
@@ -369,6 +391,10 @@ impl Request {
             | Self::ApplicationPositionsAllocate { .. }
             | Self::ApplicationProjectsSelect { .. }
             | Self::ApplicationProjectsUpsert { .. }
+            | Self::ApplicationGuideGet { .. }
+            | Self::ApplicationGuidePut { .. }
+            | Self::ApplicationViewedFilesList { .. }
+            | Self::ApplicationViewedFilesSet { .. }
             | Self::ApplicationProjectionsApply { .. }
             | Self::ApplicationProjectionsNormalization { .. }
             | Self::ApplicationProjectionsRead { .. }
@@ -630,6 +656,23 @@ async fn evaluate(
             row,
         } => {
             transactions.projects_upsert(&transaction_id, row).await?;
+            Ok(json!({"written":true}))
+        }
+        Request::ApplicationViewedFilesPrepare {} => {
+            serde_json::to_value(store.prepare_application_viewed_files().await?)
+        }
+        Request::ApplicationGuideGet { transaction_id, key } => {
+            serde_json::to_value(transactions.guide_get(&transaction_id, key).await?)
+        }
+        Request::ApplicationGuidePut { transaction_id, key, guide_json } => {
+            transactions.guide_put(&transaction_id, key, guide_json).await?;
+            Ok(json!({"written":true}))
+        }
+        Request::ApplicationViewedFilesList { transaction_id, scope } => {
+            serde_json::to_value(transactions.viewed_files_list(&transaction_id, scope).await?)
+        }
+        Request::ApplicationViewedFilesSet { transaction_id, scope, files, viewed_at } => {
+            transactions.viewed_files_set(&transaction_id, scope, files, viewed_at).await?;
             Ok(json!({"written":true}))
         }
         Request::ApplicationProjectionsPrepare {} => {

@@ -60,6 +60,10 @@ const applicationOperations = {
   application_outbox_retry: "write",
   application_outbox_fail: "write",
   application_outbox_prune: "write",
+  application_guide_get: "read",
+  application_guide_put: "write",
+  application_viewed_files_list: "read",
+  application_viewed_files_set: "write",
 } as const;
 export type ApplicationOperation = keyof typeof applicationOperations;
 const allowedOperations = new Set<string>(Object.keys(applicationOperations));
@@ -123,6 +127,7 @@ export interface RedbClientShape {
   readonly prepareReceipts: Effect.Effect<PreparationResult, RedbClientError>;
   readonly preparePositions: Effect.Effect<PreparationResult, RedbClientError>;
   readonly prepareProjects: Effect.Effect<PreparationResult, RedbClientError>;
+  readonly prepareViewedFiles: Effect.Effect<PreparationResult, RedbClientError>;
   readonly prepareProjections: Effect.Effect<PreparationResult, RedbClientError>;
   readonly prepareOutbox: Effect.Effect<PreparationResult, RedbClientError>;
 }
@@ -471,6 +476,10 @@ export const make = Effect.gen(function* () {
     prepareProjects: Effect.gen(function* () {
       yield* outsideTransaction;
       return yield* database.request({ operation: "application_projects_prepare" }, Prepared);
+    }),
+    prepareViewedFiles: Effect.gen(function* () {
+      yield* outsideTransaction;
+      return yield* database.request({ operation: "application_viewed_files_prepare" }, Prepared);
     }),
     prepareProjections: Effect.gen(function* () {
       yield* outsideTransaction;
