@@ -2,24 +2,34 @@
 // Run from a clean CI checkout after installing Playwright Chromium and building the native helpers:
 // node apps/web/scripts/verify-hybrid-client.ts /absolute/path/to/proof [upstream|native|both]
 // The fixture and application state stay outside the checkout. They are retained for investigation.
-import * as Assert from "node:assert/strict";
-import * as ChildProcess from "node:child_process";
+import * as NodeAssert from "node:assert/strict";
+import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
-import { stripVTControlCharacters } from "node:util";
+import * as NodeUtil from "node:util";
 import {
   ORCHESTRATION_PROTOCOL_HEADER,
   ORCHESTRATION_PROTOCOL_VERSION_TEXT,
   OrchestrationV2ThreadDetailSnapshot,
+  type ServerProvider,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
-import { chromium, type Browser, type Page } from "playwright";
+import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { nativeExecutable } from "@t3tools/shared/nativeExecutable";
 import { inspectNativeReplay } from "./hybrid-client-database.ts";
+import {
+  applicationLaunch,
+  browserIsolationArgs,
+  createChildIsolation,
+  enabledAvailableProviders,
+  loopbackGuard,
+  rejectDotenvFiles,
+  replayConfiguration,
+} from "./hybrid-client-isolation.ts";
 import {
   assertReplayTurnLinks,
   replayTurnIdentity,
@@ -30,7 +40,7 @@ type Implementation = "upstream" | "native";
 type DevReplayWindow = Window & {
   t3dev?: { replayScenarios: () => string[]; replay: (scenario: string) => Promise<string> };
 };
-type OwnedApplication = { pid: number; pairingUrl: string; stop: () => Promise<void> };
+type OwnedApplication = { pids: number[]; pairingUrl: string; stop: () => Promise<void> };
 
 const repoRoot = NodeFS.realpathSync(NodeURL.fileURLToPath(new URL("../../../", import.meta.url)));
 const timeoutMs = 90_000;
@@ -41,6 +51,10 @@ const decodeSnapshot = Schema.decodeUnknownSync(
 );
 const mode = process.argv[3] ?? "both";
 const proofArgument = process.argv[2];
+// oxlint-disable-next-line t3code/no-global-process-runtime -- standalone acceptance records the actual runner, not injected application state.
+const runnerPlatform = process.platform;
+// oxlint-disable-next-line t3code/no-global-process-runtime -- standalone acceptance must identify the binary's actual host architecture.
+const runnerArchitecture = process.arch;
 
 if (
   !proofArgument ||
@@ -51,7 +65,7 @@ if (
     "Usage: node apps/web/scripts/verify-hybrid-client.ts /absolute/proof-dir [upstream|native|both]",
   );
 }
-if (process.platform !== "linux") {
+if (runnerPlatform !== "linux") {
   throw new Error(
     "This acceptance runner qualifies Linux only; other platforms require their own gate.",
   );
@@ -73,9 +87,20 @@ const proofRoot = NodeFS.realpathSync(proofArgument);
 outsideCheckout(proofRoot);
 const runRoot = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3code-hybrid-client-"));
 outsideCheckout(NodeFS.realpathSync(runRoot));
+rejectDotenvFiles(repoRoot);
+const nodeExecutable = NodeFS.realpathSync(process.execPath);
+const gitExecutable = NodeFS.realpathSync("/usr/bin/git");
+const controllerIsolation = createChildIsolation(
+  NodePath.join(runRoot, "controller"),
+  nodeExecutable,
+  gitExecutable,
+);
 
 function redact(text: string): string {
-  return stripVTControlCharacters(text).replace(/([#?&]token=)[^\s&"'<>]+/giu, "$1[REDACTED]");
+  return NodeUtil.stripVTControlCharacters(text).replace(
+    /([#?&]token=)[^\s&"'<>]+/giu,
+    "$1[REDACTED]",
+  );
 }
 
 function writeJson(path: string, value: unknown): void {
@@ -86,8 +111,9 @@ function writeJson(path: string, value: unknown): void {
 }
 
 function git(args: string[], cwd = repoRoot): string {
-  return ChildProcess.execFileSync("git", args, {
+  return NodeChildProcess.execFileSync(gitExecutable, args, {
     cwd,
+    env: controllerIsolation.env,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   }).trim();
@@ -132,6 +158,31 @@ async function availablePorts(): Promise<number[]> {
 
 let activeApplication: OwnedApplication | undefined;
 let browser: Browser | undefined;
+const pageGuards = new WeakMap<Page, ReturnType<typeof loopbackGuard>>();
+
+async function guardContext(
+  context: BrowserContext,
+  guard: ReturnType<typeof loopbackGuard>,
+): Promise<void> {
+  await context.route("**/*", (route) =>
+    guard.http({
+      url: () => route.request().url(),
+      fetch: (options) => route.fetch(options),
+      fulfill: (response) => route.fulfill({ response }),
+      abort: () => route.abort("blockedbyclient"),
+    }),
+  );
+  await context.routeWebSocket("**/*", (route) =>
+    guard.socket({
+      url: () => route.url(),
+      connect: () => {
+        route.connectToServer();
+      },
+      close: () =>
+        route.close({ code: 1008, reason: "Qualification permits owned loopback origins only" }),
+    }),
+  );
+}
 
 async function startApplication(
   implementation: Implementation,
@@ -139,44 +190,21 @@ async function startApplication(
   serverPort: number,
   webPort: number,
   logPath: string,
+  isolation: ReturnType<typeof createChildIsolation>,
+  policyPath: string,
 ): Promise<OwnedApplication> {
-  const env = { ...process.env };
-  // Component overrides would invalidate an explicit upstream/native comparison.
-  for (const name of Object.keys(env)) {
-    if (/^T3_CODE_LS_.*_EXECUTABLE$/.test(name)) delete env[name];
-  }
-  Object.assign(env, {
-    PATH: `${NodePath.join(repoRoot, "node_modules", ".bin")}${NodePath.delimiter}${env.PATH ?? ""}`,
-    T3_CODE_LS_IMPLEMENTATION: implementation,
-    T3CODE_HOME: stateDirectory,
-    T3CODE_DEV_SEED: "0",
-    T3CODE_TELEMETRY_ENABLED: "false",
-    T3CODE_NO_BROWSER: "1",
-    T3CODE_PORT_OFFSET: String(webPort - 5733),
-    FORCE_COLOR: "0",
-    NO_COLOR: "1",
+  rejectDotenvFiles(repoRoot);
+  const launch = applicationLaunch({
+    repoRoot,
+    stateDirectory,
+    serverPort,
+    webPort,
+    policyPath,
+    implementation,
+    isolation,
   });
   NodeFS.writeFileSync(logPath, "");
-  const child = ChildProcess.spawn(
-    process.execPath,
-    [
-      "scripts/dev-runner.ts",
-      "dev",
-      "--home-dir",
-      stateDirectory,
-      "--no-seed",
-      "--no-auto-bootstrap-project-from-cwd",
-      "--port",
-      String(serverPort),
-    ],
-    { cwd: repoRoot, env, detached: true, stdio: ["ignore", "pipe", "pipe"] },
-  );
-  const pid = child.pid;
-  if (pid === undefined) {
-    await new Promise<never>((_, reject) => child.once("error", reject));
-    throw new Error("The development runner did not receive a process ID");
-  }
-
+  const children: Array<{ pid: number; exited: Promise<void> }> = [];
   let stopping = false;
   let pairingUrl: string | undefined;
   let viteReady = false;
@@ -186,24 +214,19 @@ async function startApplication(
     readyResolve = resolve;
     readyReject = reject;
   });
+  void ready.catch(() => {});
   const timer = setTimeout(
     () => readyReject(new Error(`Application startup timed out; see ${logPath}`)),
     startupTimeoutMs,
   );
-  const exited = new Promise<void>((resolve) => child.once("close", () => resolve()));
-  child.once("error", (error) => readyReject(error));
-  child.once("exit", (code, signal) => {
-    if (!stopping)
-      readyReject(new Error(`Development runner exited (${code ?? signal}); see ${logPath}`));
-  });
 
   function consumeLine(raw: string): void {
-    const line = stripVTControlCharacters(raw);
+    const line = NodeUtil.stripVTControlCharacters(raw);
     NodeFS.appendFileSync(logPath, `${redact(line)}\n`);
     const candidate = line.match(/https?:\/\/[^\s"'<>]+\/pair#token=[^\s"'<>]+/u)?.[0];
     if (candidate) {
       const url = new URL(candidate);
-      if (url.origin !== `http://localhost:${webPort}`) {
+      if (url.origin !== launch.webOrigin) {
         readyReject(new Error(`Pairing URL has an unexpected origin: ${url.origin}`));
       } else {
         pairingUrl = candidate;
@@ -213,28 +236,44 @@ async function startApplication(
     if (pairingUrl && viteReady) readyResolve();
   }
 
-  for (const stream of [child.stdout, child.stderr]) {
-    let pending = "";
-    stream.setEncoding("utf8");
-    stream.on("data", (chunk: string) => {
-      pending += chunk;
-      const lines = pending.split(/\r?\n/u);
-      pending = lines.pop() ?? "";
-      for (const line of lines) consumeLine(line);
+  function ownChild(child: NodeChildProcess.ChildProcess, label: string): void {
+    const exited = new Promise<void>((resolve) => child.once("close", () => resolve()));
+    child.once("error", (error) => readyReject(error));
+    child.once("exit", (code, signal) => {
+      if (!stopping) readyReject(new Error(`${label} exited (${code ?? signal}); see ${logPath}`));
     });
-    stream.once("end", () => {
-      if (pending) consumeLine(pending);
-    });
+    if (child.pid === undefined) {
+      readyReject(new Error(`${label} did not receive a process ID`));
+    } else {
+      children.push({ pid: child.pid, exited });
+    }
+    for (const stream of [child.stdout, child.stderr]) {
+      if (!stream) continue;
+      let pending = "";
+      stream.setEncoding("utf8");
+      stream.on("data", (chunk: string) => {
+        pending += chunk;
+        const lines = pending.split(/\r?\n/u);
+        pending = lines.pop() ?? "";
+        for (const line of lines) consumeLine(line);
+      });
+      stream.once("end", () => {
+        if (pending) consumeLine(pending);
+      });
+    }
   }
 
   const stop = async () => {
     if (stopping) return;
     stopping = true;
+    readyReject(new Error("Owned application stopped before startup completed"));
     const signal = (value: NodeJS.Signals) => {
-      try {
-        process.kill(-pid, value);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      for (const { pid } of children) {
+        try {
+          process.kill(-pid, value);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+        }
       }
     };
     signal("SIGTERM");
@@ -242,22 +281,48 @@ async function startApplication(
     let deadlineTimer: ReturnType<typeof setTimeout>;
     const deadline = new Promise<never>((_, reject) => {
       deadlineTimer = setTimeout(
-        () => reject(new Error(`Owned process group ${pid} did not close within 15 seconds`)),
+        () => reject(new Error("Owned application process groups did not close within 15 seconds")),
         15_000,
       );
     });
     try {
-      await Promise.race([exited, deadline]);
+      await Promise.race([Promise.all(children.map((child) => child.exited)), deadline]);
     } finally {
       clearTimeout(killTimer);
       clearTimeout(deadlineTimer!);
     }
   };
-  const application: OwnedApplication = { pid, pairingUrl: "", stop };
+  const application: OwnedApplication = { pids: [], pairingUrl: "", stop };
   activeApplication = application;
   try {
+    const bootstrapPath = NodePath.join(isolation.root, "bootstrap.json");
+    NodeFS.writeFileSync(bootstrapPath, `${JSON.stringify(launch.bootstrap)}\n`, { mode: 0o600 });
+    const bootstrapFd = NodeFS.openSync(bootstrapPath, "r");
+    try {
+      ownChild(
+        NodeChildProcess.spawn(nodeExecutable, launch.serverArgs, {
+          cwd: NodePath.join(repoRoot, "apps/server"),
+          env: launch.env,
+          detached: true,
+          stdio: ["ignore", "pipe", "pipe", bootstrapFd],
+        }),
+        "Source server",
+      );
+    } finally {
+      NodeFS.closeSync(bootstrapFd);
+    }
+    ownChild(
+      NodeChildProcess.spawn(nodeExecutable, launch.webArgs, {
+        cwd: NodePath.join(repoRoot, "apps/web"),
+        env: launch.env,
+        detached: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      }),
+      "Source web client",
+    );
+    application.pids = children.map(({ pid }) => pid);
     await ready;
-    Assert.ok(pairingUrl);
+    NodeAssert.ok(pairingUrl);
     application.pairingUrl = pairingUrl;
     return application;
   } catch (error) {
@@ -289,6 +354,27 @@ async function completeInitialSetup(page: Page): Promise<void> {
   // Source development mode supplies the free replay agent. Requiring its row and
   // the enabled Start button also checks provider discovery without a real sign-in.
   await welcome.getByText("Replay (dev)", { exact: true }).waitFor({ state: "visible" });
+  const providers = await page.evaluate(async () => {
+    // Read the real client state without introducing a production-only test hook.
+    const stateModule = "/src/state/server.ts";
+    const registryModule = "/src/rpc/atomRegistry.ts";
+    const [{ primaryServerProvidersAtom }, { appAtomRegistry }] = await Promise.all([
+      import(stateModule),
+      import(registryModule),
+    ]);
+    const snapshots = appAtomRegistry.get(primaryServerProvidersAtom) as readonly ServerProvider[];
+    return snapshots.map(({ instanceId, driver, availability, enabled }) => ({
+      instanceId,
+      driver,
+      availability,
+      enabled,
+    }));
+  });
+  NodeAssert.deepEqual(
+    enabledAvailableProviders(providers),
+    [{ instanceId: "devReplay", driver: "acpRegistry" }],
+    "Only the local replay provider may be available during qualification",
+  );
   await welcome
     .getByText(/^Looking for projects in your .* history…$/u)
     .waitFor({ state: "hidden" });
@@ -306,17 +392,22 @@ async function readThreadSnapshot(
   threadId: string,
 ): Promise<OrchestrationV2ThreadDetailSnapshot> {
   // Read the existing authenticated application contract with this browser session's cookies.
-  const response = await page.request.get(
-    new URL(`/api/orchestration/threads/${encodeURIComponent(threadId)}`, page.url()).href,
-    {
-      headers: { [ORCHESTRATION_PROTOCOL_HEADER]: ORCHESTRATION_PROTOCOL_VERSION_TEXT },
-      timeout: timeoutMs,
-    },
-  );
-  Assert.ok(response.ok(), `Thread snapshot failed with HTTP ${response.status()}`);
+  const snapshotUrl = new URL(
+    `/api/orchestration/threads/${encodeURIComponent(threadId)}`,
+    page.url(),
+  ).href;
+  const guard = pageGuards.get(page);
+  NodeAssert.ok(guard, "Every browser page must have the loopback guard installed");
+  guard.assertUrl(snapshotUrl);
+  const response = await page.request.get(snapshotUrl, {
+    headers: { [ORCHESTRATION_PROTOCOL_HEADER]: ORCHESTRATION_PROTOCOL_VERSION_TEXT },
+    timeout: timeoutMs,
+    maxRedirects: 0,
+  });
+  NodeAssert.ok(response.ok(), `Thread snapshot failed with HTTP ${response.status()}`);
   const snapshot = decodeSnapshot(await response.json());
   snapshotMetadata.set(page, summarizeSnapshot(snapshot));
-  Assert.equal(snapshot.projection.thread.id, threadId);
+  NodeAssert.equal(snapshot.projection.thread.id, threadId);
   return snapshot;
 }
 
@@ -372,35 +463,39 @@ async function assertCompleted(page: Page, threadId: string, identity: ReplayTur
     .getByRole("button", { name: "Stop generation", exact: true })
     .waitFor({ state: "hidden", timeout: timeoutMs });
   const snapshot = await readThreadSnapshot(page, threadId);
-  Assert.equal(snapshot.projection.runs.length, 1, "Recovery must not create a second fixture run");
+  NodeAssert.equal(
+    snapshot.projection.runs.length,
+    1,
+    "Recovery must not create a second fixture run",
+  );
   const run = snapshot.projection.runs.find((item) => item.id === identity.runId);
   const attempt = snapshot.projection.attempts.find((item) => item.id === identity.attemptId);
   const providerTurn = snapshot.projection.providerTurns.find(
     (item) => item.id === identity.providerTurnId,
   );
-  Assert.ok(run, "The original replay run must still exist");
-  Assert.ok(attempt, "The original replay attempt must still exist");
-  Assert.ok(providerTurn, "The original replay provider turn must still exist");
-  Assert.equal(run.status, "completed", `Replay run ${run.id} did not complete`);
-  Assert.equal(attempt.status, "completed", `Replay attempt ${attempt.id} did not complete`);
-  Assert.equal(
+  NodeAssert.ok(run, "The original replay run must still exist");
+  NodeAssert.ok(attempt, "The original replay attempt must still exist");
+  NodeAssert.ok(providerTurn, "The original replay provider turn must still exist");
+  NodeAssert.equal(run.status, "completed", `Replay run ${run.id} did not complete`);
+  NodeAssert.equal(attempt.status, "completed", `Replay attempt ${attempt.id} did not complete`);
+  NodeAssert.equal(
     providerTurn.status,
     "completed",
     `Replay provider turn ${providerTurn.id} did not complete`,
   );
-  Assert.equal(attempt.runId, run.id);
-  Assert.equal(attempt.providerThreadId, run.providerThreadId);
-  Assert.equal(attempt.rootNodeId, run.rootNodeId);
+  NodeAssert.equal(attempt.runId, run.id);
+  NodeAssert.equal(attempt.providerThreadId, run.providerThreadId);
+  NodeAssert.equal(attempt.rootNodeId, run.rootNodeId);
   assertReplayTurnLinks(attempt, providerTurn);
-  Assert.ok(run.completedAt);
-  Assert.ok(attempt.completedAt);
-  Assert.ok(providerTurn.completedAt);
+  NodeAssert.ok(run.completedAt);
+  NodeAssert.ok(attempt.completedAt);
+  NodeAssert.ok(providerTurn.completedAt);
   const message = snapshot.projection.messages.find(
     (item) =>
       item.role === "assistant" && item.runId === run.id && item.text.includes(replayMarker),
   );
-  Assert.ok(message, "The completed replay text must belong to the recorded run");
-  Assert.equal(message.streaming, false);
+  NodeAssert.ok(message, "The completed replay text must belong to the recorded run");
+  NodeAssert.equal(message.streaming, false);
   return {
     ...identity,
     projectId: snapshot.projection.thread.projectId,
@@ -422,6 +517,23 @@ async function exercise(implementation: Implementation): Promise<void> {
   const workspace = NodePath.join(runRoot, implementation, "hybrid-fixture");
   const stateDirectory = NodePath.join(runRoot, implementation, "state");
   NodeFS.mkdirSync(NodePath.join(workspace, "src"), { recursive: true });
+  const isolation = createChildIsolation(
+    NodePath.join(runRoot, implementation, "isolated"),
+    nodeExecutable,
+    gitExecutable,
+  );
+  const configuration = replayConfiguration(repoRoot, nodeExecutable);
+  const policyPath = NodePath.join(isolation.root, "policy.json");
+  NodeFS.mkdirSync(NodePath.join(stateDirectory, "userdata"), { recursive: true, mode: 0o700 });
+  NodeFS.writeFileSync(
+    NodePath.join(stateDirectory, "userdata/settings.json"),
+    `${JSON.stringify(configuration.settings)}\n`,
+    { flag: "wx", mode: 0o600 },
+  );
+  NodeFS.writeFileSync(policyPath, `${JSON.stringify(configuration.policy)}\n`, {
+    flag: "wx",
+    mode: 0o600,
+  });
   NodeFS.writeFileSync(
     NodePath.join(workspace, "package.json"),
     '{"name":"hybrid-fixture","private":true,"scripts":{"test":"node --test"}}\n',
@@ -447,9 +559,8 @@ async function exercise(implementation: Implementation): Promise<void> {
     workspace,
   );
   const [serverPort, webPort] = await availablePorts();
-  Assert.ok(serverPort && webPort);
-  Assert.notEqual(serverPort, webPort, "Server and client need distinct ports");
-  Assert.ok(webPort > 5733, "The allocated web port must support the dev-runner offset");
+  NodeAssert.ok(serverPort && webPort);
+  NodeAssert.notEqual(serverPort, webPort, "Server and client need distinct ports");
   const proof = {
     schemaVersion: 1,
     status: "running",
@@ -459,8 +570,8 @@ async function exercise(implementation: Implementation): Promise<void> {
     startedAt: new Date().toISOString(),
     finishedAt: null as string | null,
     source,
-    platform: process.platform,
-    architecture: process.arch,
+    platform: runnerPlatform,
+    architecture: runnerArchitecture,
     node: process.version,
     browser: browser!.version(),
     stateDirectory,
@@ -494,7 +605,7 @@ async function exercise(implementation: Implementation): Promise<void> {
   const inspectPersistence = (checkpoint: string, closed = false) => {
     if (implementation !== "native") return;
     const expected = proof.completedSnapshots.at(-1);
-    Assert.ok(expected, "A completed client snapshot must precede native row verification");
+    NodeAssert.ok(expected, "A completed client snapshot must precede native row verification");
     proof.persistence.push({
       checkpoint,
       ...inspectNativeReplay({
@@ -510,10 +621,14 @@ async function exercise(implementation: Implementation): Promise<void> {
   const contextOptions = {
     viewport: { width: 1440, height: 1000 },
     reducedMotion: "reduce" as const,
+    serviceWorkers: "block" as const,
   };
+  const guard = loopbackGuard([serverPort, webPort]);
   let context = await browser!.newContext(contextOptions);
+  await guardContext(context, guard);
   let page = await context.newPage();
   function observePage(current: Page): void {
+    pageGuards.set(current, guard);
     current.setDefaultTimeout(timeoutMs);
     current.setDefaultNavigationTimeout(timeoutMs);
     current.on("pageerror", (error) =>
@@ -525,111 +640,127 @@ async function exercise(implementation: Implementation): Promise<void> {
   }
   observePage(page);
 
+  let flowPromise: Promise<void> | undefined;
   try {
-    let application = await startApplication(
-      implementation,
-      stateDirectory,
-      serverPort,
-      webPort,
-      NodePath.join(directory, "startup.log"),
-    );
-    proof.processGroups.push(application.pid);
-    starting("initial setup");
-    await page.goto(application.pairingUrl, { waitUntil: "domcontentloaded" });
-    await completeInitialSetup(page);
-    completed(
-      "Completed initial setup through the normal UI without agent sign-in or project import",
-    );
-    starting("local project creation");
-    await page.getByRole("button", { name: "Add project", exact: true }).first().click();
-    const dialog = page.getByRole("dialog");
-    await dialog.getByText("Local folder", { exact: true }).click();
-    await dialog.getByRole("combobox").fill(workspace);
-    await dialog.getByRole("button", { name: /^Add \(/u }).click();
-    await dialog.waitFor({ state: "hidden" });
-    await page.getByText("hybrid-fixture", { exact: true }).first().waitFor({ state: "visible" });
-    completed("Created local project through the normal client");
-
-    starting("controlled replay and approval");
-    await page.waitForFunction(
-      () => (window as DevReplayWindow).t3dev?.replayScenarios().includes("showcase"),
-      undefined,
-      { timeout: timeoutMs },
-    );
-    const threadId = await page.evaluate(async () => {
-      const replay = (window as DevReplayWindow).t3dev;
-      if (!replay) throw new Error("The original development replay host is unavailable");
-      return await replay.replay("showcase");
-    });
-    proof.threadId = threadId;
-    const approval = page.getByRole("button", { name: /^(Yes|Approve)$/u }).first();
-    await approval.waitFor({ state: "visible" });
-    const turnIdentity = replayTurnIdentity(await readThreadSnapshot(page, threadId));
-    proof.turnIdentity = turnIdentity;
-    await capture(page, directory, "approval");
-    await approval.click();
-    completed("Approved the controlled replay provider request in the normal client");
-    starting("replay completion and durable snapshot");
-    proof.completedSnapshots.push({
-      checkpoint: "initial",
-      ...(await assertCompleted(page, threadId, turnIdentity)),
-    });
-    proof.threadUrl = page.url();
-    inspectPersistence("initial");
-    completed("Received the completed replay turn on the original thread route");
-
-    starting("client reload");
-    await page.reload({ waitUntil: "domcontentloaded" });
-    proof.completedSnapshots.push({
-      checkpoint: "client-reload",
-      ...(await assertCompleted(page, threadId, turnIdentity)),
-    });
-    Assert.equal(page.url(), proof.threadUrl);
-    inspectPersistence("client-reload");
-    completed("Reconnected after a client reload with the same completed thread");
-
-    starting("owned server restart");
-    await application.stop();
-    inspectPersistence("closed-before-restart", true);
-    application = await startApplication(
-      implementation,
-      stateDirectory,
-      serverPort,
-      webPort,
-      NodePath.join(directory, "restart.log"),
-    );
-    proof.processGroups.push(application.pid);
-    starting("durable recovery in a fresh client");
-    // Keep only the authenticated session cookies. A fresh client cannot satisfy recovery
-    // from localStorage or IndexedDB, and must retrieve the old thread from the restarted server.
-    // Do not consume the restart's new pairing token or persist the session cookies in proof.
-    const cookies = await context.cookies();
-    await context.close();
-    context = await browser!.newContext({
-      ...contextOptions,
-      storageState: { cookies, origins: [] },
-    });
-    page = await context.newPage();
-    observePage(page);
-    await page.goto(proof.threadUrl, { waitUntil: "domcontentloaded" });
-    proof.completedSnapshots.push({
-      checkpoint: "server-restart",
-      ...(await assertCompleted(page, threadId, turnIdentity)),
-    });
-    Assert.equal(page.url(), proof.threadUrl);
-    inspectPersistence("server-restart");
-    completed(
-      "Recovered the same durable thread after server restart in a fresh client with the existing session",
-    );
-    await capture(page, directory, "completed");
-    if (implementation === "native") {
-      Assert.equal(proof.persistence.length, 4);
-      completed(
-        "Verified canonical omdb rows and event heads through read-only native inspection, with no application SQLite files",
+    const flow = async () => {
+      let application = await startApplication(
+        implementation,
+        stateDirectory,
+        serverPort,
+        webPort,
+        NodePath.join(directory, "startup.log"),
+        isolation,
+        policyPath,
       );
-    }
-    proof.status = "passed";
+      proof.processGroups.push(...application.pids);
+      starting("initial setup");
+      await page.goto(application.pairingUrl, { waitUntil: "domcontentloaded" });
+      await completeInitialSetup(page);
+      completed(
+        "Completed initial setup through the normal UI without agent sign-in or project import",
+      );
+      starting("local project creation");
+      await page.getByRole("button", { name: "Add project", exact: true }).first().click();
+      const dialog = page.getByRole("dialog");
+      await dialog.getByText("Local folder", { exact: true }).click();
+      await dialog.getByRole("combobox").fill(workspace);
+      await dialog.getByRole("button", { name: /^Add \(/u }).click();
+      await dialog.waitFor({ state: "hidden" });
+      await page.getByText("hybrid-fixture", { exact: true }).first().waitFor({ state: "visible" });
+      completed("Created local project through the normal client");
+
+      starting("controlled replay and approval");
+      await page.waitForFunction(
+        () => (window as DevReplayWindow).t3dev?.replayScenarios().includes("showcase"),
+        undefined,
+        { timeout: timeoutMs },
+      );
+      const threadId = await page.evaluate(async () => {
+        const replay = (window as DevReplayWindow).t3dev;
+        if (!replay) throw new Error("The original development replay host is unavailable");
+        return await replay.replay("showcase");
+      });
+      proof.threadId = threadId;
+      const approval = page.getByRole("button", { name: /^(Yes|Approve)$/u }).first();
+      await approval.waitFor({ state: "visible" });
+      const turnIdentity = replayTurnIdentity(await readThreadSnapshot(page, threadId));
+      proof.turnIdentity = turnIdentity;
+      await capture(page, directory, "approval");
+      await approval.click();
+      completed("Approved the controlled replay provider request in the normal client");
+      starting("replay completion and durable snapshot");
+      proof.completedSnapshots.push({
+        checkpoint: "initial",
+        ...(await assertCompleted(page, threadId, turnIdentity)),
+      });
+      proof.threadUrl = page.url();
+      inspectPersistence("initial");
+      completed("Received the completed replay turn on the original thread route");
+
+      starting("client reload");
+      await page.reload({ waitUntil: "domcontentloaded" });
+      proof.completedSnapshots.push({
+        checkpoint: "client-reload",
+        ...(await assertCompleted(page, threadId, turnIdentity)),
+      });
+      NodeAssert.equal(page.url(), proof.threadUrl);
+      inspectPersistence("client-reload");
+      completed("Reconnected after a client reload with the same completed thread");
+
+      starting("owned server restart");
+      await application.stop();
+      inspectPersistence("closed-before-restart", true);
+      guard.assertUrl(`http://127.0.0.1:${webPort}`);
+      application = await startApplication(
+        implementation,
+        stateDirectory,
+        serverPort,
+        webPort,
+        NodePath.join(directory, "restart.log"),
+        isolation,
+        policyPath,
+      );
+      proof.processGroups.push(...application.pids);
+      starting("durable recovery in a fresh client");
+      // Keep only the authenticated session cookies. A fresh client cannot satisfy recovery
+      // from localStorage or IndexedDB, and must retrieve the old thread from the restarted server.
+      // Do not consume the restart's new pairing token or persist the session cookies in proof.
+      const cookies = await context.cookies();
+      await context.close();
+      context = await browser!.newContext({
+        ...contextOptions,
+        storageState: { cookies, origins: [] },
+      });
+      await guardContext(context, guard);
+      page = await context.newPage();
+      observePage(page);
+      await page.goto(proof.threadUrl, { waitUntil: "domcontentloaded" });
+      proof.completedSnapshots.push({
+        checkpoint: "server-restart",
+        ...(await assertCompleted(page, threadId, turnIdentity)),
+      });
+      NodeAssert.equal(page.url(), proof.threadUrl);
+      inspectPersistence("server-restart");
+      completed(
+        "Recovered the same durable thread after server restart in a fresh client with the existing session",
+      );
+      await capture(page, directory, "completed");
+      if (implementation === "native") {
+        NodeAssert.equal(proof.persistence.length, 4);
+        completed(
+          "Verified canonical omdb rows and event heads through read-only native inspection, with no application SQLite files",
+        );
+      }
+      proof.status = "passed";
+    };
+    flowPromise = flow();
+    await Promise.race([flowPromise, guard.failure]);
   } catch (error) {
+    if (guard.violated()) {
+      await context.close();
+      await activeApplication?.stop();
+      await flowPromise?.catch(() => {});
+    }
     proof.status = "failed";
     proof.error = redact(error instanceof Error ? (error.stack ?? error.message) : String(error));
     try {
@@ -661,11 +792,19 @@ async function exercise(implementation: Implementation): Promise<void> {
     }
     throw error;
   } finally {
-    proof.finishedAt = new Date().toISOString();
-    saveProof();
     await activeApplication?.stop();
     activeApplication = undefined;
     await context.close();
+    proof.finishedAt = new Date().toISOString();
+    // A blocked late request during teardown must invalidate an otherwise
+    // completed UI flow; Promise.race alone cannot provide that guarantee.
+    if (guard.violated()) {
+      proof.status = "failed";
+      proof.error ??= "Browser attempted a request outside the qualification boundary";
+      saveProof();
+      await guard.failure;
+    }
+    saveProof();
   }
 }
 
@@ -691,7 +830,23 @@ const run = {
 };
 try {
   const executablePath = process.env.T3_CODE_LS_CHROMIUM_EXECUTABLE;
-  browser = await chromium.launch(executablePath ? { executablePath } : {});
+  if (executablePath !== undefined) {
+    NodeAssert.ok(
+      NodePath.isAbsolute(executablePath) && NodeFS.statSync(executablePath).isFile(),
+      "A Chromium override must be an explicit installed executable",
+    );
+  }
+  const browserIsolation = createChildIsolation(
+    NodePath.join(runRoot, "browser"),
+    nodeExecutable,
+    gitExecutable,
+  );
+  browser = await chromium.launch({
+    ...(executablePath ? { executablePath } : {}),
+    headless: true,
+    env: browserIsolation.env,
+    args: browserIsolationArgs,
+  });
   console.log(`Original client acceptance: ${requested.join(", ")}; Chromium ${browser.version()}`);
   for (const implementation of requested) {
     await exercise(implementation);

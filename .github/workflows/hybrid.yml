@@ -196,7 +196,7 @@ jobs:
       - name: Typecheck native client persistence acceptance
         run: node node_modules/@effect/tsgo/dist/effect-tsgo.cjs tsrs --noEmit -p tools/hybrid-client-persistence-tsconfig.json
       - name: Test fork client acceptance assertions
-        run: node --test apps/web/scripts/hybrid-client-turn.test.ts apps/web/scripts/hybrid-client-database.test.ts
+        run: node --test apps/web/scripts/hybrid-client-turn.test.ts apps/web/scripts/hybrid-client-database.test.ts apps/web/scripts/hybrid-client-isolation.test.ts
       - name: Check native database files stay private
         run: pnpm --filter t3 exec vp test run src/workspace/WorkspaceFileSystem.test.ts src/assets/AssetAccess.test.ts -t 'does not (read|issue URLs for) server state files'
       - name: Check native selection and build the integration bundles

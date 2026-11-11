@@ -1442,6 +1442,8 @@
         "apps/server/src/ws.ts",
         "apps/web/scripts/hybrid-client-database.test.ts",
         "apps/web/scripts/hybrid-client-database.ts",
+        "apps/web/scripts/hybrid-client-isolation.test.ts",
+        "apps/web/scripts/hybrid-client-isolation.ts",
         "apps/web/scripts/verify-hybrid-client.ts",
         "docs/porting/omdb-lexical-search.md",
         "docs/porting/redb-cutover.md",
