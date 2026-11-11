@@ -25,17 +25,18 @@ import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 
 import * as ServerConfig from "../config.ts";
-import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as SelectedPersistence from "../persistence/SelectedPersistence.ts";
+import * as Omdb from "../persistence/Omdb.ts";
+import * as NativeServerOwnershipLock from "../persistence/NativeServerOwnershipLock.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import * as ServerOwnership from "../serverOwnership.ts";
-import type * as RuntimeLayer from "../orchestration-v2/runtimeLayer.ts";
+import type * as RuntimeLayer from "../orchestration-v2/selectedRuntimeLayer.ts";
 import * as ProjectEnrichmentService from "../project/ProjectEnrichmentService.ts";
 import * as ProjectFaviconResolver from "../project/ProjectFaviconResolver.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import { projectMutationOperation } from "../project/ProjectMutation.ts";
 import * as T3ProjectFileLoader from "../project/T3ProjectFileLoader.ts";
-import * as ServerSettings from "../serverSettings.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import {
   clearPersistedServerRuntimeState,
@@ -213,11 +214,11 @@ const makeProjectCliRuntimeLayer = (layerProjectService: typeof RuntimeLayer.lay
     ),
     Layer.provideMerge(WorkspacePaths.layer),
     Layer.provideMerge(
-      ServerSettings.layer.pipe(
+      SelectedPersistence.settings.pipe(
         Layer.provide(Layer.merge(ServerSecretStore.layer, ManagedPolicy.layer)),
       ),
     ),
-    Layer.provideMerge(SqlitePersistence.layerConfig),
+    Layer.provideMerge(SelectedPersistence.layerConfig),
   );
 
 const PROJECT_CLI_LIVE_SERVER_PROBE_TIMEOUT = Duration.seconds(1);
@@ -432,7 +433,7 @@ const runProjectMutation = Effect.fn("runProjectMutation")(function* (
 
     // Before ownership and clearing, so a failed import leaves server state alone.
     const { layerProjectService } = yield* Effect.promise(
-      () => import("../orchestration-v2/runtimeLayer.ts"),
+      () => import("../orchestration-v2/selectedRuntimeLayer.ts"),
     );
     const layerOfflineRuntime = makeProjectCliRuntimeLayer(layerProjectService).pipe(
       Layer.provide(ServerConfig.layer(config)),
@@ -440,11 +441,16 @@ const runProjectMutation = Effect.fn("runProjectMutation")(function* (
     );
 
     // An unreachable server may still be running; never write behind it.
-    yield* ServerOwnership.acquireServerOwnership(config.serverRuntimeStatePath).pipe(
-      Effect.provide(ProcessRunner.layer),
-    );
+    const selection = SelectedPersistence.selection;
+    const ownership = yield* (
+      selection.kind === "omdb"
+        ? ServerOwnership.acquireServerOwnershipWithLock(config.serverRuntimeStatePath).pipe(
+            Effect.provide(NativeServerOwnershipLock.layer(selection.executable)),
+          )
+        : ServerOwnership.acquireServerOwnership(config.serverRuntimeStatePath)
+    ).pipe(Effect.provide(ProcessRunner.layer));
     yield* clearPersistedServerRuntimeState(config.serverRuntimeStatePath);
-    return yield* Effect.gen(function* () {
+    const offline = Effect.gen(function* () {
       const snapshot = yield* getOfflineSnapshot();
       const projects = yield* ProjectService.ProjectService;
       const output = yield* run({
@@ -453,7 +459,22 @@ const runProjectMutation = Effect.fn("runProjectMutation")(function* (
         mode: "offline",
       });
       yield* Console.log(output);
-    }).pipe(Effect.provide(layerOfflineRuntime));
+    }).pipe(
+      Effect.provide(layerOfflineRuntime),
+      Effect.provideService(
+        Omdb.BootstrapOwnership,
+        ownership.activateNative === undefined
+          ? undefined
+          : {
+              activate: ownership.activateNative.pipe(
+                Effect.mapError(
+                  (cause) => new Omdb.OmdbStartupError({ path: config.dbPath, cause }),
+                ),
+              ),
+            },
+      ),
+    );
+    return yield* Effect.raceFirst(offline, ownership.awaitLost);
   }).pipe(
     Effect.scoped,
     Effect.provide(

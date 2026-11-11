@@ -1,0 +1,13 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": { "types": ["node"], "lib": ["ESNext", "esnext.disposable"] },
+  "files": [
+    "../apps/server/src/peer/PeerLinks.ts",
+    "../apps/server/src/peer/PeerLinkRows.ts",
+    "../apps/server/src/peer/SqlitePeerLinkRows.ts",
+    "../apps/server/src/peer/NativePeerLinkRows.ts",
+    "../apps/server/src/workspace/KnownWorkspaces.ts",
+    "../apps/server/src/workspace/KnownWorkspaceRows.ts",
+    "../apps/server/src/workspace/NativeKnownWorkspaceRows.ts"
+  ]
+}

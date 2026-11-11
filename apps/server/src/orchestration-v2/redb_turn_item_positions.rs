@@ -313,6 +313,47 @@ impl Store {
     }
 }
 
+/// Preserve a legacy transcript's ordinal before the event sink allocates positions.
+/// Conflicts on the same item are ignored; a different item at the ordinal is not.
+pub(crate) async fn insert_imported_position(
+    session: &mut Session,
+    thread_id: String,
+    turn_item_id: String,
+    ordinal: i64,
+) -> Result<()> {
+    session.transaction.require_write()?;
+    ready(session).await?;
+    let position = Position {
+        thread_id,
+        turn_item_id,
+        ordinal,
+    };
+    if read_row(
+        &mut session.transaction,
+        &session.catalog,
+        POSITIONS,
+        &position.row_key(),
+    )
+    .await?
+    .is_some()
+    {
+        return Ok(());
+    }
+    if !(-MAX_SAFE_INTEGER..=MAX_SAFE_INTEGER).contains(&ordinal) {
+        return Err(invalid(
+            "legacy turn-item ordinal exceeds JavaScript integer range",
+        ));
+    }
+    index_position(&mut session.transaction, &session.catalog, &position).await?;
+    write_row(
+        &mut session.transaction,
+        &session.catalog,
+        POSITIONS,
+        position.stored(),
+    )
+    .await
+}
+
 impl ApplicationTransactions {
     pub async fn positions_allocate(&mut self, id: &str, input: PositionAllocate) -> Result<i64> {
         let mut session = self.take(id)?;

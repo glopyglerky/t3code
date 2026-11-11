@@ -35,7 +35,6 @@ import * as Mac from "effect/crypto/Mac";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
-import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as Exit from "effect/Exit";
 import * as Duration from "effect/Duration";
 import * as Metric from "effect/Metric";
@@ -47,7 +46,24 @@ import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
-import * as SqlClient from "effect/sql/SqlClient";
+import {
+  PersistenceTransactions,
+  sqliteLayer as sqliteTransactions,
+} from "../persistence/PersistenceTransactions.ts";
+import {
+  ScheduledRows,
+  TaskRows,
+  TaskIds,
+  DeliveryRows,
+  PendingRows,
+  AnyRows,
+  NextDueRows,
+  NextPendingRows,
+  CountRows,
+  RelayIds,
+  type Row,
+} from "./ScheduledRows.ts";
+import * as SqliteScheduledRows from "./SqliteScheduledRows.ts";
 
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
@@ -207,7 +223,7 @@ function resolveThreadMode(
 }
 
 interface ScheduledTaskRow {
-  readonly task_id: string;
+  readonly task_id: string | null;
   readonly title: string;
   readonly prompt: string;
   readonly enabled: number;
@@ -356,8 +372,8 @@ function errorMessage(error: unknown): string {
   return failure instanceof Error ? failure.message : String(failure);
 }
 
-function webhookPath(taskId: string, token: string): string {
-  return `${WEBHOOK_ROUTE_PREFIX}/${encodeURIComponent(taskId)}/${token}`;
+function webhookPath(taskId: string | null, token: string): string {
+  return `${WEBHOOK_ROUTE_PREFIX}/${encodeURIComponent(String(taskId))}/${token}`;
 }
 
 function webhookEndpoint(
@@ -368,7 +384,10 @@ function webhookEndpoint(
   const base = origin?.relayHookBaseUrl ?? null;
   return {
     path: webhookPath(row.task_id, row.webhook_token),
-    url: base === null ? null : `${base}/${encodeURIComponent(row.task_id)}/${row.webhook_token}`,
+    url:
+      base === null
+        ? null
+        : `${base}/${encodeURIComponent(String(row.task_id))}/${row.webhook_token}`,
     hasSecret: row.webhook_secret !== null,
   };
 }
@@ -417,16 +436,11 @@ const decodeRow = Effect.fnUntraced(
     ),
 );
 
-export const listDueTasks = Effect.fn("ScheduledTaskService.listDueTasks")(function* (
+const listDueTasksWithRows = Effect.fn("ScheduledTaskService.listDueTasks")(function* (
   now: DateTime.DateTime,
 ) {
-  const sql = yield* SqlClient.SqlClient;
-  const rows = yield* sql<ScheduledTaskRow>`
-    SELECT * FROM scheduled_tasks
-    WHERE enabled = 1 AND next_run_at IS NOT NULL
-      AND next_run_at <= ${iso(now)} AND last_run_status <> 'running'
-    ORDER BY next_run_at ASC, task_id ASC
-  `.pipe(NodeSqliteClient.readOnly);
+  const store = yield* ScheduledRows;
+  const rows = yield* store.read({ kind: "tasks", due_before: iso(now) }, TaskRows);
   const tasks: ScheduledTask[] = [];
   for (const row of rows) {
     const decoded = yield* Effect.result(decodeRow(row));
@@ -450,10 +464,33 @@ export const listDueTasks = Effect.fn("ScheduledTaskService.listDueTasks")(funct
   return tasks;
 });
 
-export const layer = Layer.effect(
+/** Compatibility entry point for callers that already provide the SQLite layer. */
+export const listDueTasks = (now: DateTime.DateTime) =>
+  listDueTasksWithRows(now).pipe(Effect.provide(SqliteScheduledRows.layer));
+
+export const layerWithRows = Layer.effect(
   ScheduledTaskService,
   Effect.gen(function* () {
-    const sql = yield* SqlClient.SqlClient;
+    const store = yield* ScheduledRows;
+    const transactions = yield* PersistenceTransactions;
+    const patchTask = (
+      taskId: string,
+      patch: Row,
+      expected: Row = {},
+      different: Row = {},
+      increment = false,
+    ) =>
+      store.write(
+        {
+          kind: "patch_task",
+          task_id: taskId,
+          patch,
+          expected,
+          different,
+          increment_run_count: increment,
+        },
+        TaskIds,
+      );
     const random = yield* SecureRandom.SecureRandom;
     const digest = yield* Digest.Digest;
     const mac = yield* Mac.Mac;
@@ -501,37 +538,8 @@ export const layer = Layer.effect(
       Effect.asVoid,
     );
 
-    const selectAllRows = () =>
-      sql<ScheduledTaskRow>`
-      SELECT
-        task_id,
-        title,
-        prompt,
-        enabled,
-        schedule_json,
-        project_id,
-        thread_id,
-        thread_mode,
-        workspace_strategy_json,
-        model_selection_json,
-        runtime_mode,
-        interaction_mode,
-        created_by,
-        creation_source,
-        created_at,
-        updated_at,
-        next_run_at,
-        last_run_at,
-        last_run_status,
-        last_run_error,
-        run_count,
-        webhook_token,
-        webhook_secret
-      FROM scheduled_tasks
-      -- Not updated_at: toggles, runs and edits rewrite it, and clients render
-      -- this order as-is, so rows would move under the pointer.
-      ORDER BY created_at DESC, task_id ASC
-    `.pipe(NodeSqliteClient.readOnly);
+    // Created order is stable while toggles, edits and runs change updated_at.
+    const selectAllRows = () => store.read({ kind: "tasks" }, TaskRows);
 
     const listRows = Effect.fn("ScheduledTaskService.listRows")(function* () {
       const rows = yield* selectAllRows();
@@ -543,35 +551,7 @@ export const layer = Layer.effect(
       );
     });
 
-    const getRows = (id: ScheduledTaskId) =>
-      sql<ScheduledTaskRow>`
-      SELECT
-        task_id,
-        title,
-        prompt,
-        enabled,
-        schedule_json,
-        project_id,
-        thread_id,
-        thread_mode,
-        workspace_strategy_json,
-        model_selection_json,
-        runtime_mode,
-        interaction_mode,
-        created_by,
-        creation_source,
-        created_at,
-        updated_at,
-        next_run_at,
-        last_run_at,
-        last_run_status,
-        last_run_error,
-        run_count,
-        webhook_token,
-        webhook_secret
-      FROM scheduled_tasks
-      WHERE task_id = ${id}
-    `.pipe(NodeSqliteClient.readOnly);
+    const getRows = (id: ScheduledTaskId) => store.read({ kind: "tasks", task_id: id }, TaskRows);
 
     const findTask = Effect.fn("ScheduledTaskService.findTask")(function* (id: ScheduledTaskId) {
       const rows = yield* getRows(id).pipe(
@@ -622,120 +602,55 @@ export const layer = Layer.effect(
         readonly secretChanged: boolean;
       },
     ) =>
-      sql<{ task_id: string }>`
-        INSERT INTO scheduled_tasks (
-          task_id,
-          title,
-          prompt,
-          enabled,
-          schedule_json,
-          project_id,
-          thread_id,
-          thread_mode,
-          workspace_strategy_json,
-          model_selection_json,
-          runtime_mode,
-          interaction_mode,
-          created_by,
-          creation_source,
-          created_at,
-          updated_at,
-          next_run_at,
-          last_run_at,
-          last_run_status,
-          last_run_error,
-          run_count,
-          webhook_token,
-          webhook_secret
+      store
+        .write(
+          {
+            kind: "save_task",
+            require_existing: requireExisting,
+            kept_schedule_json: keptSchedule === null ? null : JSON.stringify(keptSchedule),
+            secret_changed: webhook.secretChanged,
+            row: {
+              task_id: task.id,
+              title: task.title,
+              prompt: task.prompt,
+              enabled: task.enabled ? 1 : 0,
+              schedule_json: JSON.stringify(task.schedule),
+              project_id: task.projectId,
+              thread_id: task.threadId,
+              thread_mode: scheduledTaskThreadMode(task),
+              workspace_strategy_json: JSON.stringify(task.workspaceStrategy),
+              model_selection_json: JSON.stringify(task.modelSelection),
+              runtime_mode: task.runtimeMode,
+              interaction_mode: task.interactionMode,
+              created_by: task.createdBy,
+              creation_source: task.creationSource,
+              created_at: task.createdAt,
+              updated_at: task.updatedAt,
+              next_run_at: task.nextRunAt,
+              last_run_at: task.lastRunAt,
+              last_run_status: task.lastRunStatus,
+              last_run_error: task.lastRunError,
+              run_count: task.runCount,
+              webhook_token: webhook.token,
+              webhook_secret: webhook.secret,
+            },
+          },
+          TaskIds,
         )
-        SELECT
-          ${task.id},
-          ${task.title},
-          ${task.prompt},
-          ${task.enabled ? 1 : 0},
-          ${JSON.stringify(task.schedule)},
-          ${task.projectId},
-          ${task.threadId},
-          ${scheduledTaskThreadMode(task)},
-          ${JSON.stringify(task.workspaceStrategy)},
-          ${JSON.stringify(task.modelSelection)},
-          ${task.runtimeMode},
-          ${task.interactionMode},
-          ${task.createdBy},
-          ${task.creationSource},
-          ${task.createdAt},
-          ${task.updatedAt},
-          ${task.nextRunAt},
-          ${task.lastRunAt},
-          ${task.lastRunStatus},
-          ${task.lastRunError},
-          ${task.runCount},
-          ${webhook.token},
-          ${webhook.secret}
-        WHERE ${requireExisting ? 0 : 1} = 1
-           OR EXISTS (SELECT 1 FROM scheduled_tasks WHERE task_id = ${task.id})
-        ON CONFLICT (task_id)
-        DO UPDATE SET
-          title = excluded.title,
-          prompt = excluded.prompt,
-          enabled = excluded.enabled,
-          schedule_json = excluded.schedule_json,
-          project_id = excluded.project_id,
-          -- A first run may bind the thread while this save is in flight; only a
-          -- switch to new threads unbinds.
-          thread_id = CASE
-            WHEN excluded.thread_mode = 'new_thread' THEN NULL
-            WHEN excluded.project_id != scheduled_tasks.project_id THEN excluded.thread_id
-            ELSE COALESCE(excluded.thread_id, scheduled_tasks.thread_id)
-          END,
-          thread_mode = excluded.thread_mode,
-          workspace_strategy_json = excluded.workspace_strategy_json,
-          model_selection_json = excluded.model_selection_json,
-          runtime_mode = excluded.runtime_mode,
-          interaction_mode = excluded.interaction_mode,
-          creation_source = excluded.creation_source,
-          updated_at = excluded.updated_at,
-          -- Keep a next_run_at that a finishing run moved during this save, unless
-          -- another edit changed the schedule or enabled state meanwhile.
-          next_run_at = CASE
-            WHEN ${keptSchedule === null ? 0 : 1} = 1
-              AND scheduled_tasks.schedule_json IN (
-                excluded.schedule_json,
-                ${keptSchedule === null ? null : JSON.stringify(keptSchedule)}
-              )
-              AND scheduled_tasks.enabled = excluded.enabled
-            THEN scheduled_tasks.next_run_at
-            ELSE excluded.next_run_at
-          END,
-          -- Only rotate changes a live token, so a save racing a rotation
-          -- cannot bring the old URL back.
-          webhook_token = CASE
-            WHEN excluded.webhook_token IS NULL THEN NULL
-            ELSE COALESCE(scheduled_tasks.webhook_token, excluded.webhook_token)
-          END,
-          webhook_secret = CASE
-            WHEN ${webhook.secretChanged ? 1 : 0} = 1 THEN excluded.webhook_secret
-            ELSE scheduled_tasks.webhook_secret
-          END
-        RETURNING task_id
-      `.pipe(
-        Effect.mapError((cause) =>
-          taskError("Could not save schedule task.", { taskId: task.id, cause }),
-        ),
-        Effect.flatMap((rows) =>
-          rows.length > 0
-            ? Effect.void
-            : taskError("Schedule task not found.", { taskId: task.id }),
-        ),
-      );
+        .pipe(
+          Effect.mapError((cause) =>
+            taskError("Could not save schedule task.", { taskId: task.id, cause }),
+          ),
+          Effect.flatMap((rows) =>
+            rows.length > 0
+              ? Effect.void
+              : taskError("Schedule task not found.", { taskId: task.id }),
+          ),
+        );
 
     const deleteRow = (id: ScheduledTaskId) =>
-      sql
-        .withTransaction(
-          sql`DELETE FROM scheduled_task_webhook_deliveries WHERE task_id = ${id}`.pipe(
-            Effect.andThen(sql`DELETE FROM scheduled_tasks WHERE task_id = ${id}`),
-          ),
-        )
+      store
+        .write({ kind: "delete_tasks", task_id: id }, TaskIds)
         .pipe(
           Effect.mapError((cause) =>
             taskError("Could not delete schedule task.", { taskId: id, cause }),
@@ -743,16 +658,13 @@ export const layer = Layer.effect(
         );
 
     const markRunning = (id: ScheduledTaskId, startedAtIso: string, webhookDeliveryId?: string) =>
-      sql<{ task_id: string }>`
-        UPDATE scheduled_tasks
-        SET updated_at = ${startedAtIso},
-            last_run_at = ${startedAtIso},
-            last_run_webhook_delivery_id = ${webhookDeliveryId ?? null},
-            last_run_status = 'running',
-            last_run_error = NULL
-        WHERE task_id = ${id}
-        RETURNING task_id
-      `.pipe(
+      patchTask(id, {
+        updated_at: startedAtIso,
+        last_run_at: startedAtIso,
+        last_run_webhook_delivery_id: webhookDeliveryId ?? null,
+        last_run_status: "running",
+        last_run_error: null,
+      }).pipe(
         Effect.mapError((cause) =>
           taskError("Could not mark schedule task as running.", { taskId: id, cause }),
         ),
@@ -769,18 +681,18 @@ export const layer = Layer.effect(
       readonly error: string | null;
       readonly startedAtIso: string;
     }) =>
-      sql`
-        UPDATE scheduled_tasks
-        SET updated_at = ${input.completedAtIso},
-            next_run_at = ${input.nextRunAtIso},
-            last_run_status = ${input.status},
-            last_run_error = ${input.error},
-            run_count = run_count + 1
-        WHERE task_id = ${input.id}
-          AND last_run_status = 'running'
-          AND last_run_at = ${input.startedAtIso}
-        RETURNING task_id
-      `.pipe(
+      patchTask(
+        input.id,
+        {
+          updated_at: input.completedAtIso,
+          next_run_at: input.nextRunAtIso,
+          last_run_status: input.status,
+          last_run_error: input.error,
+        },
+        { last_run_status: "running", last_run_at: input.startedAtIso },
+        {},
+        true,
+      ).pipe(
         Effect.map((rows) => rows.length > 0),
         Effect.mapError((cause) =>
           taskError("Could not record schedule task run.", { taskId: input.id, cause }),
@@ -801,18 +713,21 @@ export const layer = Layer.effect(
         const reread = yield* Effect.result(findTask(task.id));
         if (Result.isSuccess(reread) && reread.success === null) return;
         const source = Result.isSuccess(reread) && reread.success !== null ? reread.success : task;
-        yield* sql`
-          UPDATE scheduled_tasks
-          SET last_run_status = 'failed',
-              last_run_error = ${message},
-              next_run_at = ${nextRunAfterRun({ ...source, lastRunAt: startedAtIso }, now)},
-              updated_at = ${iso(now)},
-              run_count = run_count + CASE WHEN EXISTS (
-                SELECT 1 FROM scheduled_task_webhook_pending
-                WHERE delivery_id = ${pendingDeliveryId ?? null} AND state = 'running'
-              ) THEN 0 ELSE 1 END
-          WHERE task_id = ${task.id} AND last_run_status = 'running'
-        `;
+        yield* store.write(
+          {
+            kind: "recover_task",
+            task_id: task.id,
+            match_pending_task: false,
+            ...(pendingDeliveryId === undefined ? {} : { pending_delivery_id: pendingDeliveryId }),
+            patch: {
+              last_run_status: "failed",
+              last_run_error: message,
+              next_run_at: nextRunAfterRun({ ...source, lastRunAt: startedAtIso }, now),
+              updated_at: iso(now),
+            },
+          },
+          AnyRows,
+        );
         yield* notifyChanged;
       },
       (effect, task, _startedAtIso, _message, _pendingDeliveryId) =>
@@ -831,12 +746,12 @@ export const layer = Layer.effect(
     // cleanup here; a later deletion finds the binding. An unconfirmed lookup keeps the binding.
     const bindThread = Effect.fn("ScheduledTaskService.bindThread")(
       function* (task: ScheduledTask, threadId: ThreadId) {
-        yield* sql`
-          UPDATE scheduled_tasks SET thread_id = ${threadId}
-          WHERE task_id = ${task.id} AND created_at = ${task.createdAt}
-            AND project_id = ${task.projectId}
-            AND thread_id IS NULL AND thread_mode != 'new_thread'
-        `;
+        yield* patchTask(
+          task.id,
+          { thread_id: threadId },
+          { created_at: task.createdAt, project_id: task.projectId, thread_id: null },
+          { thread_mode: "new_thread" },
+        );
         const shell = yield* threadManagement.getThreadShell(threadId);
         if (shell === null || shell.deletedAt != null) yield* deleteForThread(threadId);
       },
@@ -873,8 +788,14 @@ export const layer = Layer.effect(
         }
         if (
           webhook !== undefined &&
-          (yield* sql`SELECT 1 FROM scheduled_task_webhook_pending WHERE delivery_id = ${webhook.deliveryId} AND state = 'completed'`.pipe(
-            NodeSqliteClient.readOnly,
+          (yield* store.read(
+            {
+              kind: "pending",
+              delivery_id: webhook.deliveryId,
+              states: ["completed"],
+              first: false,
+            },
+            PendingRows,
           )).length > 0
         )
           return {
@@ -909,12 +830,19 @@ export const layer = Layer.effect(
 
         if (webhook === undefined) yield* markRunning(active.id, startedAtIso);
         else
-          yield* sql
+          yield* transactions
             .withTransaction(
               Effect.gen(function* () {
                 yield* markRunning(active.id, startedAtIso, webhook.deliveryId);
                 // Recovery must distinguish this delivery from other windows waiting on the same task.
-                yield* sql`UPDATE scheduled_task_webhook_pending SET state = 'running' WHERE delivery_id = ${webhook.deliveryId}`;
+                yield* store.write(
+                  {
+                    kind: "patch_pending",
+                    delivery_id: webhook.deliveryId,
+                    patch: { state: "running" },
+                  },
+                  AnyRows,
+                );
               }),
             )
             .pipe(
@@ -1050,20 +978,28 @@ export const layer = Layer.effect(
           let written = false;
           if (webhook === undefined) written = yield* completion;
           else {
-            const pending =
-              yield* sql`SELECT 1 FROM scheduled_task_webhook_pending WHERE delivery_id = ${webhook.deliveryId}`;
+            const pending = yield* store.read(
+              { kind: "pending", delivery_id: webhook.deliveryId, first: false },
+              PendingRows,
+            );
             if (pending.length === 0) written = yield* completion;
             else {
-              const counted =
-                yield* sql`UPDATE scheduled_task_webhook_pending SET state = ${runSucceeded ? "completed" : "failed"}
-                WHERE delivery_id = ${webhook.deliveryId} AND state NOT IN ('completed', 'failed') RETURNING delivery_id`;
+              const counted = yield* store.write(
+                {
+                  kind: "patch_pending",
+                  delivery_id: webhook.deliveryId,
+                  not_states: ["completed", "failed"],
+                  patch: { state: runSucceeded ? "completed" : "failed" },
+                },
+                AnyRows,
+              );
               if (counted.length > 0) written = yield* completion;
             }
           }
           // A row recreated mid-run is not this run's, so report what is stored.
           return { recorded: written ? completed : current, written };
         });
-        const { recorded, written } = yield* sql
+        const { recorded, written } = yield* transactions
           .withTransaction(record)
           .pipe(
             Effect.mapError((cause) =>
@@ -1121,12 +1057,7 @@ export const layer = Layer.effect(
         missedRunAt: task.nextRunAt,
         rescheduledTo: next,
       });
-      yield* sql`
-        UPDATE scheduled_tasks
-        SET next_run_at = ${next},
-            updated_at = ${iso(now)}
-        WHERE task_id = ${task.id}
-      `.pipe(
+      yield* patchTask(task.id, { next_run_at: next, updated_at: iso(now) }).pipe(
         Effect.mapError((cause) =>
           taskError("Could not reschedule missed schedule task run.", { taskId: task.id, cause }),
         ),
@@ -1139,13 +1070,9 @@ export const layer = Layer.effect(
       const nowMs = DateTime.toEpochMillis(now);
       if (yield* dueTasks.isIdle(nowMs)) return;
       const readVersion = yield* dueTasks.version;
-      const [next] = yield* sql<{ next_run_at: string | null }>`
-        SELECT MIN(next_run_at) AS next_run_at FROM scheduled_tasks
-        WHERE enabled = 1 AND next_run_at IS NOT NULL AND last_run_status <> 'running'
-      `.pipe(
-        NodeSqliteClient.readOnly,
-        Effect.mapError((cause) => taskError("Could not list schedule tasks.", { cause })),
-      );
+      const [next] = yield* store
+        .read({ kind: "next_due" }, NextDueRows)
+        .pipe(Effect.mapError((cause) => taskError("Could not list schedule tasks.", { cause })));
       // Compare as text like listDueTasks: expanded years (`+011533-…`) sort first but parse far ahead.
       const nextRunAt = next?.next_run_at ?? null;
       if (nextRunAt === null || nextRunAt > iso(now)) {
@@ -1158,7 +1085,8 @@ export const layer = Layer.effect(
         }
         return;
       }
-      const tasks = yield* listDueTasks(now).pipe(
+      const tasks = yield* listDueTasksWithRows(now).pipe(
+        Effect.provideService(ScheduledRows, store),
         Effect.mapError((cause) => taskError("Could not list schedule tasks.", { cause })),
       );
       const due = tasks.flatMap((task) =>
@@ -1192,37 +1120,39 @@ export const layer = Layer.effect(
           Effect.gen(function* () {
             const decoded = yield* Effect.result(decodeRow(row));
             if (Result.isSuccess(decoded)) {
-              yield* sql`
-                UPDATE scheduled_tasks
-                SET last_run_status = 'failed',
-                    last_run_error = 'Run was interrupted by a server restart.',
-                    next_run_at = ${nextRunAfterRun(decoded.success, now)},
-                    updated_at = ${iso(now)},
-                    run_count = run_count + CASE WHEN EXISTS (
-                      SELECT 1 FROM scheduled_task_webhook_pending
-                      WHERE task_id IS ${row.task_id} AND state = 'running'
-                        AND delivery_id = scheduled_tasks.last_run_webhook_delivery_id
-                    ) THEN 0 ELSE 1 END
-                WHERE task_id IS ${row.task_id} AND last_run_status = 'running'
-              `;
+              yield* store.write(
+                {
+                  kind: "recover_task",
+                  task_id: row.task_id,
+                  match_pending_task: true,
+                  patch: {
+                    last_run_status: "failed",
+                    last_run_error: "Run was interrupted by a server restart.",
+                    next_run_at: nextRunAfterRun(decoded.success, now),
+                    updated_at: iso(now),
+                  },
+                },
+                AnyRows,
+              );
               return;
             }
             yield* Effect.logWarning(
               "Recovering undecodable schedule task row without rescheduling",
               { taskId: row.task_id, cause: decoded.failure },
             );
-            yield* sql`
-              UPDATE scheduled_tasks
-              SET last_run_status = 'failed',
-                  last_run_error = 'Run was interrupted by a server restart.',
-                  updated_at = ${iso(now)},
-                  run_count = run_count + CASE WHEN EXISTS (
-                    SELECT 1 FROM scheduled_task_webhook_pending
-                    WHERE task_id IS ${row.task_id} AND state = 'running'
-                        AND delivery_id = scheduled_tasks.last_run_webhook_delivery_id
-                  ) THEN 0 ELSE 1 END
-              WHERE task_id IS ${row.task_id} AND last_run_status = 'running'
-            `;
+            yield* store.write(
+              {
+                kind: "recover_task",
+                task_id: row.task_id,
+                match_pending_task: true,
+                patch: {
+                  last_run_status: "failed",
+                  last_run_error: "Run was interrupted by a server restart.",
+                  updated_at: iso(now),
+                },
+              },
+              AnyRows,
+            );
           }),
         { concurrency: 1, discard: true },
       );
@@ -1472,14 +1402,11 @@ export const layer = Layer.effect(
       const next = nextRunAt({ enabled: input.enabled, schedule: existing.schedule }, now);
       // RETURNING so a task deleted between the load and this UPDATE is a
       // visible not-found error, not a false success.
-      const updated = yield* sql<{ task_id: string }>`
-          UPDATE scheduled_tasks
-          SET enabled = ${input.enabled ? 1 : 0},
-              next_run_at = ${next},
-              updated_at = ${iso(now)}
-          WHERE task_id = ${input.id}
-          RETURNING task_id
-        `.pipe(
+      const updated = yield* patchTask(input.id, {
+        enabled: input.enabled ? 1 : 0,
+        next_run_at: next,
+        updated_at: iso(now),
+      }).pipe(
         Effect.mapError((cause) =>
           taskError("Could not update schedule task.", { taskId: input.id, cause }),
         ),
@@ -1537,26 +1464,20 @@ export const layer = Layer.effect(
     ) {
       // Check the current binding in the transaction: an automation may have
       // been unbound or moved since thread deletion queued this cleanup.
-      const removed = yield* sql
-        .withTransaction(
-          Effect.gen(function* () {
-            yield* sql`
-            DELETE FROM scheduled_task_webhook_deliveries
-            WHERE task_id IN (SELECT task_id FROM scheduled_tasks WHERE thread_id = ${threadId})
-          `;
-            return yield* sql<{ task_id: ScheduledTaskId }>`
-            DELETE FROM scheduled_tasks WHERE thread_id = ${threadId} RETURNING task_id
-          `;
-          }),
-        )
+      const removed = yield* store
+        .write({ kind: "delete_tasks", thread_id: threadId }, TaskIds)
         .pipe(
           Effect.mapError((cause) =>
             taskError("Could not delete thread's schedule tasks.", { cause }),
           ),
         );
-      yield* Effect.forEach(removed, ({ task_id }) => forgetWebhookTask(task_id), {
-        discard: true,
-      });
+      yield* Effect.forEach(
+        removed,
+        ({ task_id }) => forgetWebhookTask(ScheduledTaskId.make(task_id)),
+        {
+          discard: true,
+        },
+      );
       if (removed.length > 0) yield* notifyChanged;
     });
 
@@ -1564,15 +1485,23 @@ export const layer = Layer.effect(
       "ScheduledTaskService.moveThreadTasks",
     )(function* (input) {
       if (input.threadIds.length === 0) return;
-      const moved = yield* sql<{ task_id: ScheduledTaskId }>`
-        UPDATE scheduled_tasks SET project_id = ${input.projectId}
-        WHERE project_id != ${input.projectId} AND thread_id IN ${sql.in(input.threadIds)}
-        RETURNING task_id
-      `.pipe(
-        Effect.mapError((cause) =>
-          taskError("Could not move the thread's schedule tasks.", { cause }),
-        ),
-      );
+      const moved = yield* store
+        .write(
+          {
+            kind: "patch_task",
+            thread_ids: input.threadIds,
+            expected: {},
+            different: { project_id: input.projectId },
+            patch: { project_id: input.projectId },
+            increment_run_count: false,
+          },
+          TaskIds,
+        )
+        .pipe(
+          Effect.mapError((cause) =>
+            taskError("Could not move the thread's schedule tasks.", { cause }),
+          ),
+        );
       if (moved.length > 0) yield* notifyChanged;
     });
 
@@ -1605,12 +1534,11 @@ export const layer = Layer.effect(
       const now = yield* localNow;
       // Matching created_at keeps a rotation from landing on a task deleted
       // and recreated under the same id since it was loaded.
-      const updated = yield* sql<{ task_id: string }>`
-          UPDATE scheduled_tasks
-          SET webhook_token = ${token}, updated_at = ${iso(now)}
-          WHERE task_id = ${input.id} AND created_at = ${task.createdAt}
-          RETURNING task_id
-        `.pipe(
+      const updated = yield* patchTask(
+        input.id,
+        { webhook_token: token, updated_at: iso(now) },
+        { created_at: task.createdAt },
+      ).pipe(
         Effect.mapError((cause) =>
           taskError("Could not rotate webhook token.", { taskId: input.id, cause }),
         ),
@@ -1641,13 +1569,7 @@ export const layer = Layer.effect(
     const listWebhookDeliveries: ScheduledTaskService["Service"]["listWebhookDeliveries"] = (
       input,
     ) =>
-      sql<WebhookDeliveryRow>`
-        SELECT d.*, EXISTS (SELECT 1 FROM scheduled_task_webhook_pending p
-          WHERE p.delivery_id = d.delivery_id AND p.state IN ('pending', 'dispatching')) AS pending_window
-        FROM scheduled_task_webhook_deliveries d WHERE task_id = ${input.id}
-        ORDER BY received_at DESC, rowid DESC
-      `.pipe(
-        NodeSqliteClient.readOnly,
+      store.read({ kind: "deliveries", task_id: input.id }, DeliveryRows).pipe(
         Effect.map((rows) => ({
           deliveries: rows
             .filter(
@@ -1663,16 +1585,16 @@ export const layer = Layer.effect(
     const getWebhookDelivery: ScheduledTaskService["Service"]["getWebhookDelivery"] = Effect.fn(
       "ScheduledTaskService.getWebhookDelivery",
     )(function* (input) {
-      const rows = yield* sql<WebhookDeliveryRow>`
-          SELECT d.*, EXISTS (SELECT 1 FROM scheduled_task_webhook_pending p
-            WHERE p.delivery_id = d.delivery_id AND p.state IN ('pending', 'dispatching')) AS pending_window
-          FROM scheduled_task_webhook_deliveries d WHERE task_id = ${input.id} AND delivery_id = ${input.deliveryId}
-        `.pipe(
-        NodeSqliteClient.readOnly,
-        Effect.mapError((cause) =>
-          taskError("Could not load webhook delivery.", { taskId: input.id, cause }),
-        ),
-      );
+      const rows = yield* store
+        .read(
+          { kind: "deliveries", task_id: input.id, delivery_id: input.deliveryId },
+          DeliveryRows,
+        )
+        .pipe(
+          Effect.mapError((cause) =>
+            taskError("Could not load webhook delivery.", { taskId: input.id, cause }),
+          ),
+        );
       const row = rows[0];
       if (
         row === undefined ||
@@ -1706,11 +1628,23 @@ export const layer = Layer.effect(
     };
     const replaceDeliveryRequest = (deliveryId: string, request: WebhookTriggerRequest) => {
       const logged = deliveryRequestBody(request);
-      return sql`UPDATE scheduled_task_webhook_deliveries SET
-        method = ${request.method}, query = ${redactQuery(request.query)},
-        headers_json = ${encodeHeadersJson(redactHeaders(request.headers))}, body = ${logged.body},
-        body_bytes = ${request.body.byteLength}, body_truncated = ${logged.truncated ? 1 : 0}
-        WHERE delivery_id = ${deliveryId}`.pipe(Effect.asVoid, Effect.mapError(dedupeError));
+      return store
+        .write(
+          {
+            kind: "patch_delivery",
+            delivery_id: deliveryId,
+            patch: {
+              method: request.method,
+              query: redactQuery(request.query),
+              headers_json: encodeHeadersJson(redactHeaders(request.headers)),
+              body: logged.body,
+              body_bytes: request.body.byteLength,
+              body_truncated: logged.truncated ? 1 : 0,
+            },
+          },
+          AnyRows,
+        )
+        .pipe(Effect.asVoid, Effect.mapError(dedupeError));
     };
 
     // Each suppression bucket retains its own rows, never real run history.
@@ -1723,24 +1657,21 @@ export const layer = Layer.effect(
             error === PROMPT_TOO_LONG
           ? "dedupe"
           : "main";
-    const pruneDeliveries = (
-      taskId: string,
-      retentionBucket: ReturnType<typeof deliveryBucket>,
-    ) => {
-      const rowBucket = sql.literal(`CASE WHEN outcome = 'filtered' THEN 'filtered'
-        WHEN outcome IN ('duplicate', 'coalesced', 'rate_limited') OR error = 'The filled-in prompt is too long.' THEN 'dedupe'
-        ELSE 'main' END`);
-      return sql`
-        DELETE FROM scheduled_task_webhook_deliveries
-        WHERE task_id = ${taskId} AND ${rowBucket} = ${retentionBucket}
-          AND delivery_id NOT IN (
-            SELECT delivery_id FROM scheduled_task_webhook_deliveries
-            WHERE task_id = ${taskId} AND ${rowBucket} = ${retentionBucket}
-            ORDER BY received_at DESC, rowid DESC
-            LIMIT ${retentionBucket === "main" ? WEBHOOK_DELIVERY_RETENTION : retentionBucket === "filtered" ? WEBHOOK_FILTERED_DELIVERY_RETENTION : WEBHOOK_DEDUPE_DELIVERY_RETENTION}
-          )
-      `;
-    };
+    const pruneDeliveries = (taskId: string, retentionBucket: ReturnType<typeof deliveryBucket>) =>
+      store.write(
+        {
+          kind: "prune_deliveries",
+          task_id: taskId,
+          bucket: retentionBucket,
+          limit:
+            retentionBucket === "main"
+              ? WEBHOOK_DELIVERY_RETENTION
+              : retentionBucket === "filtered"
+                ? WEBHOOK_FILTERED_DELIVERY_RETENTION
+                : WEBHOOK_DEDUPE_DELIVERY_RETENTION,
+        },
+        AnyRows,
+      );
 
     const recordDelivery = (input: {
       readonly id: string;
@@ -1754,35 +1685,33 @@ export const layer = Layer.effect(
       readonly error?: string;
     }) => {
       const { truncated, body: loggedBody } = deliveryRequestBody(input.request);
-      return sql
+      return transactions
         .withTransaction(
           Effect.gen(function* () {
             // Require the task to exist so deletes cannot leave deliveries for a recreated task.
-            yield* sql`
-              INSERT INTO scheduled_task_webhook_deliveries (
-                delivery_id, task_id, received_at, method, query, headers_json, body,
-                body_bytes, body_truncated, outcome, signature_verified,
-                missing_fields_json, rendered_prompt, error
-              )
-              SELECT
-                ${input.id}, ${input.taskId}, ${input.receivedAt}, ${input.request.method},
-                ${redactQuery(input.request.query)},
-                ${encodeHeadersJson(redactHeaders(input.request.headers))},
-                ${loggedBody},
-                ${input.request.body.byteLength}, ${truncated ? 1 : 0}, ${input.outcome},
-                ${input.signatureVerified ? 1 : 0}, ${encodeMissingFieldsJson(input.missing)},
-                ${input.renderedPrompt?.slice(0, WEBHOOK_DELIVERY_LOG_PROMPT_LIMIT) ?? null},
-                ${input.error ?? null}
-              WHERE EXISTS (SELECT 1 FROM scheduled_tasks WHERE task_id = ${input.taskId})
-              -- A held request retried after a rate limit reuses its relay
-              -- delivery id; the newer attempt replaces the logged one.
-              ON CONFLICT (delivery_id) DO UPDATE SET
-                outcome = excluded.outcome,
-                signature_verified = excluded.signature_verified,
-                missing_fields_json = excluded.missing_fields_json,
-                rendered_prompt = excluded.rendered_prompt,
-                error = excluded.error
-            `;
+            yield* store.write(
+              {
+                kind: "record_delivery",
+                row: {
+                  delivery_id: input.id,
+                  task_id: input.taskId,
+                  received_at: input.receivedAt,
+                  method: input.request.method,
+                  query: redactQuery(input.request.query),
+                  headers_json: encodeHeadersJson(redactHeaders(input.request.headers)),
+                  body: loggedBody,
+                  body_bytes: input.request.body.byteLength,
+                  body_truncated: truncated ? 1 : 0,
+                  outcome: input.outcome,
+                  signature_verified: input.signatureVerified ? 1 : 0,
+                  missing_fields_json: encodeMissingFieldsJson(input.missing),
+                  rendered_prompt:
+                    input.renderedPrompt?.slice(0, WEBHOOK_DELIVERY_LOG_PROMPT_LIMIT) ?? null,
+                  error: input.error ?? null,
+                },
+              },
+              AnyRows,
+            );
             yield* pruneDeliveries(input.taskId, deliveryBucket(input.outcome, input.error));
           }),
         )
@@ -1794,15 +1723,17 @@ export const layer = Layer.effect(
     };
 
     const markDeliveryFailed = (deliveryId: string, message: string) =>
-      sql
+      transactions
         .withTransaction(
           Effect.gen(function* () {
-            const [updated] = yield* sql<{ task_id: string }>`
-              UPDATE scheduled_task_webhook_deliveries
-              SET outcome = 'dispatch_failed', error = ${message}
-              WHERE delivery_id = ${deliveryId}
-              RETURNING task_id
-            `;
+            const [updated] = yield* store.write(
+              {
+                kind: "patch_delivery",
+                delivery_id: deliveryId,
+                patch: { outcome: "dispatch_failed", error: message },
+              },
+              TaskIds,
+            );
             // An oversized prompt moves the row into the suppression bucket.
             if (updated !== undefined)
               yield* pruneDeliveries(updated.task_id, deliveryBucket("dispatch_failed", message));
@@ -1850,7 +1781,7 @@ export const layer = Layer.effect(
       });
     const releaseReplay = (deliveryId: string) =>
       releaseWebhookReplay(deliveryId).pipe(
-        Effect.provideService(SqlClient.SqlClient, sql),
+        Effect.provideService(ScheduledRows, store),
         Effect.mapError(dedupeError),
       );
     /** Sliding one-minute window of filtered requests written to the delivery log. */
@@ -1884,16 +1815,11 @@ export const layer = Layer.effect(
     const releaseFailedDelivery = Effect.fn("ScheduledTaskService.releaseFailedDelivery")(
       function* (deliveryId: string) {
         yield* releaseReplay(deliveryId);
-        yield* sql`DELETE FROM scheduled_task_webhook_relay_deliveries WHERE relay_delivery_id IN (
-          SELECT substr(value, ${"delivery:relay:".length + 1}) FROM scheduled_task_webhook_pending, json_each(delivery_ids_json)
-          WHERE delivery_id = ${deliveryId} AND value LIKE 'delivery:relay:%'
-        )`.pipe(Effect.mapError(dedupeError));
-        if (deliveryId.startsWith("delivery:relay:"))
-          yield* sql`DELETE FROM scheduled_task_webhook_relay_deliveries WHERE relay_delivery_id = ${deliveryId.slice("delivery:relay:".length)}`.pipe(
-            Effect.mapError(dedupeError),
-          );
+        yield* store
+          .write({ kind: "release_failed_relays", delivery_id: deliveryId }, AnyRows)
+          .pipe(Effect.mapError(dedupeError));
       },
-      (effect) => sql.withTransaction(effect).pipe(Effect.mapError(dedupeError)),
+      (effect) => transactions.withTransaction(effect).pipe(Effect.mapError(dedupeError)),
     );
 
     const runWebhookDelivery = Effect.fn("ScheduledTaskService.runWebhookDelivery")(function* (
@@ -1937,15 +1863,20 @@ export const layer = Layer.effect(
                 : "The run failed to start.",
             );
             if (!started) {
-              yield* sql
+              yield* transactions
                 .withTransaction(
                   Effect.gen(function* () {
-                    const counted =
-                      yield* sql`UPDATE scheduled_task_webhook_pending SET state = 'failed'
-                WHERE delivery_id = ${deliveryId} AND state = 'running' RETURNING delivery_id`;
+                    const counted = yield* store.write(
+                      {
+                        kind: "patch_pending",
+                        delivery_id: deliveryId,
+                        states: ["running"],
+                        patch: { state: "failed" },
+                      },
+                      AnyRows,
+                    );
                     if (counted.length > 0)
-                      yield* sql`UPDATE scheduled_tasks SET run_count = run_count + 1
-                WHERE task_id = ${task.id} AND created_at = ${task.createdAt}`;
+                      yield* patchTask(task.id, {}, { created_at: task.createdAt }, {}, true);
                   }),
                 )
                 .pipe(Effect.mapError(dedupeError));
@@ -2062,10 +1993,9 @@ export const layer = Layer.effect(
       const releaseClaim = <A>(result: A) =>
         !claimAcquired || request.relayDeliveryId === undefined
           ? Effect.succeed(result)
-          : sql`
-                DELETE FROM scheduled_task_webhook_relay_deliveries
-                WHERE relay_delivery_id = ${request.relayDeliveryId}
-              `.pipe(Effect.ignore, Effect.as(result));
+          : store
+              .write({ kind: "delete_relay", relay_delivery_id: request.relayDeliveryId }, AnyRows)
+              .pipe(Effect.ignore, Effect.as(result));
       // From the claim until the run is forked nothing may interrupt: a
       // request dropped in between (the relay hangs up after its timeout)
       // would leave a claimed delivery that never runs, or a queue slot that
@@ -2073,26 +2003,32 @@ export const layer = Layer.effect(
       return yield* Effect.uninterruptible(
         Effect.gen(function* () {
           if (request.relayDeliveryId !== undefined) {
-            const claimed = yield* sql<{ relay_delivery_id: string }>`
-                INSERT INTO scheduled_task_webhook_relay_deliveries
-                  (relay_delivery_id, task_id, seen_at)
-                VALUES (${request.relayDeliveryId}, ${task.id}, ${iso(now)})
-                ON CONFLICT (relay_delivery_id) DO NOTHING
-                RETURNING relay_delivery_id
-              `.pipe(
-              Effect.mapError((cause) =>
-                taskError("Could not record webhook delivery.", { taskId: task.id, cause }),
-              ),
-            );
+            const claimed = yield* store
+              .write(
+                {
+                  kind: "claim_relay",
+                  relay_delivery_id: request.relayDeliveryId,
+                  task_id: task.id,
+                  seen_at: iso(now),
+                },
+                RelayIds,
+              )
+              .pipe(
+                Effect.mapError((cause) =>
+                  taskError("Could not record webhook delivery.", { taskId: task.id, cause }),
+                ),
+              );
             if (claimed.length === 0) {
               yield* observe("duplicate");
               return { _tag: "accepted" as const, deliveryId, outcome: "duplicate" as const };
             }
             claimAcquired = true;
-            yield* sql`
-                DELETE FROM scheduled_task_webhook_relay_deliveries
-                WHERE seen_at < ${iso(DateTime.subtract(now, { hours: 48 }))}
-              `.pipe(Effect.ignore);
+            yield* store
+              .write(
+                { kind: "prune_relays", before: iso(DateTime.subtract(now, { hours: 48 })) },
+                AnyRows,
+              )
+              .pipe(Effect.ignore);
           }
           const log = (
             outcome: ScheduledTaskWebhookDeliveryOutcome,
@@ -2203,10 +2139,7 @@ export const layer = Layer.effect(
           );
           const queueKey = `${task.id}\u0000${task.createdAt}`;
           const checkCapacity = Effect.gen(function* () {
-            const [row] = yield* sql<{
-              count: number;
-            }>`SELECT COUNT(*) AS count FROM scheduled_task_webhook_pending
-              WHERE task_id = ${task.id} AND state IN ('pending', 'dispatching', 'running')`;
+            const [row] = yield* store.read({ kind: "pending_count", task_id: task.id }, CountRows);
             if (
               (row?.count ?? 0) + ((yield* Ref.get(webhookQueued)).get(queueKey) ?? 0) >=
               WEBHOOK_MAX_QUEUED_PER_TASK
@@ -2216,7 +2149,7 @@ export const layer = Layer.effect(
             Effect.mapError((cause) => (cause === "queue_full" ? cause : dedupeError(cause))),
           );
           const admit = <A, E>(effect: Effect.Effect<A, E>) =>
-            sql.withTransaction(effect).pipe(
+            transactions.withTransaction(effect).pipe(
               Effect.catch((cause) =>
                 cause === "first_rejected" || cause === "rejected" || cause === "queue_full"
                   ? Effect.succeed({
@@ -2243,7 +2176,7 @@ export const layer = Layer.effect(
                       takeDedupeLogSlot(task.id, DateTime.toEpochMillis(now)),
                       checkCapacity,
                       (ownerId) => replaceDeliveryRequest(ownerId, request),
-                    ).pipe(Effect.provideService(SqlClient.SqlClient, sql));
+                    ).pipe(Effect.provideService(ScheduledRows, store));
                     if (
                       outcome === "pending" ||
                       outcome === "coalesced" ||
@@ -2331,7 +2264,7 @@ export const layer = Layer.effect(
                 deliveryId,
                 DateTime.toEpochMillis(now),
                 reserveImmediate,
-              ).pipe(Effect.provideService(SqlClient.SqlClient, sql));
+              ).pipe(Effect.provideService(ScheduledRows, store));
               if (outcome === "duplicate") {
                 if (yield* takeDedupeLogSlot(task.id, DateTime.toEpochMillis(now)))
                   yield* log("duplicate", { signatureVerified: signature !== null });
@@ -2390,35 +2323,35 @@ export const layer = Layer.effect(
       const now = DateTime.toEpochMillis(yield* localNow);
       if (yield* pendingWebhooks.isIdle(now)) return;
       const readVersion = yield* pendingWebhooks.version;
-      yield* sql`UPDATE scheduled_task_webhook_pending SET state = 'dispatching' WHERE state = 'pending' AND due_at <= ${now}`;
-      const tasks = yield* sql<{ task_id: ScheduledTaskId }>`
-        SELECT DISTINCT task_id FROM scheduled_task_webhook_pending WHERE state IN ('dispatching', 'running', 'completed', 'failed')
-      `.pipe(NodeSqliteClient.readOnly);
+      yield* store.write({ kind: "expire_pending", now }, AnyRows);
+      const tasks = yield* store.read({ kind: "active_pending_tasks" }, TaskIds);
       // Workers can leave rows behind to retry, so keep polling while any are claimed.
       if (tasks.length === 0) {
-        const [next] = yield* sql<{ due_at: number | null }>`
-          SELECT MIN(due_at) AS due_at FROM scheduled_task_webhook_pending WHERE state = 'pending'
-        `.pipe(NodeSqliteClient.readOnly);
+        const [next] = yield* store.read({ kind: "next_pending" }, NextPendingRows);
         yield* pendingWebhooks.record(readVersion, next?.due_at ?? Infinity, now);
       }
       yield* Effect.forEach(
         tasks,
-        ({ task_id: taskId }) => {
+        ({ task_id }) => {
+          const taskId = ScheduledTaskId.make(task_id);
           // One worker per task waits on its permit, then drains persisted rows in order.
           // Other tasks remain independent and ticks never reload an active task's payloads.
           const dispatch = Effect.gen(function* () {
             while (true) {
-              const [entry] = yield* sql<{
-                delivery_id: string;
-                task_json: string;
-                request_json: string;
-                state: string;
-              }>`
-              SELECT delivery_id, task_json, request_json, state FROM scheduled_task_webhook_pending
-              WHERE task_id = ${taskId} AND state IN ('dispatching', 'running', 'completed', 'failed') ORDER BY due_at, rowid LIMIT 1
-            `.pipe(NodeSqliteClient.readOnly);
+              const [entry] = yield* store.read(
+                {
+                  kind: "pending",
+                  task_id: taskId,
+                  states: ["dispatching", "running", "completed", "failed"],
+                  first: true,
+                },
+                PendingRows,
+              );
               if (entry === undefined) return;
-              const remove = sql`DELETE FROM scheduled_task_webhook_pending WHERE delivery_id = ${entry.delivery_id}`;
+              const remove = store.write(
+                { kind: "delete_pending", delivery_id: entry.delivery_id },
+                AnyRows,
+              );
               if (entry.state === "completed" || entry.state === "failed") {
                 if (entry.state === "failed") {
                   yield* markDeliveryFailed(entry.delivery_id, "The run failed to start.");
@@ -2461,8 +2394,27 @@ export const layer = Layer.effect(
                 yield* releaseFailedDelivery(entry.delivery_id);
               } else {
                 if (taskJson !== null)
-                  yield* sql`UPDATE scheduled_task_webhook_pending SET task_json = ${taskJson} WHERE delivery_id = ${entry.delivery_id}`;
-                yield* sql`UPDATE scheduled_task_webhook_deliveries SET outcome = 'accepted', error = NULL, rendered_prompt = ${rendered.prompt.slice(0, WEBHOOK_DELIVERY_LOG_PROMPT_LIMIT)}, missing_fields_json = ${encodeMissingFieldsJson(rendered.missing)} WHERE delivery_id = ${entry.delivery_id}`;
+                  yield* store.write(
+                    {
+                      kind: "patch_pending",
+                      delivery_id: entry.delivery_id,
+                      patch: { task_json: taskJson },
+                    },
+                    AnyRows,
+                  );
+                yield* store.write(
+                  {
+                    kind: "patch_delivery",
+                    delivery_id: entry.delivery_id,
+                    patch: {
+                      outcome: "accepted",
+                      error: null,
+                      rendered_prompt: rendered.prompt.slice(0, WEBHOOK_DELIVERY_LOG_PROMPT_LIMIT),
+                      missing_fields_json: encodeMissingFieldsJson(rendered.missing),
+                    },
+                  },
+                  AnyRows,
+                );
                 if (!(yield* runWebhookDelivery(task, entry.delivery_id, rendered.prompt))) return;
               }
               yield* remove;
@@ -2517,4 +2469,10 @@ export const layer = Layer.effect(
       triggerWebhook,
     });
   }),
+);
+
+/** Production retains its existing SQLite owner until whole-server cutover. */
+export const layer = layerWithRows.pipe(
+  Layer.provide(SqliteScheduledRows.layer),
+  Layer.provide(sqliteTransactions),
 );

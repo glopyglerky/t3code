@@ -602,6 +602,7 @@ async fn index_event(
     catalog: &ApplicationCatalog,
     event: &EventRecord,
 ) -> Result<()> {
+    maintenance::index_event(tx, catalog, event).await?;
     // Original identities accompany hashed keys so collisions fail closed.
     for (suffix, witness) in [
         (
@@ -743,6 +744,10 @@ async fn index_event(
     }
     Ok(())
 }
+
+#[path = "redb_projection_maintenance.rs"]
+pub(crate) mod maintenance;
+pub use maintenance::{MaintenanceRead, MaintenanceWrite};
 
 async fn preparation(tx: &mut Transaction, catalog: &ApplicationCatalog) -> Result<Preparation> {
     if tx
@@ -1005,66 +1010,7 @@ impl ApplicationTransactions {
 
     pub async fn events_read(&mut self, id: &str, input: EventRead) -> Result<Vec<EventResultRow>> {
         let mut session = self.take(id)?;
-        let result = async {
-            ready(&mut session).await?;
-            safe_sequence(input.after_sequence)?;
-            let through = safe_sequence(input.through_sequence.unwrap_or(MAX_SEQUENCE))?;
-            if input.limit > MAX_PAGE {
-                return Err(invalid("event page exceeds 4096 rows"));
-            }
-            if input.limit == 0 || input.after_sequence >= through {
-                return Ok(Vec::new());
-            }
-            let agent = input.only_agent_events.unwrap_or(false);
-            let prefix = event_filter_prefix(
-                &session.catalog,
-                agent,
-                input.thread_id.as_deref(),
-                input.command_id.as_deref(),
-                input.event_type.as_deref(),
-            );
-            let start = ordered_key(prefix.clone(), input.after_sequence + 1);
-            let end = ordered_key(prefix.clone(), through + 1);
-            let rows = session
-                .transaction
-                .scan(&start, &end, input.limit as usize)
-                .await?;
-            let mut output = Vec::with_capacity(rows.len());
-            for (encoded, bytes) in rows {
-                let sequence = sequence_from_key(&prefix, &encoded)?;
-                if decode::<u64>(&bytes)? != sequence {
-                    return Err(Error::IncompatibleStore);
-                }
-                let event = event_at(&mut session.transaction, &session.catalog, sequence)
-                    .await?
-                    .ok_or(Error::IncompatibleStore)?;
-                if !(if agent {
-                    event.agent()
-                } else {
-                    event.application()
-                }) || input
-                    .thread_id
-                    .as_ref()
-                    .is_some_and(|value| *value != event.row.stream_id)
-                    || input
-                        .command_id
-                        .as_ref()
-                        .is_some_and(|value| event.row.command_id.as_ref() != Some(value))
-                    || input
-                        .event_type
-                        .as_ref()
-                        .is_some_and(|value| *value != event.row.event_type)
-                {
-                    return Err(Error::IncompatibleStore);
-                }
-                let payload =
-                    restored_payload(&mut session.transaction, &session.catalog, &event).await?;
-                output.push(event.output(payload));
-            }
-            crate::validate_response_bytes(&output)?;
-            Ok(output)
-        }
-        .await;
+        let result = read_events(&mut session, input).await;
         self.finish(id, session, result).await
     }
 
@@ -1216,6 +1162,69 @@ impl ApplicationTransactions {
         .await;
         self.finish(id, session, result).await
     }
+}
+
+/// Reuse the ordered event index without opening another transaction owner.
+pub(crate) async fn read_events(
+    session: &mut Session,
+    input: EventRead,
+) -> Result<Vec<EventResultRow>> {
+    ready(session).await?;
+    safe_sequence(input.after_sequence)?;
+    let through = safe_sequence(input.through_sequence.unwrap_or(MAX_SEQUENCE))?;
+    if input.limit > MAX_PAGE {
+        return Err(invalid("event page exceeds 4096 rows"));
+    }
+    if input.limit == 0 || input.after_sequence >= through {
+        return Ok(Vec::new());
+    }
+    let agent = input.only_agent_events.unwrap_or(false);
+    let prefix = event_filter_prefix(
+        &session.catalog,
+        agent,
+        input.thread_id.as_deref(),
+        input.command_id.as_deref(),
+        input.event_type.as_deref(),
+    );
+    let start = ordered_key(prefix.clone(), input.after_sequence + 1);
+    let end = ordered_key(prefix.clone(), through + 1);
+    let rows = session
+        .transaction
+        .scan(&start, &end, input.limit as usize)
+        .await?;
+    let mut output = Vec::with_capacity(rows.len());
+    for (encoded, bytes) in rows {
+        let sequence = sequence_from_key(&prefix, &encoded)?;
+        if decode::<u64>(&bytes)? != sequence {
+            return Err(Error::IncompatibleStore);
+        }
+        let event = event_at(&mut session.transaction, &session.catalog, sequence)
+            .await?
+            .ok_or(Error::IncompatibleStore)?;
+        if !(if agent {
+            event.agent()
+        } else {
+            event.application()
+        }) || input
+            .thread_id
+            .as_ref()
+            .is_some_and(|value| *value != event.row.stream_id)
+            || input
+                .command_id
+                .as_ref()
+                .is_some_and(|value| event.row.command_id.as_ref() != Some(value))
+            || input
+                .event_type
+                .as_ref()
+                .is_some_and(|value| *value != event.row.event_type)
+        {
+            return Err(Error::IncompatibleStore);
+        }
+        let payload = restored_payload(&mut session.transaction, &session.catalog, &event).await?;
+        output.push(event.output(payload));
+    }
+    crate::validate_response_bytes(&output)?;
+    Ok(output)
 }
 
 #[cfg(test)]

@@ -650,6 +650,5 @@ const make = Effect.gen(function* () {
   });
 });
 
-export const layer = Layer.effect(PairingGrantStore, make).pipe(
-  Layer.provideMerge(AuthPairingLinks.layer),
-);
+export const layerFromRepository = Layer.effect(PairingGrantStore, make);
+export const layer = layerFromRepository.pipe(Layer.provideMerge(AuthPairingLinks.layer));

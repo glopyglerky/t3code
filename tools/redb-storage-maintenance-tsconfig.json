@@ -1,0 +1,18 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "lib": ["ESNext", "esnext.disposable"]
+  },
+  "files": [
+    "../apps/server/src/serverOwnership.ts",
+    "../apps/server/src/persistence/ServerOwnershipLock.ts",
+    "../apps/server/src/persistence/SqliteServerOwnershipLock.ts",
+    "../apps/server/src/persistence/NativeServerOwnershipLock.ts",
+    "../apps/server/src/persistence/DatabaseStorage.ts",
+    "../apps/server/src/persistence/DatabaseStorageBackend.ts",
+    "../apps/server/src/persistence/SqliteDatabaseStorageBackend.ts",
+    "../apps/server/src/persistence/NativeDatabaseStorageBackend.ts",
+    "../apps/server/src/persistence/NativeDatabaseMaintenance.ts"
+  ]
+}

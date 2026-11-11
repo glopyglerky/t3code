@@ -24,8 +24,16 @@ const fixture =
 import * as FS from "node:fs";
 import * as Readline from "node:readline";
 let count = 0;
+let ignoreShutdown = false;
 for await (const line of Readline.createInterface({ input: process.stdin })) {
   const request = JSON.parse(line);
+  if (request.operation === "shutdown") {
+    if (ignoreShutdown) continue;
+    FS.appendFileSync(process.argv[3] + ".closed", String(process.pid) + "\n");
+    process.stdout.write('{"ok":true,"result":null}\n', () => process.exit(0));
+    break;
+  }
+  if (request.action === "ignore-shutdown") ignoreShutdown = true;
   count++;
   switch (request.action) {
     case "rejected":
@@ -106,6 +114,8 @@ const failureOf = (effect, tag) =>
 try {
   await NodeFSP.writeFile(executable, fixture, { mode: 0o700 });
   let escaped;
+  let uncooperativePid;
+  const gracefullyClosed = [];
   await Effect.runPromise(
     Effect.scoped(
       Effect.gen(function* () {
@@ -232,6 +242,7 @@ try {
         const afterCancellation = yield* database.request({ action: "echo" }, Echo);
         NodeAssert.equal(afterCancellation.count, 1);
         NodeAssert.notEqual(afterCancellation.pid, healthy.pid);
+        gracefullyClosed.push(afterCancellation.pid);
         checks++;
 
         const withDeadline = yield* NativeDatabase.make({
@@ -245,7 +256,9 @@ try {
           "NativeDatabaseOutcomeUnknown",
         );
         NodeAssert.equal(timeout.stage, "timeout");
-        NodeAssert.equal((yield* withDeadline.request({ action: "echo" }, Echo)).count, 1);
+        const afterTimeout = yield* withDeadline.request({ action: "echo" }, Echo);
+        NodeAssert.equal(afterTimeout.count, 1);
+        gracefullyClosed.push(afterTimeout.pid);
         checks++;
 
         yield* failureOf(
@@ -257,9 +270,26 @@ try {
           databasePath,
         });
         yield* failureOf(missing.request({ action: "echo" }, Echo), "NativeDatabaseUnavailable");
+        const uncooperative = yield* NativeDatabase.make({
+          executable,
+          databasePath,
+          requestTimeout: "1 second",
+        });
+        uncooperativePid = (yield* uncooperative.request({ action: "ignore-shutdown" }, Echo)).pid;
       }),
     ).pipe(Effect.provide(NodeServices.layer)),
   );
+  NodeAssert.throws(() => process.kill(uncooperativePid, 0), { code: "ESRCH" });
+  checks++;
+  NodeAssert.deepEqual(
+    (await NodeFSP.readFile(databasePath + ".closed", "utf8"))
+      .trim()
+      .split("\n")
+      .map(Number)
+      .sort(),
+    gracefullyClosed.sort(),
+  );
+  checks++;
   const closed = await Effect.runPromise(
     failureOf(escaped.request({ action: "echo" }, Echo), "NativeDatabaseUnavailable"),
   );
@@ -289,6 +319,8 @@ try {
       "response envelope allowance preserves maximum-sized result payloads",
       "response value count allows native metadata beyond the request parser limit",
       "response depth allows receipt wrappers around maximum-depth request values",
+      "only healthy idle helpers receive bounded graceful shutdown before child-process finalization",
+      "a helper that ignores graceful shutdown is forcibly reaped without a recursive scope-close deadlock",
     ],
   };
   if (proofPath !== undefined) {

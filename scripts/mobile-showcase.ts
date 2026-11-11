@@ -27,7 +27,9 @@ import {
   SHOWCASE_ENVIRONMENTS,
   SHOWCASE_PROJECTS,
   SHOWCASE_THREADS,
+  assertSqliteShowcaseHome,
   seedShowcaseEnvironment,
+  sqliteShowcaseEnvironment,
 } from "./mobile-showcase-environment.ts";
 
 const REPO_ROOT = NodePath.resolve(NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)), "..");
@@ -636,7 +638,7 @@ function startShowcaseServer(
     ],
     {
       env: {
-        ...NodeProcess.env,
+        ...sqliteShowcaseEnvironment(NodeProcess.env),
         PATH: `${labelProbeDirectory}:${NodeProcess.env.PATH ?? ""}`,
         SHELL: shellPath,
       },
@@ -664,6 +666,7 @@ export async function startShowcaseEnvironments(
     if (!project) throw new Error(`Showcase environment '${environment.id}' has no project.`);
 
     const baseDir = NodePath.join(rootDir, "environments", environment.id);
+    await assertSqliteShowcaseHome(baseDir);
     const workspaceRoot = NodePath.join(baseDir, "workspace", project.directory);
     const port = await reserveAvailablePort();
     await NodeFSP.mkdir(workspaceRoot, { recursive: true });
@@ -720,7 +723,7 @@ export async function issuePairingCredential(baseDir: string): Promise<string> {
   const output = await commandOutput(
     "node",
     ["apps/server/src/bin.ts", "auth", "pairing", "create", "--base-dir", baseDir, "--json"],
-    { env: { ...NodeProcess.env, NO_COLOR: "1" } },
+    { env: { ...sqliteShowcaseEnvironment(NodeProcess.env), NO_COLOR: "1" } },
   );
   return parsePairingCredentialOutput(output);
 }

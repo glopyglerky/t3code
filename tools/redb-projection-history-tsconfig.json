@@ -1,0 +1,13 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "lib": ["ESNext", "esnext.disposable"]
+  },
+  "files": [
+    "../apps/server/src/usage/CodexUsageHistory.ts",
+    "../apps/server/src/usage/NativeCodexUsageHistory.ts",
+    "../apps/server/src/pullRequest/linkedThreads.ts",
+    "../apps/server/src/pullRequest/NativeLinkedThreads.ts"
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {"types": ["node"], "lib": ["ESNext", "esnext.disposable"]},
+  "files": [
+    "./omdb-production-types.ts",
+    "../apps/server/src/server.ts",
+    "../apps/server/src/cli/project.ts",
+    "../apps/server/src/cli/environment.ts",
+    "../apps/server/src/cli/doctor.ts"
+  ]
+}

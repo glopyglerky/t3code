@@ -34,6 +34,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as OrchestrationEventStore from "../persistence/OrchestrationEventStore.ts";
 import { ProjectEnrichmentService } from "../project/ProjectEnrichmentService.ts";
 import * as OrchestrationHttp from "./http.ts";
+import * as PersistenceTransactions from "../persistence/PersistenceTransactions.ts";
 import { EventSinkV2 } from "./EventSink.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as CommandReceiptStore from "./CommandReceiptStore.ts";
@@ -114,6 +115,7 @@ const serveOrchestrationHttp = (allowed: () => boolean) =>
         ),
         OrchestrationEventStore.layer,
         ProjectStore.layer,
+        PersistenceTransactions.sqliteLayer,
       ).pipe(Layer.provideMerge(SqlitePersistence.layerMemory)),
     );
     const eventSink = Context.get(services, EventSinkV2);

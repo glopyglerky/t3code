@@ -7,6 +7,7 @@ import * as LogLevel from "effect/LogLevel";
 import * as Path from "effect/Path";
 import type * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
+import { applicationDatabase } from "@t3tools/shared/applicationDatabase";
 
 import type { OtlpEndpointSource } from "@t3tools/contracts";
 import { sweepStalePendingAttachments } from "./attachmentStore.ts";
@@ -146,7 +147,10 @@ export const deriveServerPaths = Effect.fn(function* (
     baseDir,
     devUrl !== undefined && !options.baseDirIsExplicit ? "dev" : "userdata",
   );
-  const dbPath = join(stateDir, "statev2.sqlite");
+  const dbPath = join(
+    stateDir,
+    applicationDatabase().kind === "omdb" ? "statev2.omdb" : "statev2.sqlite",
+  );
   const attachmentsDir = join(stateDir, "attachments");
   const logsDir = join(stateDir, "logs");
   const providerLogsDir = join(logsDir, "provider");

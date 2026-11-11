@@ -21,6 +21,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import { ATTACHMENT_ONLY_BOOTSTRAP_PROMPT } from "@t3tools/shared/composerContextReferences";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as PersistenceTransactions from "../persistence/PersistenceTransactions.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as ThreadSearch from "./ThreadSearch.ts";
@@ -29,6 +30,7 @@ const layerTest = Layer.mergeAll(
   ThreadSearch.layer,
   ProjectionStore.layer,
   ProjectStore.layer,
+  PersistenceTransactions.sqliteLayer,
 ).pipe(Layer.provideMerge(SqlitePersistence.layerMemory));
 
 const providerInstanceId = ProviderInstanceId.make("codex");
@@ -981,7 +983,7 @@ it.layer(layerTest)("ThreadSearch.searchThreadsWithOlderSettledRows", (it) => {
     Effect.gen(function* () {
       const projections = yield* ProjectionStore.ProjectionStoreV2;
       const search = yield* ThreadSearch.ThreadSearch;
-      const sql = yield* SqlClient.SqlClient;
+      const transactions = yield* PersistenceTransactions.PersistenceTransactions;
       const project = ProjectId.make("project:plover");
       yield* createProject(project);
       const old = ThreadId.make("thread:plover-old");
@@ -1000,7 +1002,7 @@ it.layer(layerTest)("ThreadSearch.searchThreadsWithOlderSettledRows", (it) => {
           request: { query: "plover", olderSettledBefore: DateTime.formatIso(at(30)), ...request },
           search: search.search,
           searchOlderSettled: search.searchOlderSettled,
-          sql,
+          withReadTransaction: transactions.withReadTransaction,
           readThreads: (threadIds) =>
             projections.readShellSnapshot({ location: "active", threadIds }),
           latestSequence: Effect.succeed(7),
@@ -1027,7 +1029,7 @@ it.layer(layerTest)("ThreadSearch.searchThreadsWithOlderSettledRows", (it) => {
           request: { query: "plover" },
           search: search.search,
           searchOlderSettled: search.searchOlderSettled,
-          sql,
+          withReadTransaction: transactions.withReadTransaction,
           readThreads: (threadIds) =>
             projections.readShellSnapshot({ location: "active", threadIds }),
           latestSequence: Effect.succeed(7),

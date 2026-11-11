@@ -1,0 +1,16 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "lib": ["ESNext", "esnext.disposable"]
+  },
+  "files": [
+    "../apps/server/src/cli/environment.ts",
+    "../apps/server/src/cli/project.ts",
+    "../apps/server/src/cli/doctor.ts",
+    "../apps/server/src/cli/server.ts",
+    "../apps/server/src/triage/triagePrompt.ts",
+    "../scripts/dev-runner.ts",
+    "../scripts/mobile-showcase-environment.ts"
+  ]
+}

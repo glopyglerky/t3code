@@ -43,6 +43,7 @@ import { Etag, HttpRouter } from "effect/http";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as PersistenceTransactions from "../persistence/PersistenceTransactions.ts";
 import * as OrchestrationEventStore from "../persistence/OrchestrationEventStore.ts";
 import * as ProjectEnrichmentService from "../project/ProjectEnrichmentService.ts";
 import { subscribeOrchestrationV2Thread } from "../ws.ts";
@@ -392,6 +393,7 @@ const seed = Effect.gen(function* () {
 });
 
 const TestLayer = Layer.mergeAll(
+  PersistenceTransactions.sqliteLayer,
   management,
   Layer.succeed(ServerEnvironment.ServerEnvironmentIdentity, {
     getEnvironmentId: Effect.succeed(EnvironmentId.make("compact-transport")),

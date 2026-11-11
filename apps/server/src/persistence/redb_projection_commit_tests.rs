@@ -4,6 +4,441 @@ use crate::test_support::TestFixture;
 
 const NOW: &str = "2026-11-10T12:34:56.123Z";
 
+#[tokio::test]
+async fn historical_unreadable_provider_payload_can_be_audited_without_releasing_ownership() {
+    let fixture = TestFixture::start().await;
+    let store = fixture.initialize().await;
+    let mut app = initialize(&store).await;
+    let mut row = spec(PROVIDER_THREADS)
+        .columns
+        .iter()
+        .map(|(name, kind)| {
+            let value = match kind {
+                T => text_cell("fixture"),
+                I => int_cell(1),
+                NT | NI => nullable_cell(None),
+            };
+            ((*name).to_owned(), value)
+        })
+        .collect::<Map<String, Value>>();
+    for (name, value) in [
+        ("provider_thread_id", "corrupt"),
+        ("thread_id", "thread"),
+        ("driver", "claude"),
+        ("provider_instance_id", "instance"),
+        ("payload_json", "{bad"),
+    ] {
+        row.insert(name.into(), text_cell(value));
+    }
+    app.begin("seed").await.unwrap();
+    app.put("seed", PROVIDER_THREADS, vec![text_cell("corrupt")], row)
+        .await
+        .unwrap();
+    app.commit("seed").await.unwrap();
+    prepare(&store).await;
+    prepare_reads(&store).await;
+
+    app.begin("read").await.unwrap();
+    let page = app
+        .projections_recovery(
+            "read",
+            ProjectionRecoveryQuery::UnreadablePage {
+                table: "provider_threads".into(),
+                after: None,
+                limit: 32,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(page["rows"][0]["payload_json"], "{bad");
+    assert!(
+        !app.projections_guard(
+            "read",
+            ProjectionGuard::NativeThreadOwned {
+                driver: "claude".into(),
+                provider_instance_id: "instance".into(),
+                native_id: Some("native".into()),
+                app_thread_id: Some("thread".into()),
+            }
+        )
+        .await
+        .unwrap()
+    );
+    assert!(matches!(
+        app.projections_guard(
+            "read",
+            ProjectionGuard::NativeThreadOwned {
+                driver: "claude".into(),
+                provider_instance_id: "instance".into(),
+                native_id: Some("native".into()),
+                app_thread_id: Some("other".into()),
+            }
+        )
+        .await,
+        Err(Error::IncompatibleStore)
+    ));
+    // Incompatible data aborts the transaction, not the persisted ownership
+    // evidence. A caller must start a new snapshot after this terminal error.
+    assert!(!app.has_active_writer());
+    assert!(matches!(app.rollback("read").await, Err(Error::Invalid(_))));
+    app.begin("verify").await.unwrap();
+    let retained = app
+        .projections_recovery(
+            "verify",
+            ProjectionRecoveryQuery::UnreadablePage {
+                table: "provider_threads".into(),
+                after: None,
+                limit: 32,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(retained, page);
+    app.rollback("verify").await.unwrap();
+}
+
+#[tokio::test]
+async fn selected_projection_records_preserve_filters_order_and_atomic_visibility() {
+    use super::records::{
+        ProjectionRecordField as F, ProjectionRecordFilter, ProjectionRecordsQuery,
+    };
+    let fixture = TestFixture::start().await;
+    let store = fixture.initialize().await;
+    let mut app = initialize(&store).await;
+    prepare(&store).await;
+    prepare_reads(&store).await;
+    app.begin("write").await.unwrap();
+    apply(
+        &mut app,
+        "write",
+        event("thread.created", "thread", thread("thread")),
+    )
+    .await
+    .unwrap();
+    for (id, ordinal, status) in [
+        ("old", 1, "completed"),
+        ("current", 2, "running"),
+        ("cancelled", 3, "cancelled"),
+    ] {
+        let mut value = run(id, ordinal);
+        value["status"] = json!(status);
+        apply(&mut app, "write", event("run.created", "thread", value))
+            .await
+            .unwrap();
+    }
+    for (id, ordinal, role) in [("late", 9, "assistant"), ("early", 3, "user")] {
+        apply(
+            &mut app,
+            "write",
+            event(
+                "message.updated",
+                "thread",
+                json!({
+                    "id":id,"threadId":"thread","runId":"current","nodeId":null,"role":role,
+                    "streaming":false,"createdAt":NOW,"updatedAt":NOW,"text":id,
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+        apply(&mut app, "write", event("turn-item.updated", "thread", json!({
+            "id":format!("item-{id}"),"threadId":"thread","runId":"current","nodeId":null,
+            "providerThreadId":null,"providerTurnId":null,"parentItemId":null,"ordinal":ordinal,
+            "type":format!("{role}_message"),"status":"completed","updatedAt":NOW,"messageId":id,
+        }))).await.unwrap();
+    }
+    let result = app
+        .projection_records(
+            "write",
+            ProjectionRecordsQuery {
+                thread_id: "thread".into(),
+                fields: vec![F::Runs, F::Messages, F::TurnItems],
+                window: None,
+                filter: Some(ProjectionRecordFilter {
+                    run_statuses: Some(vec!["completed".into()]),
+                    include_latest_run: Some(true),
+                    message_roles: Some(vec!["user".into()]),
+                    ..Default::default()
+                }),
+            },
+        )
+        .await
+        .unwrap();
+    let ids = |values: &Vec<String>| {
+        values
+            .iter()
+            .map(|value| {
+                serde_json::from_str::<Value>(value).unwrap()["id"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids(&result.rows[&F::Runs]), ["old", "current"]);
+    assert_eq!(ids(&result.rows[&F::Messages]), ["early"]);
+    assert_eq!(
+        ids(&result.rows[&F::TurnItems]),
+        ["item-early", "item-late"]
+    );
+    assert!(result.rows[&F::Nodes].is_empty());
+    assert!(result.message_ordinals.is_empty());
+    let both = app
+        .projection_records(
+            "write",
+            ProjectionRecordsQuery {
+                thread_id: "thread".into(),
+                fields: vec![F::Messages],
+                window: None,
+                filter: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        both.message_ordinals
+            .iter()
+            .map(|row| (row.message_id.as_str(), row.ordinal))
+            .collect::<Vec<_>>(),
+        [("early", 3), ("late", 9)]
+    );
+    app.rollback("write").await.unwrap();
+    app.begin("read").await.unwrap();
+    let gone = app
+        .projection_records(
+            "read",
+            ProjectionRecordsQuery {
+                thread_id: "thread".into(),
+                fields: vec![F::Runs],
+                window: None,
+                filter: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(gone.thread.is_none());
+    app.rollback("read").await.unwrap();
+}
+
+async fn prepare_reads(store: &Store) {
+    while !store
+        .prepare_application_projection_reads()
+        .await
+        .unwrap()
+        .prepared
+    {}
+}
+
+#[tokio::test]
+async fn projection_lookups_preserve_owner_checks_requested_order_and_deleted_metadata() {
+    let fixture = TestFixture::start().await;
+    let store = fixture.initialize().await;
+    let mut app = initialize(&store).await;
+    prepare(&store).await;
+    prepare_reads(&store).await;
+    app.begin("write").await.unwrap();
+    for id in ["thread", "other", "deleted"] {
+        let mut payload = thread(id);
+        payload["title"] = json!(format!("Title {id}"));
+        if id == "deleted" {
+            payload["deletedAt"] = json!(NOW);
+        }
+        apply(&mut app, "write", event("thread.created", id, payload))
+            .await
+            .unwrap();
+    }
+    for (id, owner) in [
+        ("message-a", "thread"),
+        ("message-b", "thread"),
+        ("foreign", "other"),
+    ] {
+        apply(
+            &mut app,
+            "write",
+            event(
+                "message.updated",
+                owner,
+                json!({
+                    "id": id, "threadId": owner, "runId": null, "nodeId": null, "role": "assistant",
+                    "streaming": false, "createdAt": NOW, "updatedAt": NOW, "text": id,
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+    }
+    let messages = app
+        .projections_lookup(
+            "write",
+            ProjectionLookup::Messages {
+                thread_id: "thread".into(),
+                record_ids: vec![
+                    "message-b".into(),
+                    "foreign".into(),
+                    "message-a".into(),
+                    "message-b".into(),
+                    "missing".into(),
+                ],
+            },
+        )
+        .await
+        .unwrap();
+    let ids = messages["payloads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|payload| {
+            serde_json::from_str::<Value>(payload.as_str().unwrap()).unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["message-b", "message-a"]);
+    let metadata = app
+        .projections_lookup(
+            "write",
+            ProjectionLookup::ThreadMetadata {
+                thread_ids: vec![
+                    "deleted".into(),
+                    "thread".into(),
+                    "other".into(),
+                    "thread".into(),
+                    "missing".into(),
+                ],
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        metadata["metadata"],
+        json!([
+            {"thread_id":"other","project_id":"project","title":"Title other"},
+            {"thread_id":"thread","project_id":"project","title":"Title thread"},
+        ])
+    );
+    let deleted = app
+        .projections_lookup(
+            "write",
+            ProjectionLookup::Thread {
+                thread_id: "deleted".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(deleted["payloads"].as_array().unwrap().len(), 1);
+    let missing = app
+        .projections_lookup(
+            "write",
+            ProjectionLookup::Plan {
+                thread_id: "absent".into(),
+                record_id: "missing".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing["owner_exists"], false);
+    let existing = app
+        .projections_lookup(
+            "write",
+            ProjectionLookup::Plan {
+                thread_id: "thread".into(),
+                record_id: "missing".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(existing["owner_exists"], true);
+    assert_eq!(existing["payloads"], json!([]));
+    app.commit("write").await.unwrap();
+}
+
+#[tokio::test]
+async fn projection_read_indexes_backfill_and_follow_updates_savepoints_and_reopen() {
+    let fixture = TestFixture::start().await;
+    let store = fixture.initialize().await;
+    let mut app = initialize(&store).await;
+    prepare(&store).await;
+    app.begin("write").await.unwrap();
+    let mut payload = thread("thread");
+    payload["worktreePath"] = json!("/first");
+    apply(
+        &mut app,
+        "write",
+        event("thread.created", "thread", payload.clone()),
+    )
+    .await
+    .unwrap();
+    app.commit("write").await.unwrap();
+    prepare_reads(&store).await;
+    app.begin("write").await.unwrap();
+    let before = app
+        .projections_lookup("write", ProjectionLookup::WorkspacePaths {})
+        .await
+        .unwrap();
+    assert_eq!(
+        before["workspaces"],
+        json!([{"project_id":"project","worktree_path":"/first"}])
+    );
+    app.savepoint("write", "move").await.unwrap();
+    payload["worktreePath"] = json!("/second");
+    apply(
+        &mut app,
+        "write",
+        event("thread.metadata-updated", "thread", payload.clone()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        app.projections_lookup("write", ProjectionLookup::WorkspacePaths {})
+            .await
+            .unwrap()["workspaces"],
+        json!([{"project_id":"project","worktree_path":"/second"}])
+    );
+    app.rollback_to("write", "move").await.unwrap();
+    app.release("write", "move").await.unwrap();
+    assert_eq!(
+        app.projections_lookup("write", ProjectionLookup::WorkspacePaths {})
+            .await
+            .unwrap()["workspaces"],
+        before["workspaces"]
+    );
+    payload["worktreePath"] = json!("/third");
+    apply(
+        &mut app,
+        "write",
+        event("thread.metadata-updated", "thread", payload.clone()),
+    )
+    .await
+    .unwrap();
+    app.commit("write").await.unwrap();
+    let mut reopened = ApplicationTransactions::new(store.clone());
+    reopened.begin("read").await.unwrap();
+    assert_eq!(
+        reopened
+            .projections_lookup("read", ProjectionLookup::WorkspacePaths {})
+            .await
+            .unwrap()["workspaces"],
+        json!([{"project_id":"project","worktree_path":"/third"}])
+    );
+    payload["deletedAt"] = json!(NOW);
+    apply(
+        &mut reopened,
+        "read",
+        event("thread.deleted", "thread", payload),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        reopened
+            .projections_lookup("read", ProjectionLookup::WorkspacePaths {})
+            .await
+            .unwrap()["workspaces"],
+        json!([])
+    );
+    reopened.rollback("read").await.unwrap();
+}
+
 fn schema() -> ApplicationSchema {
     ApplicationSchema {
         version: 1,

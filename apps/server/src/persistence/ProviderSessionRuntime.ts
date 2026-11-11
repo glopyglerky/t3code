@@ -88,14 +88,14 @@ export class ProviderSessionRuntimeRepository extends Context.Service<
   }
 >()("t3/persistence/ProviderSessionRuntime/ProviderSessionRuntimeRepository") {}
 
-const ProviderSessionRuntimeDbRowSchema = ProviderSessionRuntime.mapFields(
+export const ProviderSessionRuntimeDbRowSchema = ProviderSessionRuntime.mapFields(
   Struct.assign({
     resumeCursor: Schema.NullOr(Schema.fromJsonString(Schema.Unknown)),
     runtimePayload: Schema.NullOr(Schema.fromJsonString(Schema.Unknown)),
   }),
 );
 
-const ProviderSessionRuntimeRawDbRowSchema = Schema.Struct({
+export const ProviderSessionRuntimeRawDbRowSchema = Schema.Struct({
   threadId: Schema.String,
   providerName: Schema.Unknown,
   providerInstanceId: Schema.Unknown,
@@ -115,7 +115,7 @@ const GetRuntimeRequestSchema = Schema.Struct({
 
 const DeleteRuntimeRequestSchema = GetRuntimeRequestSchema;
 
-const RecordImportedTranscriptRequestSchema = RecordImportedTranscriptInput.mapFields(
+export const RecordImportedTranscriptRequestSchema = RecordImportedTranscriptInput.mapFields(
   Struct.assign({ source: Schema.fromJsonString(AgentSessionImportSource) }),
 );
 
@@ -332,6 +332,43 @@ export const make = Effect.gen(function* () {
       `,
   });
 
+  return repositoryFromRows({
+    upsertRuntimeRow,
+    insertRuntimeRow,
+    recordImportedTranscriptRow,
+    getRuntimeRowByThreadId: (input) =>
+      getRuntimeRowByThreadId(input).pipe(NodeSqliteClient.readOnly),
+    listRuntimeRows: (input) => listRuntimeRows(input).pipe(NodeSqliteClient.readOnly),
+    deleteRuntimeByThreadId,
+  });
+});
+
+export interface ProviderSessionRuntimeRows<E> {
+  readonly upsertRuntimeRow: (input: ProviderSessionRuntime) => Effect.Effect<void, E>;
+  readonly insertRuntimeRow: (input: ProviderSessionRuntime) => Effect.Effect<void, E>;
+  readonly recordImportedTranscriptRow: (
+    input: RecordImportedTranscriptInput,
+  ) => Effect.Effect<void, E>;
+  readonly getRuntimeRowByThreadId: (
+    input: GetProviderSessionRuntimeInput,
+  ) => Effect.Effect<Option.Option<typeof ProviderSessionRuntimeRawDbRowSchema.Type>, E>;
+  readonly listRuntimeRows: (input: {
+    readonly excludeStopped: boolean;
+  }) => Effect.Effect<ReadonlyArray<typeof ProviderSessionRuntimeRawDbRowSchema.Type>, E>;
+  readonly deleteRuntimeByThreadId: (
+    input: DeleteProviderSessionRuntimeInput,
+  ) => Effect.Effect<void, E>;
+}
+
+/** Keep decoding, skipped-row diagnostics and public errors identical for both stores. */
+export function repositoryFromRows<E>({
+  upsertRuntimeRow,
+  insertRuntimeRow,
+  recordImportedTranscriptRow,
+  getRuntimeRowByThreadId,
+  listRuntimeRows,
+  deleteRuntimeByThreadId,
+}: ProviderSessionRuntimeRows<E>): ProviderSessionRuntimeRepository["Service"] {
   const upsert: ProviderSessionRuntimeRepository["Service"]["upsert"] = (runtime, options) =>
     (options?.onConflict === "ignore" ? insertRuntimeRow(runtime) : upsertRuntimeRow(runtime)).pipe(
       Effect.mapError(
@@ -357,7 +394,6 @@ export const make = Effect.gen(function* () {
 
   const getByThreadId: ProviderSessionRuntimeRepository["Service"]["getByThreadId"] = (input) =>
     getRuntimeRowByThreadId(input).pipe(
-      NodeSqliteClient.readOnly,
       Effect.mapError(
         toPersistenceSqlOrDecodeError(
           "ProviderSessionRuntimeRepository.getByThreadId:query",
@@ -385,7 +421,6 @@ export const make = Effect.gen(function* () {
 
   const list: ProviderSessionRuntimeRepository["Service"]["list"] = (options) =>
     listRuntimeRows({ excludeStopped: options?.excludeStopped === true }).pipe(
-      NodeSqliteClient.readOnly,
       Effect.mapError(
         toPersistenceSqlOrDecodeError(
           "ProviderSessionRuntimeRepository.list:query",
@@ -437,6 +472,6 @@ export const make = Effect.gen(function* () {
     list,
     deleteByThreadId,
   } satisfies ProviderSessionRuntimeRepository["Service"];
-});
+}
 
 export const layer = Layer.effect(ProviderSessionRuntimeRepository, make);

@@ -26,8 +26,11 @@ Thin adapters may translate arguments, cancellation and errors, but must not cop
 the business algorithm. Select the backend before execution; never retry an
 uncertain provider action or database mutation through a fallback implementation.
 Preserve authorization, omitted/null distinctions, event ordering, receipts and
-transaction ownership. Production SQLite remains authoritative until the entire
-redb persistence boundary is accepted. Iroh byte forwarding does not replace
+transaction ownership. The qualified native-selected application uses omdb as its
+authoritative production database; SQLite is retained for source migration,
+immutable behavior comparisons and unqualified upstream-selected targets. Never
+fall back to a preserved SQLite source after native activation. Iroh byte
+forwarding does not replace
 Connect account, pairing or client lifecycle behavior. Keep all working clients.
 
 Build full Rust with the verified packaged Lustr coordinator and produced BlueFe

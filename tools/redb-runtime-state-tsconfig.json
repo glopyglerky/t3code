@@ -1,0 +1,13 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "lib": ["ESNext", "esnext.disposable"]
+  },
+  "files": [
+    "../apps/server/src/persistence/ProviderSessionRuntime.ts",
+    "../apps/server/src/persistence/NativeProviderSessionRuntime.ts",
+    "../apps/server/src/mcpApps/McpAppModelContext.ts",
+    "../apps/server/src/mcpApps/NativeMcpAppModelContext.ts"
+  ]
+}

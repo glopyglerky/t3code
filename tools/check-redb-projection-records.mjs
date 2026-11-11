@@ -1,0 +1,589 @@
+#!/usr/bin/env node
+import * as Assert from "node:assert/strict";
+import * as FS from "node:fs/promises";
+import * as Path from "node:path";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+
+import * as ProjectionStore from "../apps/server/src/orchestration-v2/ProjectionStore.ts";
+import * as NativeProjectionStore from "../apps/server/src/orchestration-v2/NativeProjectionStore.ts";
+import { createFixture } from "./database-fixture.mjs";
+import { exportSqliteState } from "./export-sqlite-state.mjs";
+import {
+  createMigratedSqlite,
+  finishProof,
+  hash,
+  loadUpstreamModule,
+  nativeRequest,
+  normalized,
+  withNative,
+  withSqlite,
+} from "./redb-domain-fixture.mjs";
+import { jsonPayloads, sampleEvents, makeEvent, fixedTime } from "./redb-event-sink-fixtures.mjs";
+
+const [executable, proofPath] = process.argv.slice(2);
+Assert.ok(executable && Path.isAbsolute(executable), "Pass an absolute native database executable");
+await FS.access(executable, FS.constants.X_OK);
+const oracle = await loadUpstreamModule("apps/server/src/orchestration-v2/ProjectionStore.ts");
+const fixture = await createFixture();
+const fields = [
+  "runs",
+  "attempts",
+  "nodes",
+  "subagents",
+  "providerSessions",
+  "providerThreads",
+  "providerTurns",
+  "runtimeRequests",
+  "messages",
+  "plans",
+  "turnItems",
+  "checkpointScopes",
+  "checkpoints",
+  "contextHandoffs",
+  "contextTransfers",
+];
+const checks = [];
+const failed = (body) =>
+  Effect.exit(body).pipe(Effect.tap((exit) => Effect.sync(() => Assert.ok(Exit.isFailure(exit)))));
+const ids = (records) => records.map((record) => record.id);
+
+async function withServices(kind, filename, use) {
+  if (kind === "redb")
+    return withNative(executable, fixture, (client) =>
+      Effect.gen(function* () {
+        const store = yield* NativeProjectionStore.make;
+        return yield* use({
+          read: store.getThreadRecords,
+          apply: store.apply,
+          transaction: client.withTransaction,
+        });
+      }),
+    );
+  return withSqlite(filename, (sql) =>
+    Effect.gen(function* () {
+      const module = kind === "upstream" ? oracle.module : ProjectionStore;
+      const store = yield* module.ProjectionStoreV2.pipe(Effect.provide(module.layer));
+      return yield* use({
+        read: store.getThreadRecords,
+        apply: store.apply,
+        transaction: (body) => sql.withTransaction(body),
+      });
+    }),
+  );
+}
+
+const handoff = (id, extra = {}) =>
+  makeEvent("context-handoff.updated", { ...jsonPayloads.contextHandoff, id, ...extra });
+const transfer = (id, extra = {}) =>
+  makeEvent("context-transfer.created", { ...jsonPayloads.contextTransfer, id, ...extra });
+const turn = (id, ordinal, updatedAt, extra = {}) =>
+  makeEvent("provider-turn.updated", {
+    ...jsonPayloads.providerTurn,
+    id,
+    ordinal,
+    nativeTurnRef: null,
+    tokenUsage: { usedTokens: ordinal, updatedAt },
+    ...extra,
+  });
+
+const extraEvents = [
+  makeEvent("run.created", {
+    ...jsonPayloads.run,
+    id: "run:old",
+    ordinal: 2,
+    status: "completed",
+    completedAt: fixedTime,
+  }),
+  makeEvent("run.created", { ...jsonPayloads.run, id: "run:current", ordinal: 3 }),
+  makeEvent("run.created", {
+    ...jsonPayloads.run,
+    id: "run:cancelled",
+    ordinal: 4,
+    status: "cancelled",
+    startedAt: null,
+  }),
+  makeEvent("run-attempt.created", {
+    ...jsonPayloads.attempt,
+    id: "attempt:old",
+    runId: "run:old",
+    attemptOrdinal: 2,
+  }),
+  makeEvent("node.updated", {
+    ...jsonPayloads.node,
+    id: "node:settled",
+    runId: "run:old",
+    kind: "reasoning",
+    status: "completed",
+  }),
+  makeEvent("node.updated", {
+    ...jsonPayloads.node,
+    id: "node:active-terminal",
+    kind: "reasoning",
+    status: "completed",
+  }),
+  makeEvent("node.updated", {
+    ...jsonPayloads.node,
+    id: "node:without-run",
+    runId: null,
+    kind: "reasoning",
+    status: "completed",
+    startedAt: null,
+  }),
+  makeEvent("subagent.updated", {
+    ...jsonPayloads.subagent,
+    id: "subagent:settled",
+    runId: "run:old",
+    status: "completed",
+    completionDelivery: { state: "delivered", observedByRunId: null },
+  }),
+  makeEvent("subagent.updated", {
+    ...jsonPayloads.subagent,
+    id: "subagent:active-terminal",
+    status: "completed",
+    completionDelivery: { state: "acknowledged", observedByRunId: null },
+  }),
+  makeEvent("provider-thread.updated", {
+    ...jsonPayloads.providerThread,
+    id: "provider:owned",
+    appThreadId: null,
+    nativeThreadRef: null,
+    firstRunOrdinal: 2,
+  }),
+  makeEvent("provider-thread.updated", {
+    ...jsonPayloads.providerThread,
+    id: "provider:subagent",
+    appThreadId: null,
+    ownerNodeId: null,
+    nativeThreadRef: null,
+    firstRunOrdinal: null,
+  }),
+  makeEvent("subagent.updated", {
+    ...jsonPayloads.subagent,
+    id: "subagent:linked",
+    providerThreadId: "provider:subagent",
+  }),
+  turn("turn:earlier", 2, "2026-11-10T11:59:59.999Z"),
+  turn("turn:later", 3, "2026-11-10T05:00:00.000-07:00"),
+  turn("turn:tie", 4, "2026-11-10T12:00:00.000Z"),
+  turn("turn:invalid", 5, "not-a-date"),
+  makeEvent("runtime-request.updated", {
+    ...jsonPayloads.request,
+    id: "request:resolved",
+    status: "resolved",
+    resolvedAt: fixedTime,
+  }),
+  makeEvent("message.updated", {
+    ...jsonPayloads.message,
+    id: "message:user",
+    role: "user",
+    createdBy: "user",
+    creationSource: "web",
+    createdAt: "2026-11-10T13:00:00.000Z",
+    streaming: false,
+  }),
+  makeEvent("message.updated", {
+    ...jsonPayloads.message,
+    id: "message:assistant",
+    createdAt: "2026-11-10T11:00:00.000Z",
+  }),
+  makeEvent("message.updated", {
+    ...jsonPayloads.message,
+    id: "message:monitor",
+    runId: "run:old",
+    notification: {
+      source: { kind: "monitor" },
+      outcome: "updated",
+      summary: "Fixture monitor update",
+    },
+  }),
+  makeEvent("turn-item.updated", {
+    ...jsonPayloads.turnItem,
+    id: "item:user",
+    type: "user_message",
+    messageId: "message:user",
+    ordinal: 2,
+    inputIntent: "turn_start",
+    createdBy: "user",
+    creationSource: "web",
+    attachments: [],
+  }),
+  makeEvent("turn-item.updated", {
+    ...jsonPayloads.turnItem,
+    id: "item:assistant",
+    type: "assistant_message",
+    messageId: "message:assistant",
+    ordinal: 20,
+  }),
+  makeEvent("turn-item.updated", {
+    ...jsonPayloads.turnItem,
+    id: "item:request",
+    type: "user_input_request",
+    requestId: "request:main",
+    questions: [],
+    ordinal: 21,
+    status: "waiting",
+  }),
+  makeEvent("turn-item.updated", {
+    ...jsonPayloads.turnItem,
+    id: "item:unowned",
+    runId: null,
+    nodeId: null,
+    ordinal: 22,
+  }),
+  handoff("handoff:z"),
+  handoff("handoff:a"),
+  transfer("transfer:z"),
+  transfer("transfer:a", { status: "failed", resolution: null, error: "Fixture error" }),
+];
+
+const datePairs = [
+  ["2026-11-10", "2026-11-10T00:00:00.000Z"],
+  ["2026-11-10 12:00", "2026-11-10T12:00:00.000Z"],
+  ["2026-11-10T12:00:00", "2026-11-10T12:00:00.000Z"],
+  ["2026-11-10TT   12:00:00Z", "2026-11-10T12:00:00.000Z"],
+  ["12:00", "2000-01-01T12:00:00.000Z"],
+  ["12:00:01.9", "2000-01-01T12:00:01.900Z"],
+  ["2451545", "2000-01-01T12:00:00.000Z"],
+  [" +2451545.0 ", "2000-01-01T12:00:00.000Z"],
+  ["2026-11-31", "2026-12-01T00:00:00.000Z"],
+  ["2026-02-30", "2026-03-02T00:00:00.000Z"],
+  ["2026-01-01 24:59:59", "2026-01-02T00:59:59.000Z"],
+  ["2026-01-01 12:00:00.9995Z", "2026-01-01T12:00:00.999Z"],
+  ["2026-01-01 12:00:00.0005Z", "2026-01-01T12:00:00.001Z"],
+  ["2026-01-01 12:00 +01:00", "2026-01-01T11:00:00.000Z"],
+  ["2026-01-01 12:00:00+14:59", "2025-12-31T21:01:00.000Z"],
+  ["2026-01-01T", "2026-01-01T00:00:00.000Z"],
+  ["2026-01-01 12:00:00.0z \t", "2026-01-01T12:00:00.000Z"],
+  ["-0001-01-01", "1720694.5"],
+  ["-4713-11-24T12:00:00Z", "0"],
+  ["9999-12-31T23:59:59.999Z", "5373484.49999999"],
+  ["10000-01-01", "2000-01-01T00:00:00Z"],
+  [" 2026-01-01", "2000-01-01T00:00:00Z"],
+  ["2026-01-01Z", "2000-01-01T00:00:00Z"],
+  ["2026-01-01T12:00:00+15:00", "2000-01-01T00:00:00Z"],
+  ["5373484.5", "2000-01-01T00:00:00Z"],
+  ["NaN", "2000-01-01T00:00:00Z"],
+  ["now", "9999-12-31T23:59:59.999Z"],
+  ["subsecond", "9999-12-31T23:59:59.999Z"],
+  ["1e3", "+1000.0"],
+  [".1", "+1e-1"],
+  ["2026-01-01T12:00:00Z\u0000ignored", "2026-01-01T12:00:00.000Z"],
+];
+
+const queries = [
+  [fields, undefined],
+  [[], undefined],
+  [["messages", "messages"], undefined],
+  [["runs"], { runIds: [] }],
+  [["runs"], { runIds: ["run:old"] }],
+  [["runs"], { runStatuses: [] }],
+  [["runs"], { runStatuses: ["completed"], includeLatestRun: true }],
+  [["runs"], { runStatuses: [], includeLatestRun: true }],
+  [["runs"], { runIds: ["run:old"], runStatuses: [], includeLatestRun: true }],
+  [["runs"], { includeLatestRun: true }],
+  [["nodes"], { nodeIds: [] }],
+  [["nodes"], { omitSettledLeafNodes: true }],
+  [["subagents"], { subagentIds: ["subagent:settled"] }],
+  [["subagents"], { subagentRunIds: ["run:old"] }],
+  [["subagents"], { omitSettledSubagents: true }],
+  [["subagents"], { omitSettledSubagents: { except: ["subagent:settled"] } }],
+  [["subagents"], { omitSettledSubagents: { except: [] } }],
+  [["providerThreads"], { providerThreadIds: [] }],
+  [["providerThreads"], { providerThreadIds: ["provider:owned", "provider:subagent"] }],
+  [["providerTurns"], { providerTurnAttemptIds: [] }],
+  [["providerTurns"], { providerTurnAttemptIds: ["attempt:main"] }],
+  [["providerTurns"], { providerTurnThreadIds: ["provider:missing"] }],
+  [["providerTurns"], { latestProviderTurnUsageOnly: true }],
+  [["providerTurns"], { latestProviderTurnUsageOnly: true, providerTurnAttemptIds: [] }],
+  [["runtimeRequests"], { runtimeRequestStatuses: [] }],
+  [["runtimeRequests"], { runtimeRequestStatuses: ["resolved"] }],
+  [["messages"], { messageIds: [] }],
+  [["messages"], { messageIds: ["message:assistant", "message:user"] }],
+  [["messages"], { messageRoles: ["user"] }],
+  [["messages"], { messageRunIds: ["run:old"] }],
+  [["messages"], { monitorNotificationsOnly: true }],
+  [["messages", "turnItems"], { turnItemTypes: ["reasoning"] }],
+  [["turnItems"], { turnItemRequestIds: ["request:main"] }],
+  [["turnItems"], { turnItemTypes: [] }],
+  [["turnItems"], { turnItemStatuses: ["waiting"] }],
+  [["turnItems"], { turnItemRunId: "run:missing" }],
+  [["turnItems"], { turnItemRunIds: [] }],
+  [["turnItems"], { turnItemRunIds: [null] }],
+  [["turnItems"], { turnItemRunIds: ["run:main", null] }],
+  [["turnItems"], { turnItemRunIds: ["run:main"], turnItemNodeIds: ["node:main"] }],
+  [["contextTransfers"], { contextTransferStatuses: [] }],
+  [["contextTransfers"], { contextTransferStatuses: ["failed"] }],
+];
+
+function exercise({ read, apply, transaction }) {
+  return Effect.gen(function* () {
+    const result = { queries: [] };
+    for (const [selected, filter] of queries)
+      result.queries.push(yield* read("thread:main", selected, filter));
+    for (const field of fields) result.queries.push(yield* read("thread:main", [field]));
+    Assert.deepEqual(ids(result.queries[6].runs), ["run:old", "run:current"]);
+    Assert.deepEqual(ids(result.queries[7].runs), ["run:current"]);
+    const all = result.queries[0];
+    Assert.deepEqual(ids(all.contextHandoffs), ["handoff:main", "handoff:z", "handoff:a"]);
+    Assert.deepEqual(ids(all.contextTransfers), ["transfer:main", "transfer:z", "transfer:a"]);
+    Assert.ok(ids(all.providerThreads).includes("provider:owned"));
+    Assert.ok(ids(all.providerThreads).includes("provider:subagent"));
+    const messages = yield* read("thread:main", ["messages"], {
+      messageIds: ["message:assistant", "message:user"],
+    });
+    Assert.deepEqual(ids(messages.messages), ["message:user", "message:assistant"]);
+    const latest = yield* read("thread:main", ["providerTurns"], {
+      latestProviderTurnUsageOnly: true,
+    });
+    Assert.deepEqual(ids(latest.providerTurns), ["turn:later"]);
+    const omitted = yield* read("thread:main", ["nodes", "subagents"], {
+      omitSettledLeafNodes: true,
+      omitSettledSubagents: true,
+    });
+    Assert.ok(!ids(omitted.nodes).includes("node:settled"));
+    Assert.ok(ids(omitted.nodes).includes("node:active-terminal"));
+    Assert.ok(ids(omitted.nodes).includes("node:without-run"));
+    Assert.ok(!ids(omitted.subagents).includes("subagent:settled"));
+    Assert.ok(ids(omitted.subagents).includes("subagent:active-terminal"));
+    result.missing = (yield* read("missing", fields).pipe(Effect.flip))._tag;
+    Assert.equal(result.missing, "ProjectionStoreThreadNotFoundError");
+    result.dateOrder = [];
+    for (let index = 0; index < datePairs.length; index += 1) {
+      const selected = yield* read("thread:dates", ["providerTurns"], {
+        latestProviderTurnUsageOnly: true,
+        providerTurnAttemptIds: [`attempt:date:${index}`],
+      });
+      result.dateOrder.push(ids(selected.providerTurns));
+    }
+    const boundedRead = () =>
+      Effect.gen(function* () {
+        const items = yield* read("thread:bounded", ["turnItems"], {
+          turnItemTypes: ["user_message"],
+        });
+        const messages = yield* read("thread:bounded", ["messages"], {
+          messageIds: ["message:bounded:a", "message:bounded:b"],
+        });
+        Assert.deepEqual(ids(items.turnItems), ["item:bounded:input"]);
+        Assert.deepEqual(ids(messages.messages), ["message:bounded:a", "message:bounded:b"]);
+        return { items, messages };
+      });
+    result.boundedRead = yield* boundedRead();
+    Assert.deepEqual(normalized(yield* transaction(boundedRead())), normalized(result.boundedRead));
+    yield* transaction(
+      Effect.gen(function* () {
+        yield* apply(handoff("handoff:z", { summaryText: "Updated without moving source order" }));
+        yield* apply(handoff("handoff:0-live"));
+        result.inside = yield* read("thread:main", ["contextHandoffs"]);
+        Assert.deepEqual(ids(result.inside.contextHandoffs), [
+          "handoff:main",
+          "handoff:z",
+          "handoff:a",
+          "handoff:0-live",
+        ]);
+        yield* failed(
+          transaction(
+            Effect.gen(function* () {
+              yield* apply(handoff("handoff:discarded"));
+              return yield* Effect.fail("rollback selected records");
+            }),
+          ),
+        );
+        Assert.deepEqual(
+          ids((yield* read("thread:main", ["contextHandoffs"])).contextHandoffs),
+          ids(result.inside.contextHandoffs),
+        );
+      }),
+    );
+    result.committed = yield* read("thread:main", fields);
+    yield* failed(
+      transaction(
+        Effect.gen(function* () {
+          yield* apply(transfer("transfer:discarded"));
+          return yield* Effect.fail("rollback root selected records");
+        }),
+      ),
+    );
+    Assert.deepEqual(
+      ids((yield* read("thread:main", ["contextTransfers"])).contextTransfers),
+      ids(all.contextTransfers),
+    );
+    return normalized(result);
+  });
+}
+
+try {
+  const source = Path.join(fixture.root, "source.sqlite");
+  await createMigratedSqlite(source, () =>
+    Effect.gen(function* () {
+      const store = yield* oracle.module.ProjectionStoreV2.pipe(
+        Effect.provide(oracle.module.layer),
+      );
+      for (const event of [...sampleEvents, ...extraEvents]) yield* store.apply(event);
+      yield* store.apply(
+        makeEvent(
+          "thread.created",
+          {
+            ...jsonPayloads.thread,
+            id: "thread:dates",
+            lineage: {
+              parentThreadId: null,
+              relationshipToParent: null,
+              rootThreadId: "thread:dates",
+            },
+          },
+          { threadId: "thread:dates" },
+        ),
+      );
+      for (let index = 0; index < datePairs.length; index += 1) {
+        for (let side = 0; side < 2; side += 1) {
+          yield* store.apply(
+            makeEvent(
+              "provider-turn.updated",
+              {
+                ...jsonPayloads.providerTurn,
+                id: `turn:date:${index}:${side}`,
+                nativeTurnRef: null,
+                ordinal: 100 + index * 2 + side,
+                runAttemptId: `attempt:date:${index}`,
+                tokenUsage: { usedTokens: 1, updatedAt: datePairs[index][side] },
+              },
+              { threadId: "thread:dates" },
+            ),
+          );
+        }
+      }
+      const thread = "thread:bounded";
+      yield* store.apply(
+        makeEvent(
+          "thread.created",
+          {
+            ...jsonPayloads.thread,
+            id: thread,
+            lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: thread },
+          },
+          { threadId: thread },
+        ),
+      );
+      for (let index = 0; index < 18; index++) {
+        yield* store.apply(
+          makeEvent(
+            "turn-item.updated",
+            {
+              ...jsonPayloads.turnItem,
+              id: `item:bounded:large:${index}`,
+              threadId: thread,
+              runId: null,
+              nodeId: null,
+              providerThreadId: null,
+              providerTurnId: null,
+              ordinal: index + 2,
+              text: "excluded history ".repeat(65_536),
+              status: "completed",
+              completedAt: fixedTime,
+            },
+            { threadId: thread },
+          ),
+        );
+      }
+      for (const suffix of ["a", "b"]) {
+        yield* store.apply(
+          makeEvent(
+            "message.updated",
+            {
+              ...jsonPayloads.message,
+              id: `message:bounded:${suffix}`,
+              threadId: thread,
+              runId: null,
+              nodeId: null,
+              text: "Selected small message",
+              streaming: false,
+            },
+            { threadId: thread },
+          ),
+        );
+      }
+      yield* store.apply(
+        makeEvent(
+          "turn-item.updated",
+          {
+            ...jsonPayloads.turnItem,
+            id: "item:bounded:input",
+            threadId: thread,
+            runId: null,
+            nodeId: null,
+            providerThreadId: null,
+            providerTurnId: null,
+            ordinal: 1,
+            type: "user_message",
+            messageId: "message:bounded:a",
+            inputIntent: "turn_start",
+            createdBy: "user",
+            creationSource: "web",
+            attachments: [],
+          },
+          { threadId: thread },
+        ),
+      );
+    }),
+  );
+  const upstream = Path.join(fixture.root, "upstream.sqlite");
+  const retained = Path.join(fixture.root, "retained.sqlite");
+  await FS.copyFile(source, upstream);
+  await FS.copyFile(source, retained);
+  const sourceHash = hash(await FS.readFile(source));
+  const exported = Path.join(fixture.root, "source.ndjson");
+  exportSqliteState({ source, destination: exported });
+  nativeRequest(executable, fixture, "initialize", {
+    operation: "import_sqlite_application",
+    path: exported,
+  });
+  const expected = await withServices("upstream", upstream, exercise);
+  Assert.deepEqual(
+    await withServices("sqlite", retained, exercise),
+    expected,
+    "Extracted selected-record SQL preserves immutable upstream behavior",
+  );
+  Assert.deepEqual(
+    await withServices("redb", source, exercise),
+    expected,
+    "Native selected records match immutable upstream behavior",
+  );
+  checks.push(
+    `All 15 selected-record families and ${queries.length} filter combinations match immutable upstream and retained SQLite`,
+    "Filtered turn items and message ordering avoid more than 16 MiB of excluded history bodies, including inside the live writer transaction",
+    "Message order uses all relevant turn-item ordinals even when the requested turn-item fields are filtered",
+    "Latest-run guards, settled leaf/subagent exclusions, owner-linked provider threads and nullable run filters match upstream",
+    "Token-usage timestamp ordering preserves UTC-offset equivalence, equal-time ordinal ties and invalid-date ordering",
+    `${datePairs.length} paired timestamp vectors preserve SQLite date/time/numeric/clock formats, boundaries and millisecond truncation`,
+    "Imported context row order and update/new-row order survive root and nested transaction rollback",
+  );
+  await withServices("redb", source, ({ read }) =>
+    Effect.gen(function* () {
+      Assert.deepEqual(normalized(yield* read("thread:main", fields)), expected.committed);
+    }),
+  );
+  checks.push("A reopened native helper preserves the complete selected-record result");
+  Assert.equal(hash(await FS.readFile(source)), sourceHash);
+  await finishProof({
+    executable,
+    fixture,
+    proofPath,
+    checks,
+    sourceHash,
+    oracles: [oracle.source],
+    sourcePaths: [
+      "apps/server/src/orchestration-v2/ProjectionStore.ts",
+      "apps/server/src/orchestration-v2/ProjectionRecordRows.ts",
+      "apps/server/src/orchestration-v2/SqliteProjectionRecordRows.ts",
+      "apps/server/src/orchestration-v2/NativeProjectionRecordRows.ts",
+      "apps/server/src/orchestration-v2/NativeProjectionStore.ts",
+      "apps/server/src/persistence/redb_projection_records.rs",
+      "apps/server/src/persistence/redb_projection_read_index.rs",
+      "apps/server/src/persistence/redb_projection_window_index.rs",
+      "tools/check-redb-projection-records.mjs",
+    ],
+  });
+} finally {
+  await fixture.close();
+}

@@ -11,16 +11,15 @@ import * as Path from "effect/Path";
 import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
-import * as SqlClient from "effect/sql/SqlClient";
 
 import { resolveHostCliCommand } from "../cli/invocation.ts";
 import * as ServerConfig from "../config.ts";
 import * as ProjectionMaintenance from "../orchestration-v2/ProjectionMaintenance.ts";
 import * as DatabaseMaintenance from "./DatabaseMaintenance.ts";
 import { forkParked } from "../serverActivation.ts";
+import { DatabaseStorageBackend } from "./DatabaseStorageBackend.ts";
+import * as SqliteDatabaseStorageBackend from "./SqliteDatabaseStorageBackend.ts";
 
-// Bound each reclaim pass to one minute of churn.
-const RECLAIM_PAGES_PER_PASS = 1024;
 const COMPACTION_INTERVAL = Duration.hours(6);
 
 export class DatabaseStorage extends Context.Service<
@@ -43,8 +42,8 @@ export const ServerRestart = Context.Reference<Effect.Effect<void> | null>(
 
 const formatGiB = (bytes: number) => `${(bytes / 1024 ** 3).toFixed(1)} GiB`;
 
-const make = Effect.gen(function* () {
-  const sql = yield* SqlClient.SqlClient;
+export const makeWithBackend = Effect.gen(function* () {
+  const storage = yield* DatabaseStorageBackend;
   const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
   const config = yield* ServerConfig.ServerConfig;
   const fs = yield* FileSystem.FileSystem;
@@ -65,39 +64,8 @@ const make = Effect.gen(function* () {
   const doctorTargetsThisDatabase =
     path.resolve(config.dbPath) ===
     path.resolve(config.baseDir, "userdata", path.basename(config.dbPath));
-  // Only VACUUM changes these, and doctor refuses to VACUUM while a server has the database open.
-  let layout:
-    | {
-        readonly pageSize: number;
-        readonly autoVacuum: number;
-        readonly incrementalVacuum: boolean;
-      }
-    | undefined;
-  const readLayout = Effect.suspend(() =>
-    layout !== undefined
-      ? Effect.succeed(layout)
-      : Effect.gen(function* () {
-          const size = yield* sql<{ readonly page_size: number }>`PRAGMA page_size`;
-          const mode = yield* sql<{ readonly auto_vacuum: number }>`PRAGMA auto_vacuum`;
-          const autoVacuum = mode[0]?.auto_vacuum ?? 0;
-          layout = {
-            pageSize: size[0]?.page_size ?? 0,
-            autoVacuum,
-            incrementalVacuum: autoVacuum === 2,
-          };
-          return layout;
-        }),
-  );
-  const readPages = Effect.gen(function* () {
-    const { pageSize, incrementalVacuum } = yield* readLayout;
-    const pages = yield* sql<{ readonly page_count: number }>`PRAGMA page_count`;
-    const free = yield* sql<{ readonly freelist_count: number }>`PRAGMA freelist_count`;
-    return {
-      databaseBytes: (pages[0]?.page_count ?? 0) * pageSize,
-      reclaimableBytes: (free[0]?.freelist_count ?? 0) * pageSize,
-      incrementalVacuum,
-    };
-  });
+  const readLayout = storage.inspect;
+  const readPages = storage.inspect;
   const publishStatus = Effect.gen(function* () {
     if (!doctorTargetsThisDatabase) return;
     const { databaseBytes, reclaimableBytes, incrementalVacuum } = yield* readPages;
@@ -117,16 +85,7 @@ const make = Effect.gen(function* () {
     Effect.catch((cause) => Effect.logWarning("Database storage inspection failed", { cause })),
   );
 
-  const reclaim = Effect.gen(function* () {
-    if (!(yield* readLayout).incrementalVacuum) return;
-    // The driver steps once per statement; incremental_vacuum frees one page per step. Yield between pages.
-    for (let page = 0; page < RECLAIM_PAGES_PER_PASS; page++) {
-      const free = yield* sql<{ readonly freelist_count: number }>`PRAGMA freelist_count`;
-      if ((free[0]?.freelist_count ?? 0) === 0) break;
-      yield* sql`PRAGMA incremental_vacuum(1)`;
-      yield* Effect.yieldNow;
-    }
-  }).pipe(
+  const reclaim = storage.reclaim.pipe(
     Effect.catch((cause) => Effect.logWarning("Database space reclamation failed", { cause })),
   );
 
@@ -197,13 +156,12 @@ const make = Effect.gen(function* () {
       });
     }
     const { databaseBytes, reclaimableBytes } = yield* readPages;
-    const shortfall = yield* DatabaseMaintenance.reclaimSpaceShortfall(
-      config.dbPath,
-      databaseBytes - reclaimableBytes,
-    ).pipe(
-      Effect.provideService(FileSystem.FileSystem, fs),
-      Effect.provideService(Path.Path, path),
-    );
+    const shortfall = yield* storage
+      .spaceShortfall(config.dbPath, databaseBytes - reclaimableBytes)
+      .pipe(
+        Effect.provideService(FileSystem.FileSystem, fs),
+        Effect.provideService(Path.Path, path),
+      );
     if (shortfall !== null) {
       return yield* new DatabaseReclaimError({
         reason: `Reclaiming needs ${formatGiB(shortfall.neededBytes)} of free disk space on this machine. ${formatGiB(shortfall.freeBytes)} is free.`,
@@ -225,7 +183,9 @@ const make = Effect.gen(function* () {
     Effect.mapError((cause) =>
       cause._tag === "DatabaseReclaimError"
         ? cause
-        : new DatabaseReclaimError({ reason: "Could not prepare the repair. Try again." }),
+        : new DatabaseReclaimError({
+            reason: "Could not prepare the repair. Try again.",
+          }),
     ),
     Effect.withSpan("DatabaseStorage.requestReclaim"),
   );
@@ -237,4 +197,5 @@ const make = Effect.gen(function* () {
   });
 });
 
-export const layer = Layer.effect(DatabaseStorage, make);
+export const layerWithBackend = Layer.effect(DatabaseStorage, makeWithBackend);
+export const layer = layerWithBackend.pipe(Layer.provide(SqliteDatabaseStorageBackend.layer));

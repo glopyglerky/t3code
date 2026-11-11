@@ -35,6 +35,8 @@ import {
 import { threadSearchPullRequests } from "@t3tools/shared/threadPullRequests";
 import { indexedMessageCondition, nonPlaceholderMessageCondition } from "./messageSearchIndex.ts";
 import { loadOlderSettledThreadsPage } from "./ShellStream.ts";
+import type { PersistenceTransactionsShape } from "../persistence/PersistenceTransactions.ts";
+import type { ThreadSearchRows } from "./ThreadSearchRows.ts";
 
 // When the user last wrote in the thread aliased `threads`, as the clients
 // rank recency; agent notices in the user role do not count.
@@ -62,7 +64,7 @@ export class ThreadSearchError extends Schema.TaggedError<ThreadSearchError>()(
 
 // Token lists bind as JSON arrays, so any number of them is one parameter.
 const TokenList = Schema.fromJsonString(Schema.Array(Schema.String));
-const SearchRequest = Schema.Struct({
+export const SearchRequest = Schema.Struct({
   /** The FTS5 query, or null to scan messages instead. */
   match: Schema.NullOr(Schema.String),
   /** Tokens every hit must contain, checked on the text. */
@@ -73,7 +75,7 @@ const SearchRequest = Schema.Struct({
   /** Threads the caller already lists, left out before the hit limit. */
   excludedThreadIds: TokenList,
 });
-const SearchRow = Schema.Struct({
+export const SearchRow = Schema.Struct({
   messageRowid: Schema.Number,
   messageId: MessageId,
   threadId: ThreadId,
@@ -83,7 +85,7 @@ const SearchRow = Schema.Struct({
   messageCreatedAt: Schema.NullOr(IsoDateTime),
 });
 
-const ThreadOpensRow = Schema.Struct({
+export const ThreadOpensRow = Schema.Struct({
   threadId: ThreadId,
   opens: Schema.NullOr(Schema.String),
   latestUserMessageAt: Schema.NullOr(IsoDateTime),
@@ -256,7 +258,7 @@ export const messageHitsQuery = (
     LIMIT ${MESSAGE_HIT_LIMIT}
   `;
 
-const TitleCandidateRow = Schema.Struct({
+export const TitleCandidateRow = Schema.Struct({
   thread: Schema.fromJsonString(OrchestrationV2AppThreadJson),
   projectTitle: Schema.String,
   latestUserMessageAt: Schema.NullOr(IsoDateTime),
@@ -306,7 +308,7 @@ const OLDER_SETTLED_TITLE_ROWS = 15;
 const OLDER_SETTLED_MESSAGE_ROWS = 5;
 
 // Only the fields the palette scorer reads, so an interactive search does not decode payloads.
-const OlderSettledTitleRow = Schema.Struct({
+export const OlderSettledTitleRow = Schema.Struct({
   id: ThreadId,
   title: Schema.String,
   branch: Schema.NullOr(Schema.String),
@@ -320,7 +322,7 @@ const OlderSettledTitleRow = Schema.Struct({
 });
 
 /** @public */
-export const make = Effect.gen(function* () {
+export const makeSqliteRows = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
 
   const searchRows = SqlSchema.findAll({
@@ -420,9 +422,27 @@ export const make = Effect.gen(function* () {
     `,
   });
 
+  return {
+    hasIndex: sql`SELECT 1 FROM sqlite_master WHERE name = 'orchestration_v2_message_search'`.pipe(
+      Effect.map((index) => index.length > 0),
+    ),
+    searchRows,
+    threadOpens,
+    titleCandidates,
+    olderSettledTitleCandidates,
+    olderSettledIds,
+    withReadTransaction: (effect) => sql.withTransaction(effect).pipe(NodeSqliteClient.readOnly),
+  } satisfies ThreadSearchRows;
+});
+
+/** Ranking and snippets are shared with the retained application, independently of storage. */
+export const makeWithRows = Effect.fn("ThreadSearch.makeWithRows")(function* (
+  rows: ThreadSearchRows,
+) {
+  const { searchRows, threadOpens, titleCandidates, olderSettledTitleCandidates, olderSettledIds } =
+    rows;
   const read = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-    sql.withTransaction(effect).pipe(
-      NodeSqliteClient.readOnly,
+    rows.withReadTransaction(effect).pipe(
       Effect.mapError(
         (cause) =>
           new ThreadSearchError({
@@ -460,12 +480,9 @@ export const make = Effect.gen(function* () {
       right.quality - left.quality ||
       Number(left.row.source !== "user") - Number(right.row.source !== "user") ||
       newer(left, right);
-    const rows = yield* read(
+    const hits = yield* read(
       Effect.gen(function* () {
-        const index = yield* sql`
-          SELECT 1 FROM sqlite_master WHERE name = 'orchestration_v2_message_search'
-        `;
-        const messageSearch = buildMessageSearch(input.query, index.length > 0);
+        const messageSearch = buildMessageSearch(input.query, yield* rows.hasIndex);
         return messageSearch === null
           ? []
           : yield* searchRows({
@@ -482,7 +499,7 @@ export const make = Effect.gen(function* () {
     const hitCounts = new Map<ThreadId, number>();
     const hitCount = (threadId: ThreadId) => hitCounts.get(threadId) ?? 1;
     const matchMessage = messageMatcher(input.query);
-    for (const row of rows) {
+    for (const row of hits) {
       const text = row.text.replace(MARKDOWN_LINK, "$1");
       const match = matchMessage(text);
       if (match === null) continue;
@@ -652,6 +669,10 @@ export const make = Effect.gen(function* () {
   return ThreadSearch.of({ search, searchThreads, searchOlderSettled });
 });
 
+export const make = Effect.gen(function* () {
+  return yield* makeWithRows(yield* makeSqliteRows);
+});
+
 export const layer = Layer.effect(ThreadSearch, make);
 
 /**
@@ -668,7 +689,7 @@ export const searchThreadsWithOlderSettledRows = Effect.fn(
   readonly searchOlderSettled: (
     input: Parameters<ThreadSearch["Service"]["searchOlderSettled"]>[0],
   ) => Effect.Effect<ReadonlyArray<ThreadId>, E2>;
-  readonly sql: SqlClient.SqlClient;
+  readonly withReadTransaction: PersistenceTransactionsShape["withReadTransaction"];
   readonly readThreads: (
     threadIds: ReadonlyArray<ThreadId>,
   ) => Effect.Effect<Effect.Effect<OrchestrationV2ThreadShellSnapshot, E4>, E3>;
@@ -688,7 +709,7 @@ export const searchThreadsWithOlderSettledRows = Effect.fn(
     messageThreadIds: messages.matches.map((match) => match.threadId),
   });
   const older = yield* loadOlderSettledThreadsPage({
-    sql: input.sql,
+    withReadTransaction: input.withReadTransaction,
     listThreads: Effect.succeed({ threadIds, counts: [] }),
     readThreads: input.readThreads,
     latestSequence: input.latestSequence,

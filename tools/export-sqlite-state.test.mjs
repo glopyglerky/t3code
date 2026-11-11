@@ -83,6 +83,20 @@ function parseSnapshot(contents) {
   }
   Assert.equal(manifest.tableCount, records.filter((record) => record.type === "table").length);
   Assert.equal(manifest.rowCount, records.filter((record) => record.type === "row").length);
+  const postings = lines.filter((line) => JSON.parse(line).type === "search_posting");
+  Assert.deepEqual(manifest.searchIndex, {
+    postingCount: postings.length,
+    sha256: sha256(postings.join("")),
+  });
+  const witness = lines.filter((line) =>
+    ["search_current_document", "search_survivor_posting"].includes(JSON.parse(line).type),
+  );
+  Assert.deepEqual(manifest.searchDeleteWitness, {
+    documentCount: records.filter((record) => record.type === "search_current_document").length,
+    survivorPostingCount: records.filter((record) => record.type === "search_survivor_posting")
+      .length,
+    sha256: sha256(witness.join("")),
+  });
   return records;
 }
 
@@ -94,7 +108,9 @@ test("exports all authoritative rows and exact SQLite storage classes with canon
     const records = parseSnapshot(contents);
     const header = records[0];
     Assert.equal(header.format, "t3-code-ls/sqlite-export");
-    Assert.equal(header.version, 1);
+    Assert.equal(header.version, 2);
+    Assert.equal(header.searchIndex, true);
+    Assert.equal(header.searchDeleteWitness, true);
     Assert.equal(header.userVersion, 17);
     Assert.equal(header.applicationId, 42);
     Assert.ok(header.schemaVersion > 0);
@@ -139,6 +155,10 @@ test("exports all authoritative rows and exact SQLite storage classes with canon
       [0, 1, 2, 3],
     );
     Assert.deepEqual(
+      tableRows.map((row) => row.rowid),
+      ["1", "2", "3", "4"],
+    );
+    Assert.deepEqual(
       records
         .filter((record) => record.type === "row" && record.table === "compound")
         .map((row) => row.values[2].value),
@@ -153,6 +173,150 @@ test("exports all authoritative rows and exact SQLite storage classes with canon
     exportSqliteState({ source, destination: second });
     Assert.equal(FS.readFileSync(second, "utf8"), contents);
     if (process.platform !== "win32") Assert.equal(FS.statSync(destination).mode & 0o777, 0o600);
+  });
+});
+
+test("preserves signed hidden rowid gaps and exact contentless search postings", () => {
+  fixture(({ database, source }) => {
+    database.exec(`
+      INSERT INTO orchestration_v2_projection_messages(rowid,message_id,payload_json) VALUES
+        (-9223372036854775808, 'negative', '{"text":"changed after indexing"}'),
+        (60001, 'gap', '{"text":"new text"}'),
+        (9223372036854775807, 'maximum', '{"text":"end"}');
+      INSERT INTO orchestration_v2_message_search(rowid,text) VALUES
+        (-9223372036854775808, 'éarly'), (60001,'old text'), (60000,'orphan posting');
+      CREATE VIRTUAL TABLE temp.expected_terms USING fts5vocab(main, orchestration_v2_message_search, instance);
+    `);
+    const statement = database.prepare(
+      "SELECT term, doc, offset FROM temp.expected_terms ORDER BY term COLLATE BINARY, doc, offset",
+    );
+    statement.setReadBigInts(true);
+    const expected = statement.all().map(({ term, doc, offset }) => ({
+      type: "search_posting",
+      term,
+      rowid: doc.toString(),
+      offset: Number(offset),
+    }));
+    const records = parseSnapshot([...sqliteSnapshotLines({ source })].join(""));
+    Assert.deepEqual(
+      records.filter((row) => row.type === "search_posting"),
+      expected,
+    );
+    const rows = records.filter(
+      (row) => row.type === "row" && row.table === "orchestration_v2_projection_messages",
+    );
+    Assert.deepEqual(
+      rows.map((row) => row.rowid),
+      ["-9223372036854775808", "1", "60001", "9223372036854775807"],
+    );
+    Assert.deepEqual(
+      rows.map((row) => row.ordinal),
+      [0, 1, 2, 3],
+    );
+  });
+});
+
+test("records an absent search index without manufacturing postings or rowids", () => {
+  fixture(({ database, source }) => {
+    database.exec("DROP TABLE orchestration_v2_message_search");
+    const records = parseSnapshot([...sqliteSnapshotLines({ source })].join(""));
+    Assert.equal(records[0].searchIndex, false);
+    Assert.equal(records.filter((row) => row.type === "search_posting").length, 0);
+    const table = records.find((row) => row.type === "table" && row.name === "compound");
+    Assert.equal(table.rowidColumn, null);
+    Assert.ok(
+      records
+        .filter((row) => row.type === "row" && row.table === "compound")
+        .every((row) => !Object.hasOwn(row, "rowid")),
+    );
+  });
+});
+
+test("witnesses exact first-delete survivors and empty current documents without changing the source", () => {
+  fixture(({ database, source, destination, directory }) => {
+    database.exec(`
+      INSERT INTO orchestration_v2_message_search(rowid,text) VALUES(2,'oldtoken overlap');
+      INSERT INTO orchestration_v2_message_search(rowid,text) VALUES(2,'completed overlap');
+      INSERT INTO orchestration_v2_message_search(rowid,text) VALUES(3,'empty latest ancestor');
+      INSERT INTO orchestration_v2_message_search(rowid,text) VALUES(3,'xy');
+      INSERT INTO orchestration_v2_message_search(rowid,text) VALUES(4,'orphanolder fragment');
+      INSERT INTO orchestration_v2_message_search(rowid,text) VALUES(4,'removed recent');
+      DELETE FROM orchestration_v2_message_search WHERE rowid=4;
+      CREATE VIRTUAL TABLE temp.expected_survivors USING fts5vocab(main, orchestration_v2_message_search, instance);
+    `);
+    const documents = database.prepare(
+      "SELECT id FROM orchestration_v2_message_search_docsize ORDER BY id",
+    );
+    documents.setReadBigInts(true);
+    const current = documents.all().map(({ id }) => id);
+    const terms = database.prepare(
+      "SELECT term, doc, offset FROM temp.expected_survivors ORDER BY term COLLATE BINARY, doc, offset",
+    );
+    terms.setReadBigInts(true);
+    const beforeTerms = terms.all();
+    let survivors;
+    database.exec("SAVEPOINT expected_delete_witness");
+    try {
+      const remove = database.prepare("DELETE FROM orchestration_v2_message_search WHERE rowid=?");
+      for (const rowid of current) remove.run(rowid);
+      survivors = terms.all().map(({ term, doc, offset }) => ({
+        type: "search_survivor_posting",
+        term,
+        rowid: doc.toString(),
+        offset: Number(offset),
+      }));
+    } finally {
+      database.exec("ROLLBACK TO expected_delete_witness; RELEASE expected_delete_witness");
+    }
+    Assert.deepEqual(terms.all(), beforeTerms);
+    Assert.deepEqual(current, [1n, 2n, 3n]);
+    Assert.ok(survivors.some((posting) => posting.rowid === "2" && posting.term === "old"));
+    Assert.ok(survivors.some((posting) => posting.rowid === "3" && posting.term === "emp"));
+    Assert.ok(survivors.some((posting) => posting.rowid === "4" && posting.term === "orp"));
+    Assert.ok(!survivors.some((posting) => posting.rowid === "2" && posting.term === "ove"));
+    const before = [source, `${source}-wal`].map((path) => sha256(FS.readFileSync(path)));
+    exportSqliteState({ source, destination });
+    const contents = FS.readFileSync(destination, "utf8");
+    const records = parseSnapshot(contents);
+    Assert.deepEqual(
+      records.filter((record) => record.type === "search_survivor_posting"),
+      survivors,
+    );
+    Assert.deepEqual(
+      records.filter((record) => record.type === "search_current_document"),
+      current.map((rowid) => ({ type: "search_current_document", rowid: rowid.toString() })),
+    );
+    Assert.deepEqual(
+      [source, `${source}-wal`].map((path) => sha256(FS.readFileSync(path))),
+      before,
+    );
+    const second = Path.join(directory, "repeat-witness.ndjson");
+    exportSqliteState({ source, destination: second });
+    Assert.equal(FS.readFileSync(second, "utf8"), contents);
+  });
+});
+
+test("cancelling while deletion evidence is streaming cleans the owned FTS clone", () => {
+  fixture(({ source, directory }) => {
+    const testSource = `
+      import * as FS from 'node:fs';
+      import { sqliteSnapshotLines } from ${JSON.stringify(new URL("./export-sqlite-state.mjs", import.meta.url).href)};
+      const iterator = sqliteSnapshotLines({source: process.argv[1]});
+      for (const line of iterator) {
+        if (JSON.parse(line).type === 'search_current_document') break;
+      }
+      const leaked = FS.readdirSync(process.env.TMPDIR).filter(name => name.startsWith('t3-omdb-search-witness-'));
+      if (leaked.length) throw new Error('Witness directory leaked after cancellation');
+    `;
+    const cancelled = spawnSync(
+      process.execPath,
+      ["--input-type=module", "-e", testSource, source],
+      {
+        encoding: "utf8",
+        env: { ...process.env, TMPDIR: directory, TEMP: directory, TMP: directory },
+      },
+    );
+    Assert.equal(cancelled.status, 0, cancelled.stderr);
   });
 });
 

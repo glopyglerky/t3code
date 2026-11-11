@@ -161,15 +161,32 @@ interface Session {
   readonly child: ChildProcessSpawner.ChildProcessHandle;
   pending: Deferred.Deferred<string, NativeDatabaseOutcomeUnknown> | undefined;
   received: boolean;
+  closing: boolean;
   failure: NativeDatabaseOutcomeUnknown | undefined;
 }
 
 export const make = Effect.fn("NativeDatabase.make")(function* (config: {
   readonly executable: string;
   readonly databasePath: string;
+  readonly mode?:
+    | "local"
+    | "initialize-local"
+    | "read-only-local"
+    | "exclusive-local"
+    | "owner-lock";
+  /** Ownership handles must never silently reacquire a lost lifetime lock. */
+  readonly reconnect?: boolean;
   readonly requestTimeout?: Duration.Input;
 }) {
   const { executable, databasePath } = config;
+  const mode = config.mode ?? "local";
+  if (
+    !["local", "initialize-local", "read-only-local", "exclusive-local", "owner-lock"].includes(
+      mode,
+    )
+  ) {
+    return yield* new NativeDatabaseInputError({ stage: "configuration" });
+  }
   if (
     [executable, databasePath].some(
       (value) => value.length === 0 || value.includes("\0") || !NodePath.isAbsolute(value),
@@ -208,12 +225,13 @@ export const make = Effect.fn("NativeDatabase.make")(function* (config: {
   const connect = Effect.fn("NativeDatabase.connect")(function* () {
     if (closed) return yield* new NativeDatabaseUnavailable({ stage: "closed" });
     if (current !== undefined && current.failure === undefined) return current;
+    if (current?.failure !== undefined && config.reconnect === false) return yield* current.failure;
     if (current !== undefined) yield* Scope.close(current.scope, Exit.void);
     current = undefined;
     const scope = yield* Scope.fork(owner);
     const child = yield* spawner
       .spawn(
-        ChildProcess.make(executable, ["local", databasePath], {
+        ChildProcess.make(executable, [mode, databasePath], {
           env: {},
           extendEnv: false,
           shell: false,
@@ -240,6 +258,7 @@ export const make = Effect.fn("NativeDatabase.make")(function* (config: {
       child,
       pending: undefined,
       received: false,
+      closing: false,
       failure: undefined,
     };
     current = session;
@@ -259,7 +278,9 @@ export const make = Effect.fn("NativeDatabase.make")(function* (config: {
             (newline !== -1 && newline !== chunk.byteLength - 1) ||
             bytes + chunk.byteLength > MAX_RESPONSE_BYTES
           ) {
-            return yield* new NativeDatabaseOutcomeUnknown({ stage: "response" });
+            return yield* new NativeDatabaseOutcomeUnknown({
+              stage: "response",
+            });
           }
           bytes += chunk.byteLength;
           parts.push(chunk);
@@ -282,7 +303,13 @@ export const make = Effect.fn("NativeDatabase.make")(function* (config: {
           ? cause
           : new NativeDatabaseOutcomeUnknown({ stage: "response", cause }),
       ),
-      Effect.andThen(Effect.fail(new NativeDatabaseOutcomeUnknown({ stage: "exit" }))),
+      Effect.andThen(
+        Effect.suspend(() =>
+          session.closing && session.received
+            ? Effect.void
+            : Effect.fail(new NativeDatabaseOutcomeUnknown({ stage: "exit" })),
+        ),
+      ),
       Effect.catch((error) => poison(session, error)),
     );
     yield* Effect.forkIn(readOutput, scope);
@@ -301,11 +328,35 @@ export const make = Effect.fn("NativeDatabase.make")(function* (config: {
       Effect.forkIn(scope),
     );
     yield* child.exitCode.pipe(
-      Effect.andThen(poison(session, new NativeDatabaseOutcomeUnknown({ stage: "exit" }))),
+      Effect.andThen(
+        Effect.suspend(() =>
+          session.closing && session.received
+            ? Effect.void
+            : poison(session, new NativeDatabaseOutcomeUnknown({ stage: "exit" })),
+        ),
+      ),
       Effect.catch((cause) =>
         poison(session, new NativeDatabaseOutcomeUnknown({ stage: "exit", cause })),
       ),
       Effect.forkIn(scope),
+    );
+    // This finalizer runs before the process/stream finalizers in the child scope.
+    // A healthy idle helper must drop redb before exit so subsequent read-only
+    // preflight does not mistake routine shutdown for a crashed writer.
+    yield* Scope.addFinalizer(
+      scope,
+      Effect.suspend(() => {
+        if (mode === "owner-lock" || session.failure !== undefined || session.pending !== undefined)
+          return Effect.void;
+        session.closing = true;
+        return send(session, { operation: "shutdown" }, Schema.Null, true).pipe(
+          Effect.andThen(child.exitCode),
+          Effect.interruptible,
+          Effect.timeoutOption("5 seconds"),
+          Effect.catch(() => Effect.void),
+          Effect.asVoid,
+        );
+      }),
     );
     return session;
   });
@@ -314,13 +365,15 @@ export const make = Effect.fn("NativeDatabase.make")(function* (config: {
     session: Session,
     input: unknown,
     response: Schema.Decoder<A>,
+    shuttingDown = false,
   ) {
     const encoded = `${yield* encodeRequest(input).pipe(
       Effect.mapError((cause) => new NativeDatabaseInputError({ stage: "request", cause })),
     )}\n`;
     if (Buffer.byteLength(encoded, "utf8") > MAX_REQUEST_BYTES)
       return yield* new NativeDatabaseInputError({ stage: "request" });
-    if (closed) return yield* new NativeDatabaseUnavailable({ stage: "closed" });
+    if ((!shuttingDown && session.closing) || (closed && !shuttingDown))
+      return yield* new NativeDatabaseUnavailable({ stage: "closed" });
     if (session.failure !== undefined) return yield* session.failure;
     const pending = yield* Deferred.make<string, NativeDatabaseOutcomeUnknown>();
     session.pending = pending;
@@ -344,9 +397,9 @@ export const make = Effect.fn("NativeDatabase.make")(function* (config: {
               : Effect.fail(new NativeDatabaseRejected({ kind: envelope.error.kind }));
           if (!boundedJson(envelope.result))
             return Effect.fail(new NativeDatabaseOutcomeUnknown({ stage: "response" }));
-          return Schema.decodeUnknownEffect(response, { onExcessProperty: "error" })(
-            envelope.result,
-          ).pipe(
+          return Schema.decodeUnknownEffect(response, {
+            onExcessProperty: "error",
+          })(envelope.result).pipe(
             Effect.mapError(
               (cause) => new NativeDatabaseOutcomeUnknown({ stage: "response", cause }),
             ),
@@ -362,8 +415,7 @@ export const make = Effect.fn("NativeDatabase.make")(function* (config: {
         if (
           Exit.isSuccess(exit) ||
           exit.cause.reasons.every(
-            (reason) =>
-              reason._tag === "Fail" && reason.error._tag === "NativeDatabaseRejected",
+            (reason) => reason._tag === "Fail" && reason.error._tag === "NativeDatabaseRejected",
           )
         )
           return Effect.void;
@@ -371,7 +423,9 @@ export const make = Effect.fn("NativeDatabase.make")(function* (config: {
           stage: "cancelled",
           cause: exit.cause,
         });
-        return Scope.close(session.scope, Exit.void);
+        // The scope is already closing when this is its graceful finalizer.
+        // Re-entering Scope.close here would wait on this same finalizer.
+        return shuttingDown ? Effect.void : Scope.close(session.scope, Exit.void);
       }),
     );
   });
@@ -385,41 +439,41 @@ export const make = Effect.fn("NativeDatabase.make")(function* (config: {
     },
   );
 
-  const withSession: NativeDatabase["Service"]["withSession"] = Effect.fn("NativeDatabase.withSession")(
-    function* <A, E, R>(use: (session: NativeDatabaseSession) => Effect.Effect<A, E, R>) {
-      // A child fiber inherits this marker. It must not wait for its parent's connection.
-      if ((yield* CurrentSession) !== undefined)
-        return yield* new NativeDatabaseInputError({ stage: "session" });
-      return yield* gate.withPermits(1)(
-        Effect.gen(function* () {
-          const session = yield* connect();
-          const ownerId = yield* Effect.withFiber((fiber) => Effect.succeed(fiber.id));
-          let active = true;
-          const discard = poison(
-            session,
-            new NativeDatabaseOutcomeUnknown({ stage: "cancelled" }),
-          ).pipe(Effect.andThen(Scope.close(session.scope, Exit.void)));
-          const owned: NativeDatabaseSession = {
-            request: (input, response) =>
-              Effect.withFiber((fiber) =>
-                active && fiber.id === ownerId
-                  ? send(session, input, response)
-                  : Effect.fail(new NativeDatabaseInputError({ stage: "session" })),
-              ),
-            discard: Effect.withFiber((fiber) =>
-              active && fiber.id === ownerId ? discard : Effect.void,
+  const withSession: NativeDatabase["Service"]["withSession"] = Effect.fn(
+    "NativeDatabase.withSession",
+  )(function* <A, E, R>(use: (session: NativeDatabaseSession) => Effect.Effect<A, E, R>) {
+    // A child fiber inherits this marker. It must not wait for its parent's connection.
+    if ((yield* CurrentSession) !== undefined)
+      return yield* new NativeDatabaseInputError({ stage: "session" });
+    return yield* gate.withPermits(1)(
+      Effect.gen(function* () {
+        const session = yield* connect();
+        const ownerId = yield* Effect.withFiber((fiber) => Effect.succeed(fiber.id));
+        let active = true;
+        const discard = poison(
+          session,
+          new NativeDatabaseOutcomeUnknown({ stage: "cancelled" }),
+        ).pipe(Effect.andThen(Scope.close(session.scope, Exit.void)));
+        const owned: NativeDatabaseSession = {
+          request: (input, response) =>
+            Effect.withFiber((fiber) =>
+              active && fiber.id === ownerId
+                ? send(session, input, response)
+                : Effect.fail(new NativeDatabaseInputError({ stage: "session" })),
             ),
-          };
-          return yield* Effect.suspend(() => use(owned)).pipe(
-            Effect.provideService(CurrentSession, connectionIdentity),
-            Effect.onExit((exit) => {
-              active = false;
-              return Exit.isSuccess(exit) ? Effect.void : discard;
-            }),
-          );
-        }),
-      );
-    },
-  );
+          discard: Effect.withFiber((fiber) =>
+            active && fiber.id === ownerId ? discard : Effect.void,
+          ),
+        };
+        return yield* Effect.suspend(() => use(owned)).pipe(
+          Effect.provideService(CurrentSession, connectionIdentity),
+          Effect.onExit((exit) => {
+            active = false;
+            return Exit.isSuccess(exit) ? Effect.void : discard;
+          }),
+        );
+      }),
+    );
+  });
   return NativeDatabase.of({ request, withSession });
 });

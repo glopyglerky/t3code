@@ -66,6 +66,8 @@ struct SourceWitness {
     table: String,
     key: Vec<Value>,
     ordinal: u64,
+    #[serde(default, rename = "rowid")]
+    _rowid: Option<String>,
 }
 
 pub(crate) fn index_key(catalog: &ApplicationCatalog, suffix: &str) -> Vec<u8> {
@@ -202,12 +204,21 @@ pub(crate) async fn save_row(
             {
                 return Err(Error::IncompatibleStore);
             }
+            crate::application_auxiliary_reads::replace_outbox(
+                tx,
+                catalog,
+                Some(&previous),
+                Some(next),
+            )
+            .await?;
             stored.row
         }
         None => {
             if tx.get(&ordinal_key(catalog, &next.id)).await?.is_some() {
                 return Err(Error::IncompatibleStore);
             }
+            crate::application_auxiliary_reads::replace_outbox(tx, catalog, None, Some(next))
+                .await?;
             let mut row = Map::new();
             for (name, value) in [
                 ("effect_id", next.id.as_str()),
@@ -265,6 +276,7 @@ pub(crate) async fn delete_row(
     {
         return Err(Error::IncompatibleStore);
     }
+    crate::application_auxiliary_reads::replace_outbox(tx, catalog, Some(row), None).await?;
     tx.delete(ordinal_key(catalog, &row.id)).await?;
     tx.delete(ordinal_owner_key(catalog, row.insertion_ordinal))
         .await
@@ -293,7 +305,7 @@ async fn source_ordinal(
     Ok(witness.ordinal + 1)
 }
 
-async fn ready(tx: &mut Transaction, catalog: &ApplicationCatalog) -> Result<()> {
+pub(crate) async fn ready(tx: &mut Transaction, catalog: &ApplicationCatalog) -> Result<()> {
     let marker = tx
         .get(&cells::managed_marker(catalog, TABLE))
         .await?

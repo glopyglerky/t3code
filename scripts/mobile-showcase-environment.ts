@@ -7,6 +7,40 @@ import * as NodeUtil from "node:util";
 
 const execFile = NodeUtil.promisify(NodeChildProcess.execFile);
 
+/** These retained screenshots seed SQLite rows directly; they are not native
+ * persistence acceptance. Select the oracle before either server or auth CLI
+ * starts, even when the invoking shell has a native helper override. */
+export const sqliteShowcaseEnvironment = (
+  environment: Readonly<NodeJS.ProcessEnv>,
+): NodeJS.ProcessEnv => ({
+  ...environment,
+  T3_CODE_LS_IMPLEMENTATION: "upstream",
+  T3_CODE_LS_DB_EXECUTABLE: undefined,
+});
+
+export async function assertSqliteShowcaseHome(baseDir: string): Promise<void> {
+  const stateDir = NodePath.join(baseDir, "userdata");
+  const missing = (error: unknown): boolean =>
+    typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+  const hasNativeDatabase = await NodeFSP.stat(NodePath.join(stateDir, "statev2.omdb")).then(
+    () => true,
+    (error: unknown) => {
+      if (missing(error)) return false;
+      throw error;
+    },
+  );
+  const marker = await NodeFSP.readFile(
+    NodePath.join(stateDir, "server-owner.sqlite"),
+    "utf8",
+  ).catch((error: unknown) => {
+    if (missing(error)) return "";
+    throw error;
+  });
+  if (hasNativeDatabase || marker === "t3code-omdb-owner-v1\n") {
+    throw new Error("SQLite showcase fixtures cannot seed an authoritative omdb home.");
+  }
+}
+
 const SHOWCASE_PROJECT_ID = "t3code";
 const SHOWCASE_THREAD_ID = "remote-command-center";
 
@@ -534,6 +568,7 @@ export async function seedShowcaseEnvironment(input: {
   readonly projectIds?: ReadonlyArray<string>;
   readonly now?: number;
 }): Promise<{ readonly dbPath: string; readonly workspaceRoot: string }> {
+  await assertSqliteShowcaseHome(input.baseDir);
   const now = input.now ?? Date.now();
   const selectedProjectIds = new Set(
     input.projectIds ?? SHOWCASE_PROJECTS.map((project) => project.id),
@@ -572,6 +607,7 @@ export async function seedShowcaseEnvironment(input: {
   );
   // Listening precedes migration completion; wait for the schema before reseeding.
   await waitForSeedableSchema(dbPath);
+  await assertSqliteShowcaseHome(input.baseDir);
   seedDatabase(dbPath, workspaceRoots, projects, threads, now);
 
   const terminalDirectory = NodePath.join(input.baseDir, "userdata", "logs", "terminals");

@@ -1,0 +1,8 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": { "types": ["node"], "lib": ["ESNext", "esnext.disposable"] },
+  "files": [
+    "../apps/server/src/persistence/databaseMigrationHead.ts",
+    "../apps/server/src/cloud/servicePreflight.ts"
+  ]
+}

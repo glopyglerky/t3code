@@ -40,50 +40,23 @@ export class CodexUsageHistory extends Context.Service<
   }
 >()("t3/usage/CodexUsageHistory") {}
 
-const make = Effect.gen(function* () {
-  const sql = yield* SqlClient.SqlClient;
+export interface CodexUsageHistoryRow {
+  readonly native_thread_id: unknown;
+  readonly native_turn_id: string;
+  readonly selection_json: unknown;
+}
+
+/** Keep duplicate ambiguity and service-tier interpretation shared across stores. */
+export function historyFromRows<E>(
+  lookup: (turnIds: readonly string[]) => Effect.Effect<readonly CodexUsageHistoryRow[], E>,
+): CodexUsageHistory["Service"] {
   const resolve = Effect.fn("CodexUsageHistory.resolve")(function* (
     requests: readonly CodexUsageHistoryRequest[],
   ) {
     const resolved = new Map<CodexUsageHistoryRequest, UsageSpeed>();
     if (requests.length === 0) return resolved;
-    const turnIdsJson = encodeTurnIds([
-      ...new Set(requests.map((request) => request.nativeTurnId)),
-    ]);
-
-    // The first running event for this attempt precedes any steering changes
-    // to the selection. A missing selection there must not fall through to a later event.
-    const rows = yield* sql<{
-      readonly native_thread_id: string | null;
-      readonly native_turn_id: string;
-      readonly selection_json: string | null;
-    }>`
-      SELECT json_extract(attempt.payload_json, '$.nativeThreadId') AS native_thread_id,
-        json_extract(turn.payload_json, '$.nativeTurnRef.nativeId') AS native_turn_id,
-        (
-          SELECT json_extract(event.payload_json, '$.modelSelection')
-          FROM orchestration_events AS event
-          WHERE event.aggregate_kind = 'thread'
-            AND event.application_event_version = 2
-            AND event.stream_id = attempt.thread_id
-            AND event.event_type = 'run.updated'
-            AND json_extract(event.payload_json, '$.id') = attempt.run_id
-            AND json_extract(event.payload_json, '$.activeAttemptId') = attempt.attempt_id
-            AND json_extract(event.payload_json, '$.status') = 'running'
-          ORDER BY event.sequence
-          LIMIT 1
-        ) AS selection_json
-      FROM orchestration_v2_projection_provider_turns AS turn
-      LEFT JOIN orchestration_v2_projection_run_attempts AS attempt
-        ON attempt.attempt_id = turn.run_attempt_id
-        AND attempt.thread_id = turn.thread_id
-        AND attempt.provider_thread_id = turn.provider_thread_id
-      WHERE json_extract(turn.payload_json, '$.nativeTurnRef.driver') = 'codex'
-        AND json_extract(turn.payload_json, '$.nativeTurnRef.nativeId') IN (
-          SELECT value FROM json_each(${turnIdsJson})
-        )
-    `.pipe(
-      NodeSqliteClient.readOnly,
+    const turnIds = [...new Set(requests.map((request) => request.nativeTurnId))];
+    const rows = yield* lookup(turnIds).pipe(
       Effect.mapError(
         (cause) => new CodexUsageHistoryReadError({ requestedTurnCount: requests.length, cause }),
       ),
@@ -115,6 +88,41 @@ const make = Effect.gen(function* () {
     return resolved;
   });
   return CodexUsageHistory.of({ resolve });
+}
+
+export const make = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  return historyFromRows((turnIds) => {
+    const turnIdsJson = encodeTurnIds(turnIds);
+    // A missing selection on the first running event must not fall through to
+    // later steering changes for the same attempt.
+    return sql<CodexUsageHistoryRow>`
+      SELECT json_extract(attempt.payload_json, '$.nativeThreadId') AS native_thread_id,
+        json_extract(turn.payload_json, '$.nativeTurnRef.nativeId') AS native_turn_id,
+        (
+          SELECT json_extract(event.payload_json, '$.modelSelection')
+          FROM orchestration_events AS event
+          WHERE event.aggregate_kind = 'thread'
+            AND event.application_event_version = 2
+            AND event.stream_id = attempt.thread_id
+            AND event.event_type = 'run.updated'
+            AND json_extract(event.payload_json, '$.id') = attempt.run_id
+            AND json_extract(event.payload_json, '$.activeAttemptId') = attempt.attempt_id
+            AND json_extract(event.payload_json, '$.status') = 'running'
+          ORDER BY event.sequence
+          LIMIT 1
+        ) AS selection_json
+      FROM orchestration_v2_projection_provider_turns AS turn
+      LEFT JOIN orchestration_v2_projection_run_attempts AS attempt
+        ON attempt.attempt_id = turn.run_attempt_id
+        AND attempt.thread_id = turn.thread_id
+        AND attempt.provider_thread_id = turn.provider_thread_id
+      WHERE json_extract(turn.payload_json, '$.nativeTurnRef.driver') = 'codex'
+        AND json_extract(turn.payload_json, '$.nativeTurnRef.nativeId') IN (
+          SELECT value FROM json_each(${turnIdsJson})
+        )
+    `.pipe(NodeSqliteClient.readOnly);
+  });
 });
 
 export const layer = Layer.effect(CodexUsageHistory, make);

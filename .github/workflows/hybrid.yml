@@ -184,8 +184,10 @@ jobs:
             sudo sed -i 's|http://azure\.archive\.ubuntu\.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' /etc/apt/apt-mirrors.txt
           fi
           node apps/web/node_modules/playwright/cli.js install --with-deps --only-shell chromium
+      - name: Typecheck native client persistence acceptance
+        run: node node_modules/@effect/tsgo/dist/effect-tsgo.cjs tsrs --noEmit -p tools/hybrid-client-persistence-tsconfig.json
       - name: Test fork client acceptance assertions
-        run: node --test apps/web/scripts/hybrid-client-turn.test.ts
+        run: node --test apps/web/scripts/hybrid-client-turn.test.ts apps/web/scripts/hybrid-client-database.test.ts
       - name: Check native selection and build the integration bundles
         run: node tools/check-hybrid.mjs --application "$RUNNER_TEMP/hybrid-proof"
       - name: Exercise the client with Rust services and durable recovery

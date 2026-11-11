@@ -1091,61 +1091,245 @@
     },
     {
       "id": "redb-persistence",
-      "state": "candidate",
+      "state": "integrated",
       "domain_owner": "apps/server/src/persistence",
       "reviewed_upstream_commit": "7171fdd7716b05dc1b4be40c26ac78e8bb35f80c",
       "upstream_sources": [
         {
-          "path": "apps/server/src/orchestration-v2/EventSink.ts",
-          "blob": "0c42ac73ff9cb2bc89b3cd950c326db5593402c0"
+          "path": "apps/server/integration/transferBudgetV2.integration.test.ts",
+          "blob": "3f1d50b510c680561764ec9d0ae1d83630344a9e"
         },
         {
-          "path": "apps/server/src/orchestration-v2/EffectOutbox.ts",
-          "blob": "92e1e01ad43f2a4a4b43b0a3dad7038d75a9725a"
+          "path": "apps/server/src/auth/EnvironmentAuth.ts",
+          "blob": "780837052526be18b0d82ff323d1c951be4a6e8e"
+        },
+        {
+          "path": "apps/server/src/auth/PairingGrantStore.ts",
+          "blob": "bf9eccee8c51ba5aa4718808f4ac9396267cd725"
+        },
+        {
+          "path": "apps/server/src/auth/SessionStore.ts",
+          "blob": "5a25d152c5174ff0b016faec866ff4a5099da2a2"
+        },
+        {
+          "path": "apps/server/src/cli/doctor.ts",
+          "blob": "f7afaf9e4d0ca90f14e38191f95f45d34e6f7b31"
+        },
+        {
+          "path": "apps/server/src/cli/environment.ts",
+          "blob": "869c085cbad2bf4f327e0e6865e5819cbafaeaa7"
+        },
+        {
+          "path": "apps/server/src/cli/project.ts",
+          "blob": "f604f8eb436962b17a0e765eebbda2b76d23cf88"
+        },
+        {
+          "path": "apps/server/src/cli/server.ts",
+          "blob": "0e90979439ae3159cf64b7a250c61a0ac32b5d7e"
+        },
+        {
+          "path": "apps/server/src/config.ts",
+          "blob": "d4883688c08efe5c7d612140efdadd89fb0b9a92"
+        },
+        {
+          "path": "apps/server/src/mcpApps/McpAppModelContext.ts",
+          "blob": "8dc16e67564a066807019eb53fe4e2e87686c47c"
+        },
+        {
+          "path": "apps/server/src/orchestration-v2/boundedSnapshotTransport.test.ts",
+          "blob": "220e707b6c735645c0e0ac08240b8254902282b7"
         },
         {
           "path": "apps/server/src/orchestration-v2/CommandReceiptStore.ts",
           "blob": "f39de342b552625bc51be4bae819e0cec468ce4c"
         },
         {
-          "path": "apps/server/src/persistence/OrchestrationCommandReceipts.ts",
-          "blob": "4a39061a00cb0e7ab1c10864fb400fc6795dbc48"
-        },
-        {
-          "path": "apps/server/src/orchestration-v2/TurnItemPositionStore.ts",
-          "blob": "03636b34153c9dc8ed62a4078f0444776a7b8777"
-        },
-        {
-          "path": "apps/server/src/orchestration-v2/ProjectStore.ts",
-          "blob": "2be0a765c784f779e1d7a1a14d0d89b7ed979a85"
-        },
-        {
-          "path": "apps/server/src/orchestration-v2/ProjectionStore.ts",
-          "blob": "3d33f76b7a4940e0917d984b4ae48ebcc83dd6c3"
-        },
-        {
-          "path": "apps/server/src/orchestration-v2/EventStore.ts",
-          "blob": "e2125508dee8f62322c2cba50fa7e08a400d9171"
-        },
-        {
-          "path": "apps/server/src/orchestration-v2/ProviderCommitBatch.ts",
-          "blob": "1a6ca8d28a609c9b82215368bac64c494c6a0b50"
+          "path": "apps/server/src/orchestration-v2/EffectOutbox.ts",
+          "blob": "92e1e01ad43f2a4a4b43b0a3dad7038d75a9725a"
         },
         {
           "path": "apps/server/src/orchestration-v2/EffectWorker.ts",
           "blob": "c5b5ea9b383a943bfe97ef1170791cd31473d09f"
         },
         {
-          "path": "apps/server/src/sourceControl/threadPullRequests.ts",
-          "blob": "8d9c72b1c6cdf917bcec2c33a175ebe2927353df"
+          "path": "apps/server/src/orchestration-v2/EventSink.ts",
+          "blob": "0c42ac73ff9cb2bc89b3cd950c326db5593402c0"
+        },
+        {
+          "path": "apps/server/src/orchestration-v2/EventStore.ts",
+          "blob": "e2125508dee8f62322c2cba50fa7e08a400d9171"
+        },
+        {
+          "path": "apps/server/src/orchestration-v2/http.test.ts",
+          "blob": "570d34468d37ab5051490a3f8f540daba581cbbb"
+        },
+        {
+          "path": "apps/server/src/orchestration-v2/http.ts",
+          "blob": "3bba05f7db63a71b907d3bd8e809d1eb1f1d7ebc"
+        },
+        {
+          "path": "apps/server/src/orchestration-v2/legacy/LegacyV1ThreadImporter.ts",
+          "blob": "8c134d3b57d711d922c02c5edfacd530c4ba6288"
+        },
+        {
+          "path": "apps/server/src/orchestration-v2/ProjectionMaintenance.ts",
+          "blob": "210322aed686f3d47a696ffaf427d8b5b67f52c7"
+        },
+        {
+          "path": "apps/server/src/orchestration-v2/ProjectionStore.ts",
+          "blob": "3d33f76b7a4940e0917d984b4ae48ebcc83dd6c3"
+        },
+        {
+          "path": "apps/server/src/orchestration-v2/ProjectStore.ts",
+          "blob": "2be0a765c784f779e1d7a1a14d0d89b7ed979a85"
+        },
+        {
+          "path": "apps/server/src/orchestration-v2/ProviderCommitBatch.ts",
+          "blob": "1a6ca8d28a609c9b82215368bac64c494c6a0b50"
+        },
+        {
+          "path": "apps/server/src/orchestration-v2/runtimeLayer.ts",
+          "blob": "ba1dadad1864cc04a85d0f9cdf3b509e1f15d023"
+        },
+        {
+          "path": "apps/server/src/orchestration-v2/ShellStream.ts",
+          "blob": "0fa5251a7ef7307ad02b93b54653cc7f35a2c274"
+        },
+        {
+          "path": "apps/server/src/orchestration-v2/ThreadFind.ts",
+          "blob": "ead68680a21c9a6c18050be562e06ed6da44f0be"
+        },
+        {
+          "path": "apps/server/src/orchestration-v2/ThreadSearch.test.ts",
+          "blob": "e758280f938887e10dbecfed93cf26c20286d9f6"
+        },
+        {
+          "path": "apps/server/src/orchestration-v2/ThreadSearch.ts",
+          "blob": "04f68ef64c3434dfc8b8c94e5a7210f59aaddeab"
+        },
+        {
+          "path": "apps/server/src/orchestration-v2/TurnItemPositionStore.ts",
+          "blob": "03636b34153c9dc8ed62a4078f0444776a7b8777"
+        },
+        {
+          "path": "apps/server/src/peer/PeerLinks.ts",
+          "blob": "f52faecfcc3e238f70163458995833161df2c312"
+        },
+        {
+          "path": "apps/server/src/persistence/AuthPairingLinks.ts",
+          "blob": "52323f9690af5e2d54efe0921d664976d656a564"
+        },
+        {
+          "path": "apps/server/src/persistence/AuthSessions.ts",
+          "blob": "7b82b012e674fefa121582f8bf3a2c7b885ec55c"
+        },
+        {
+          "path": "apps/server/src/persistence/databaseMigrationHead.ts",
+          "blob": "046039a703410f6d124eed43de82d6c0553a32a1"
+        },
+        {
+          "path": "apps/server/src/persistence/DatabaseStorage.ts",
+          "blob": "d5db56ca0a265513094ca7faac046a091e926515"
+        },
+        {
+          "path": "apps/server/src/persistence/OrchestrationCommandReceipts.ts",
+          "blob": "4a39061a00cb0e7ab1c10864fb400fc6795dbc48"
         },
         {
           "path": "apps/server/src/persistence/OrchestrationEventStore.ts",
           "blob": "e55d82713871bce675d605da926da0514879b422"
         },
         {
+          "path": "apps/server/src/persistence/ProviderSessionRuntime.ts",
+          "blob": "e3395b74884a1434520f59c06c28d37a4b214fb0"
+        },
+        {
+          "path": "apps/server/src/persistence/PullRequestFilesViewed.ts",
+          "blob": "476643c1f0b367a907d3bfdd351808c8ba22987d"
+        },
+        {
+          "path": "apps/server/src/persistence/PullRequestReviewGuides.ts",
+          "blob": "0a12b3f6f74a71a8d47e8664fde3985d26a0021d"
+        },
+        {
+          "path": "apps/server/src/persistence/Sqlite.ts",
+          "blob": "38913376cd1235e718b480364b90b7a3fadccda4"
+        },
+        {
+          "path": "apps/server/src/pullRequest/linkedThreads.ts",
+          "blob": "87ffae525eb9c9d92cb530ae47f1f284e90ca17a"
+        },
+        {
+          "path": "apps/server/src/scheduledTasks/ScheduledTaskService.ts",
+          "blob": "4953cec766210dcb579e81ec02d5b4f7c8c37940"
+        },
+        {
+          "path": "apps/server/src/scheduledTasks/webhookDedupe.ts",
+          "blob": "76f04a97e6dfe1deb397e7f3bc83cdba52c57f0f"
+        },
+        {
+          "path": "apps/server/src/server.ts",
+          "blob": "47190f60dcf516c86ab246ef8e1951ae6aae17f9"
+        },
+        {
+          "path": "apps/server/src/serverOwnership.ts",
+          "blob": "565f8111849e0fd1ddcf562fee1973ba6694b9b7"
+        },
+        {
+          "path": "apps/server/src/serverSettings.ts",
+          "blob": "251becba12f6c9e431042d08b36a465754abe69a"
+        },
+        {
+          "path": "apps/server/src/sourceControl/threadPullRequests.ts",
+          "blob": "8d9c72b1c6cdf917bcec2c33a175ebe2927353df"
+        },
+        {
+          "path": "apps/server/src/storageCleanup.ts",
+          "blob": "a5f9cd7eefa1255e3e1efa0e95f94e2bb519fff6"
+        },
+        {
+          "path": "apps/server/src/triage/triagePrompt.ts",
+          "blob": "7a7625dcbe15c34ac585941db71103bdf23b4a5f"
+        },
+        {
+          "path": "apps/server/src/usage/CodexUsageHistory.ts",
+          "blob": "b032c9b1a0be0de0ec52a61fa328d8a63058452d"
+        },
+        {
+          "path": "apps/server/src/workspace/KnownWorkspaces.ts",
+          "blob": "f442e4cedbb6109e0cd61083988b86fd134bb9a7"
+        },
+        {
+          "path": "apps/server/src/ws.test.ts",
+          "blob": "6105b12d8260173c1d50208c550c00986401dbae"
+        },
+        {
+          "path": "apps/server/src/ws.ts",
+          "blob": "1c204481350d6b10880e2e18925836bb89b256ce"
+        },
+        {
+          "path": "packages/shared/package.json",
+          "blob": "5d9a87ac7719dbf0e6a24460bdd4a2e8e790c10c"
+        },
+        {
           "path": "packages/shared/src/nodeSqliteClient.ts",
           "blob": "4c2c2fe9677af924aa7532554f1b9f2343cc234d"
+        },
+        {
+          "path": "scripts/dev-runner.test.ts",
+          "blob": "d522bfdb15794824b382ff68363be0c5006b4588"
+        },
+        {
+          "path": "scripts/dev-runner.ts",
+          "blob": "9cd8e598acf1f0d68e04a806e4c56c710236ff93"
+        },
+        {
+          "path": "scripts/mobile-showcase-environment.ts",
+          "blob": "e7e2c76b6a2f2424ffb251df2b1fdc7036281673"
+        },
+        {
+          "path": "scripts/mobile-showcase.ts",
+          "blob": "425c371fd0c2a3a76b160e7f309b6de331465bfa"
         }
       ],
       "rust_paths": [
@@ -1169,50 +1353,263 @@
         "apps/server/src/persistence/redb_command_receipts_tests.rs",
         "apps/server/src/persistence/redb_projection_commit.rs",
         "apps/server/src/persistence/redb_projection_commit_tests.rs",
+        "apps/server/src/persistence/redb_projection_lookup.rs",
+        "apps/server/src/persistence/redb_projection_read_index.rs",
+        "apps/server/src/persistence/redb_projection_records.rs",
+        "apps/server/src/persistence/redb_auth_rows.rs",
+        "apps/server/src/persistence/redb_auth_rows_tests.rs",
+        "apps/server/src/persistence/redb_runtime_state.rs",
+        "apps/server/src/persistence/redb_runtime_state_tests.rs",
+        "apps/server/src/peer/redb_peer_rows.rs",
+        "apps/server/src/peer/redb_peer_rows_tests.rs",
+        "apps/server/src/scheduledTasks/redb_scheduled_rows.rs",
+        "apps/server/src/scheduledTasks/redb_scheduled_rows_tests.rs",
+        "apps/server/src/pullRequest/redb_pull_request_rows.rs",
+        "apps/server/src/pullRequest/redb_pull_request_rows_tests.rs",
         "apps/server/src/orchestration-v2/redb_turn_item_positions.rs",
         "apps/server/src/orchestration-v2/redb_turn_item_positions_tests.rs",
         "apps/server/src/orchestration-v2/redb_project_rows.rs",
         "apps/server/src/orchestration-v2/redb_project_rows_tests.rs",
         "apps/server/src/orchestration-v2/redb_effect_outbox.rs",
-        "apps/server/src/orchestration-v2/redb_effect_outbox_tests.rs"
+        "apps/server/src/orchestration-v2/redb_effect_outbox_tests.rs",
+        "apps/server/src/orchestration-v2/legacy/redb_legacy_v1.rs",
+        "apps/server/src/persistence/redb_auxiliary_reads.rs",
+        "apps/server/src/persistence/redb_bootstrap.rs",
+        "apps/server/src/persistence/redb_database_storage.rs",
+        "apps/server/src/persistence/redb_message_rowids.rs",
+        "apps/server/src/persistence/redb_projection_context.rs",
+        "apps/server/src/persistence/redb_projection_control.rs",
+        "apps/server/src/persistence/redb_projection_derived_indexes.rs",
+        "apps/server/src/persistence/redb_projection_history.rs",
+        "apps/server/src/persistence/redb_projection_maintenance.rs",
+        "apps/server/src/persistence/redb_projection_recovery.rs",
+        "apps/server/src/persistence/redb_projection_shell.rs",
+        "apps/server/src/persistence/redb_projection_window.rs",
+        "apps/server/src/persistence/redb_projection_window_index.rs",
+        "apps/server/src/persistence/redb_search_positions.rs",
+        "apps/server/src/persistence/redb_search_unicode.rs",
+        "apps/server/src/persistence/redb_server_ownership.rs",
+        "apps/server/src/persistence/redb_thread_find.rs",
+        "apps/server/src/persistence/redb_thread_search.rs"
       ],
       "adapter_paths": [
-        "apps/server/src/orchestration-v2/NativeDatabase.ts",
-        "apps/server/src/orchestration-v2/NativeEffectOutbox.ts",
-        "apps/server/src/orchestration-v2/EventSink.ts",
-        "apps/server/src/orchestration-v2/NativeEventSink.ts",
-        "apps/server/src/orchestration-v2/EventStore.ts",
-        "apps/server/src/orchestration-v2/ProviderCommitBatch.ts",
+        ".github/workflows/hybrid.yml",
+        "AGENTS.md",
+        "README.md",
+        "apps/server/integration/transferBudgetV2.integration.test.ts",
+        "apps/server/src/auth/EnvironmentAuth.ts",
+        "apps/server/src/auth/PairingGrantStore.ts",
+        "apps/server/src/auth/SessionStore.ts",
+        "apps/server/src/cli/doctor.ts",
+        "apps/server/src/cli/environment.ts",
+        "apps/server/src/cli/project.ts",
+        "apps/server/src/cli/server.ts",
+        "apps/server/src/config.ts",
+        "apps/server/src/mcpApps/McpAppModelContext.ts",
+        "apps/server/src/mcpApps/NativeMcpAppModelContext.ts",
+        "apps/server/src/orchestration-v2/CommandReceiptStore.ts",
         "apps/server/src/orchestration-v2/EffectOutbox.ts",
         "apps/server/src/orchestration-v2/EffectWorker.ts",
+        "apps/server/src/orchestration-v2/EventSink.ts",
+        "apps/server/src/orchestration-v2/EventStore.ts",
+        "apps/server/src/orchestration-v2/MaintenanceRows.ts",
         "apps/server/src/orchestration-v2/NativeApplicationEffectOutbox.ts",
-        "apps/server/src/orchestration-v2/CommandReceiptStore.ts",
-        "apps/server/src/orchestration-v2/TurnItemPositionStore.ts",
-        "apps/server/src/orchestration-v2/NativeTurnItemPositionStore.ts",
-        "apps/server/src/orchestration-v2/ProjectStore.ts",
-        "apps/server/src/orchestration-v2/ProjectRows.ts",
-        "apps/server/src/orchestration-v2/SqliteProjectRows.ts",
+        "apps/server/src/orchestration-v2/NativeDatabase.ts",
+        "apps/server/src/orchestration-v2/NativeEffectOutbox.ts",
+        "apps/server/src/orchestration-v2/NativeEventSink.ts",
+        "apps/server/src/orchestration-v2/NativeMaintenanceRows.ts",
         "apps/server/src/orchestration-v2/NativeProjectRows.ts",
+        "apps/server/src/orchestration-v2/NativeProjectionContextRows.ts",
+        "apps/server/src/orchestration-v2/NativeProjectionControlRows.ts",
+        "apps/server/src/orchestration-v2/NativeProjectionLookupRows.ts",
+        "apps/server/src/orchestration-v2/NativeProjectionMaintenance.ts",
+        "apps/server/src/orchestration-v2/NativeProjectionRecordRows.ts",
+        "apps/server/src/orchestration-v2/NativeProjectionRecoveryRows.ts",
+        "apps/server/src/orchestration-v2/NativeProjectionShellRows.ts",
+        "apps/server/src/orchestration-v2/NativeProjectionStore.ts",
+        "apps/server/src/orchestration-v2/NativeThreadFind.ts",
+        "apps/server/src/orchestration-v2/NativeThreadSearch.ts",
+        "apps/server/src/orchestration-v2/NativeTurnItemPositionStore.ts",
+        "apps/server/src/orchestration-v2/ProjectRows.ts",
+        "apps/server/src/orchestration-v2/ProjectStore.ts",
         "apps/server/src/orchestration-v2/ProjectionCommitStore.ts",
-        "apps/server/src/persistence/SqliteProjectionCommitStore.ts",
-        "apps/server/src/persistence/NativeProjectionCommitStore.ts",
-        "apps/server/src/persistence/OrchestrationCommandReceipts.ts",
-        "apps/server/src/persistence/NativeCommandReceipts.ts",
-        "apps/server/src/persistence/PersistenceTransactions.ts",
-        "apps/server/src/sourceControl/threadPullRequests.ts",
-        "apps/server/src/persistence/RedbClient.ts",
-        "apps/server/src/persistence/OrchestrationEventStore.ts",
+        "apps/server/src/orchestration-v2/ProjectionContextRows.ts",
+        "apps/server/src/orchestration-v2/ProjectionControlRows.ts",
+        "apps/server/src/orchestration-v2/ProjectionHistoryRows.ts",
+        "apps/server/src/orchestration-v2/ProjectionLookupRows.ts",
+        "apps/server/src/orchestration-v2/ProjectionMaintenance.ts",
+        "apps/server/src/orchestration-v2/ProjectionRecordRows.ts",
+        "apps/server/src/orchestration-v2/ProjectionRecoveryRows.ts",
+        "apps/server/src/orchestration-v2/ProjectionShellRows.ts",
+        "apps/server/src/orchestration-v2/ProjectionStore.ts",
+        "apps/server/src/orchestration-v2/ProviderCommitBatch.ts",
+        "apps/server/src/orchestration-v2/ShellStream.ts",
+        "apps/server/src/orchestration-v2/SqliteMaintenanceRows.ts",
+        "apps/server/src/orchestration-v2/SqliteProjectRows.ts",
+        "apps/server/src/orchestration-v2/SqliteProjectionContextRows.ts",
+        "apps/server/src/orchestration-v2/SqliteProjectionControlRows.ts",
+        "apps/server/src/orchestration-v2/SqliteProjectionLookupRows.ts",
+        "apps/server/src/orchestration-v2/SqliteProjectionRecordRows.ts",
+        "apps/server/src/orchestration-v2/SqliteProjectionRecoveryRows.ts",
+        "apps/server/src/orchestration-v2/SqliteProjectionShellRows.ts",
+        "apps/server/src/orchestration-v2/ThreadFind.ts",
+        "apps/server/src/orchestration-v2/ThreadFindRows.ts",
+        "apps/server/src/orchestration-v2/ThreadSearch.test.ts",
+        "apps/server/src/orchestration-v2/ThreadSearch.ts",
+        "apps/server/src/orchestration-v2/ThreadSearchRows.ts",
+        "apps/server/src/orchestration-v2/TurnItemPositionStore.ts",
+        "apps/server/src/orchestration-v2/boundedSnapshotTransport.test.ts",
+        "apps/server/src/orchestration-v2/http.test.ts",
+        "apps/server/src/orchestration-v2/http.ts",
+        "apps/server/src/orchestration-v2/legacy/LegacyV1SqliteRows.ts",
+        "apps/server/src/orchestration-v2/legacy/LegacyV1ThreadImporter.ts",
+        "apps/server/src/orchestration-v2/legacy/NativeLegacyV1ThreadImporter.ts",
+        "apps/server/src/orchestration-v2/nativeRuntimeLayer.ts",
+        "apps/server/src/orchestration-v2/runtimeLayer.ts",
+        "apps/server/src/orchestration-v2/selectedRuntimeLayer.ts",
+        "apps/server/src/peer/NativePeerLinkRows.ts",
+        "apps/server/src/peer/PeerLinkRows.ts",
+        "apps/server/src/peer/PeerLinks.ts",
+        "apps/server/src/peer/SqlitePeerLinkRows.ts",
+        "apps/server/src/persistence/AuthPairingLinks.ts",
+        "apps/server/src/persistence/AuthSessions.ts",
+        "apps/server/src/persistence/AuxiliaryPersistenceReads.ts",
+        "apps/server/src/persistence/DatabaseStorage.ts",
+        "apps/server/src/persistence/DatabaseStorageBackend.ts",
         "apps/server/src/persistence/EventRows.ts",
+        "apps/server/src/persistence/NativeAuthPairingLinks.ts",
+        "apps/server/src/persistence/NativeAuthSessions.ts",
+        "apps/server/src/persistence/NativeAuxiliaryPersistenceReads.ts",
+        "apps/server/src/persistence/NativeCommandReceipts.ts",
+        "apps/server/src/persistence/NativeDatabaseMaintenance.ts",
+        "apps/server/src/persistence/NativeDatabaseStorageBackend.ts",
+        "apps/server/src/persistence/NativeEventRows.ts",
+        "apps/server/src/persistence/NativeProjectionCommitStore.ts",
+        "apps/server/src/persistence/NativeProviderSessionRuntime.ts",
+        "apps/server/src/persistence/NativePullRequestRows.ts",
+        "apps/server/src/persistence/NativeServerOwnershipLock.ts",
+        "apps/server/src/persistence/Omdb.ts",
+        "apps/server/src/persistence/OrchestrationCommandReceipts.ts",
+        "apps/server/src/persistence/OrchestrationEventStore.ts",
+        "apps/server/src/persistence/PersistenceTransactions.ts",
+        "apps/server/src/persistence/ProviderSessionRuntime.ts",
+        "apps/server/src/persistence/PullRequestFilesViewed.ts",
+        "apps/server/src/persistence/PullRequestReviewGuides.ts",
+        "apps/server/src/persistence/RedbClient.ts",
+        "apps/server/src/persistence/SelectedPersistence.ts",
+        "apps/server/src/persistence/ServerOwnershipLock.ts",
+        "apps/server/src/persistence/Sqlite.ts",
+        "apps/server/src/persistence/SqliteAuxiliaryPersistenceReads.ts",
+        "apps/server/src/persistence/SqliteDatabaseStorageBackend.ts",
         "apps/server/src/persistence/SqliteEventRows.ts",
-        "apps/server/src/persistence/NativeEventRows.ts"
+        "apps/server/src/persistence/SqliteProjectionCommitStore.ts",
+        "apps/server/src/persistence/SqliteServerOwnershipLock.ts",
+        "apps/server/src/persistence/databaseMigrationHead.ts",
+        "apps/server/src/persistence/migrateSqliteToOmdb.ts",
+        "apps/server/src/persistence/omdb-schema.json",
+        "apps/server/src/persistence/sqliteExport.d.mts",
+        "apps/server/src/persistence/sqliteExport.mjs",
+        "apps/server/src/pullRequest/NativeLinkedThreads.ts",
+        "apps/server/src/pullRequest/linkedThreads.ts",
+        "apps/server/src/scheduledTasks/NativeScheduledRows.ts",
+        "apps/server/src/scheduledTasks/ScheduledRows.ts",
+        "apps/server/src/scheduledTasks/ScheduledTaskService.ts",
+        "apps/server/src/scheduledTasks/SqliteScheduledRows.ts",
+        "apps/server/src/scheduledTasks/webhookDedupe.ts",
+        "apps/server/src/server.ts",
+        "apps/server/src/serverOwnership.ts",
+        "apps/server/src/serverSettings.ts",
+        "apps/server/src/sourceControl/threadPullRequests.ts",
+        "apps/server/src/storageCleanup.ts",
+        "apps/server/src/triage/triagePrompt.ts",
+        "apps/server/src/usage/CodexUsageHistory.ts",
+        "apps/server/src/usage/NativeCodexUsageHistory.ts",
+        "apps/server/src/workspace/KnownWorkspaceRows.ts",
+        "apps/server/src/workspace/KnownWorkspaces.ts",
+        "apps/server/src/workspace/NativeKnownWorkspaceRows.ts",
+        "apps/server/src/ws.test.ts",
+        "apps/server/src/ws.ts",
+        "apps/web/scripts/hybrid-client-database.test.ts",
+        "apps/web/scripts/hybrid-client-database.ts",
+        "apps/web/scripts/verify-hybrid-client.ts",
+        "docs/porting/omdb-lexical-search.md",
+        "docs/porting/redb-cutover.md",
+        "packages/shared/package.json",
+        "packages/shared/src/applicationDatabase.ts",
+        "scripts/dev-runner.test.ts",
+        "scripts/dev-runner.ts",
+        "scripts/mobile-showcase-environment.ts",
+        "scripts/mobile-showcase.ts",
+        "tools/acceptance-checks.json",
+        "tools/check-hybrid.mjs",
+        "tools/check-native-database.mjs",
+        "tools/check-omdb-migration-head.mjs",
+        "tools/check-omdb-production.mjs",
+        "tools/check-omdb-startup.mjs",
+        "tools/check-redb-auth.mjs",
+        "tools/check-redb-auxiliary-reads.mjs",
+        "tools/check-redb-cli.mjs",
+        "tools/check-redb-event-sink.mjs",
+        "tools/check-redb-legacy-v1.mjs",
+        "tools/check-redb-maintenance.mjs",
+        "tools/check-redb-peers.mjs",
+        "tools/check-redb-projection-context.mjs",
+        "tools/check-redb-projection-controls.mjs",
+        "tools/check-redb-projection-history.mjs",
+        "tools/check-redb-projection-lookups.mjs",
+        "tools/check-redb-projection-records.mjs",
+        "tools/check-redb-projection-recovery.mjs",
+        "tools/check-redb-projection-shells.mjs",
+        "tools/check-redb-projection-windows.mjs",
+        "tools/check-redb-pull-requests.mjs",
+        "tools/check-redb-runtime-state.mjs",
+        "tools/check-redb-scheduled.mjs",
+        "tools/check-redb-storage-maintenance.mjs",
+        "tools/check-redb-thread-find.mjs",
+        "tools/check-redb-thread-search.mjs",
+        "tools/check-redb-transactions.mjs",
+        "tools/export-sqlite-state.d.mts",
+        "tools/export-sqlite-state.mjs",
+        "tools/export-sqlite-state.test.mjs",
+        "tools/generate-omdb-schema.mjs",
+        "tools/hybrid-client-persistence-tsconfig.json",
+        "tools/omdb-migration-head-tsconfig.json",
+        "tools/omdb-production-tsconfig.json",
+        "tools/omdb-production-types.ts",
+        "tools/omdb-startup-tsconfig.json",
+        "tools/redb-auth-tsconfig.json",
+        "tools/redb-auxiliary-reads-tsconfig.json",
+        "tools/redb-cli-tsconfig.json",
+        "tools/redb-domain-fixture.mjs",
+        "tools/redb-legacy-v1-tsconfig.json",
+        "tools/redb-maintenance-tsconfig.json",
+        "tools/redb-native-projection-tsconfig.json",
+        "tools/redb-native-runtime-tsconfig.json",
+        "tools/redb-native-runtime-types.ts",
+        "tools/redb-peers-tsconfig.json",
+        "tools/redb-projection-context-tsconfig.json",
+        "tools/redb-projection-controls-tsconfig.json",
+        "tools/redb-projection-history-tsconfig.json",
+        "tools/redb-projection-lookups-tsconfig.json",
+        "tools/redb-projection-records-tsconfig.json",
+        "tools/redb-projection-recovery-tsconfig.json",
+        "tools/redb-projection-shells-tsconfig.json",
+        "tools/redb-pull-requests-tsconfig.json",
+        "tools/redb-runtime-state-tsconfig.json",
+        "tools/redb-scheduled-tsconfig.json",
+        "tools/redb-storage-maintenance-tsconfig.json",
+        "tools/redb-thread-find-tsconfig.json",
+        "tools/redb-thread-search-tsconfig.json",
+        "tools/server-test-runtime/package-lock.json",
+        "tools/server-test-runtime/package.json"
       ],
       "platform_routes": [
         {
           "targets": [
             "linux-x64"
           ],
-          "state": "candidate",
-          "implementation": "sqlite-authoritative; redb-component",
+          "state": "integrated",
+          "implementation": "omdb",
           "compiler_route": "lustr-bluefe-compatibility",
           "acceptance_evidence": {}
         }
@@ -1230,10 +1627,33 @@
         "tools/check-redb-receipts-positions.mjs",
         "tools/check-redb-projects.mjs",
         "tools/check-redb-application-outbox.mjs",
-        "tools/check-redb-event-sink.mjs"
+        "tools/check-redb-event-sink.mjs",
+        "tools/check-redb-pull-requests.mjs",
+        "tools/check-redb-auth.mjs",
+        "tools/check-redb-runtime-state.mjs",
+        "tools/check-redb-peers.mjs",
+        "tools/check-redb-projection-lookups.mjs",
+        "tools/check-redb-projection-records.mjs",
+        "tools/check-redb-scheduled.mjs",
+        "tools/check-omdb-startup.mjs",
+        "tools/check-redb-auxiliary-reads.mjs",
+        "tools/check-redb-legacy-v1.mjs",
+        "tools/check-redb-maintenance.mjs",
+        "tools/check-redb-projection-context.mjs",
+        "tools/check-redb-projection-controls.mjs",
+        "tools/check-redb-projection-history.mjs",
+        "tools/check-redb-projection-recovery.mjs",
+        "tools/check-redb-projection-shells.mjs",
+        "tools/check-redb-projection-windows.mjs",
+        "tools/check-redb-storage-maintenance.mjs",
+        "tools/check-redb-thread-find.mjs",
+        "tools/check-redb-thread-search.mjs",
+        "tools/check-omdb-production.mjs",
+        "tools/check-omdb-migration-head.mjs",
+        "tools/check-redb-cli.mjs"
       ],
       "retired_paths": [],
-      "notes": "Candidate only; production server and CLI remain SQLite-authoritative. NativeEventSink composes the shared event log, command receipts, turn positions, complete ProjectStore, projection mutations and transactional guards, and all 17 application-outbox members under one RedbClient owner. Nested savepoints retain scoped afterCommit callbacks until acknowledged root commit. Managed domain indexes use imported tagged cells, with shared application normalization and native codecs. Mapped gates assert immutable-upstream parity, atomicity, publication order, recovery and ownership; registration is not acceptance evidence. Full projection read models, search, authentication, scheduling, other state, startup/maintenance and application/platform cutover remain incomplete.",
+      "notes": "The qualified native production server and CLI now select the complete omdb application boundary through one transaction owner. Complete projections, event/receipt/outbox publication, search, authentication, scheduling, peers, runtime/MCP state, usage, workspaces, maintenance and legacy import retain shared upstream contracts and algorithms. Fresh native schema and non-destructive SQLite migration prepare all domains before activating the older-server fence. Missing/uncertain operations never fall back to SQLite. Source retention remains required: integration is not acceptance for retirement or unqualified platforms. Exact-head mapped tests include immutable-source parity, selected production composition, actual CLI, client/provider restart and storage/ownership failure paths.",
       "rust_crates": [
         "crates/core",
         "crates/storage"

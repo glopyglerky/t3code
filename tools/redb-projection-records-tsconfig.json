@@ -1,0 +1,11 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": { "types": ["node"], "lib": ["ESNext", "esnext.disposable"] },
+  "files": [
+    "../apps/server/src/orchestration-v2/ProjectionStore.ts",
+    "../apps/server/src/orchestration-v2/ProjectionRecordRows.ts",
+    "../apps/server/src/orchestration-v2/SqliteProjectionRecordRows.ts",
+    "../apps/server/src/orchestration-v2/NativeProjectionRecordRows.ts",
+    "../apps/server/src/orchestration-v2/NativeProjectionStore.ts"
+  ]
+}

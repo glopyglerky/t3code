@@ -7,6 +7,19 @@ use crate::test_support::TestFixture;
 const NOW: &str = "2026-11-10T12:00:00.000Z";
 const LATER: &str = "2026-11-10T12:01:00.000Z";
 
+#[test]
+fn imported_source_witness_accepts_optional_sqlite_rowid() {
+    let mut witness = json!({"table": TABLE, "key": [cells::text_cell("effect")], "ordinal": 7});
+    let old: SourceWitness = decode(&crate::encode(&witness).unwrap()).unwrap();
+    assert_eq!(old.ordinal, 7);
+    witness["rowid"] = json!("-27");
+    let current: SourceWitness = decode(&crate::encode(&witness).unwrap()).unwrap();
+    assert_eq!(current.ordinal, old.ordinal);
+    assert_eq!(current._rowid.as_deref(), Some("-27"));
+    witness["unexpected"] = Value::Null;
+    assert!(decode::<SourceWitness>(&crate::encode(&witness).unwrap()).is_err());
+}
+
 fn schema() -> ApplicationSchema {
     ApplicationSchema {
         version: 1,

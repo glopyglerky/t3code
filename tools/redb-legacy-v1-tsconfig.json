@@ -1,0 +1,9 @@
+{
+  "extends": "../apps/server/tsconfig.json",
+  "include": [
+    "../apps/server/src/orchestration-v2/legacy/LegacyV1ThreadImporter.ts",
+    "../apps/server/src/orchestration-v2/legacy/LegacyV1SqliteRows.ts",
+    "../apps/server/src/orchestration-v2/legacy/NativeLegacyV1ThreadImporter.ts"
+  ],
+  "exclude": []
+}

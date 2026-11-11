@@ -279,6 +279,13 @@ impl ApplicationTransactions {
                 receipt.stored(),
             )
             .await?;
+            crate::application_events::maintenance::index_receipt(
+                &mut session.transaction,
+                &session.catalog,
+                &receipt.stored(),
+                false,
+            )
+            .await?;
             Ok(true)
         }
         .await;
@@ -296,6 +303,13 @@ impl ApplicationTransactions {
                 &session.catalog,
                 RECEIPTS,
                 receipt.stored(),
+            )
+            .await?;
+            crate::application_events::maintenance::index_receipt(
+                &mut session.transaction,
+                &session.catalog,
+                &receipt.stored(),
+                false,
             )
             .await
         }

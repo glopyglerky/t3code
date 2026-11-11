@@ -45,7 +45,7 @@ import * as SessionStore from "./SessionStore.ts";
 import { REUSABLE_DEV_SESSION_EXPIRES_AT, resolveReusableDevAuth } from "./ReusableDevAuth.ts";
 import { verifyRequestDpopProof } from "./dpop.ts";
 import { DESKTOP_RENDERER_ORIGINS } from "../httpCors.ts";
-import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as SelectedPersistence from "../persistence/SelectedPersistence.ts";
 import * as ManagedLimits from "../policy/managedLimits.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import { MCP_APPROVAL_SUBJECT_PREFIX } from "../persistence/AuthPairingLinks.ts";
@@ -1472,15 +1472,34 @@ const revokePairedClientsThePolicyDisallows = Effect.fn(
   }
 });
 
-export const layer = Layer.effect(EnvironmentAuth, make).pipe(
-  Layer.provideMerge(PairingGrantStore.layer),
-  Layer.provideMerge(SessionStore.layer),
+export const layerFromStores = Layer.effect(EnvironmentAuth, make).pipe(
   Layer.provideMerge(EnvironmentAuthPolicy.layer),
 );
+export const layer = layerFromStores.pipe(
+  Layer.provideMerge(PairingGrantStore.layer),
+  Layer.provideMerge(SessionStore.layer),
+);
 
-const layerStorage = Layer.mergeAll(ServerSecretStore.layer, SqlitePersistence.layerConfig);
+// Database bootstrap checks legacy service ownership, which imports auth-facing
+// service metadata. Resolve the selected repositories only when the layer builds
+// so either CLI/server module entry order reaches initialized bindings.
+export const layerSelected = Layer.suspend(() =>
+  layerFromStores.pipe(
+    Layer.provideMerge(
+      PairingGrantStore.layerFromRepository.pipe(
+        Layer.provideMerge(SelectedPersistence.authPairing),
+      ),
+    ),
+    Layer.provideMerge(
+      SessionStore.layerFromRepository.pipe(Layer.provideMerge(SelectedPersistence.authSessions)),
+    ),
+  ),
+);
+const layerStorage = Layer.suspend(() =>
+  Layer.mergeAll(ServerSecretStore.layer, SelectedPersistence.layerConfig),
+);
 
-export const layerRuntime = layer.pipe(
+export const layerRuntime = layerSelected.pipe(
   Layer.provideMerge(ManagedPolicy.layer),
   Layer.provideMerge(layerStorage),
   Layer.provideMerge(ServerEnvironment.layerIdentity),

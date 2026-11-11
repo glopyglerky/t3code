@@ -1,19 +1,18 @@
 // Client-supplied worktrees count only under managed folders or when Git lists them for the project.
 import * as HostProcess from "@t3tools/shared/HostProcess";
-import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
-import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ServerConfig from "../config.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { isFilesystemRoot, managedWorktreesDirectories } from "../worktreesDirectory.ts";
+import { KnownWorkspaceRows, layerSqlite } from "./KnownWorkspaceRows.ts";
 
 export class UnknownWorkspaceError extends Schema.TaggedError<UnknownWorkspaceError>()(
   "UnknownWorkspaceError",
@@ -47,13 +46,13 @@ export class KnownWorkspaces extends Context.Service<
 >()("t3/workspace/KnownWorkspaces") {}
 
 /** @public */
-export const make = Effect.gen(function* () {
+export const makeWithRows = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const settings = yield* ServerSettings.ServerSettingsService;
   const projectStore = yield* ProjectStore.ProjectStoreV2;
-  const sql = yield* SqlClient.SqlClient;
+  const rows = yield* KnownWorkspaceRows;
   const git = yield* GitVcsDriver.GitVcsDriver;
 
   // Missing roots keep lexical paths; other resolution failures and filesystem roots grant nothing.
@@ -91,16 +90,7 @@ export const make = Effect.gen(function* () {
         if (within(yield* resolveRoot(project.workspaceRoot))) return true;
       }
 
-      const threads = yield* sql<{ readonly worktreePath: string; readonly projectId: string }>`
-        SELECT DISTINCT
-          json_extract(payload_json, '$.worktreePath') AS "worktreePath",
-          project_id AS "projectId"
-        FROM orchestration_v2_projection_threads
-        WHERE deleted_at IS NULL AND json_extract(payload_json, '$.worktreePath') IS NOT NULL
-      `.pipe(
-        NodeSqliteClient.readOnly,
-        Effect.orElseSucceed(() => []),
-      );
+      const threads = yield* rows.threadWorktrees.pipe(Effect.orElseSucceed(() => []));
       const projectWorktrees = new Map<string, ReadonlyArray<string>>();
       const isProjectWorktree = Effect.fnUntraced(function* (
         projectId: string,
@@ -147,4 +137,6 @@ export const make = Effect.gen(function* () {
   return KnownWorkspaces.of({ contains, assertContains });
 });
 
+export const make = makeWithRows.pipe(Effect.provide(layerSqlite));
+export const layerWithRows = Layer.effect(KnownWorkspaces, makeWithRows);
 export const layer = Layer.effect(KnownWorkspaces, make);

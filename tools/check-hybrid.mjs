@@ -60,9 +60,10 @@ if (mode === "--verify-binaries") {
       .upstream.commit,
     target,
     compiler_route: "bluefe-rustc-via-lustr",
-    baseline_selection: mode === "--adapters"
-      ? "Trusted upstream behavior is used as the differential oracle for the selected Rust ports"
-      : "Native service bundle through the retained application build",
+    baseline_selection:
+      mode === "--adapters"
+        ? "Trusted upstream behavior is used as the differential oracle for the selected Rust ports"
+        : "Native service bundle through the retained application build",
     toolchain_lock_sha256: digest(Path.join(root, "toolchain.lock.json")),
     native_manifest_sha256: digest(Path.join(bin, "manifest.json")),
     mode,
@@ -77,7 +78,7 @@ if (mode === "--verify-binaries") {
       "A complete interactive client project/thread/provider/approval/reconnect flow",
       "Native desktop and mobile lifecycle and distribution",
       "macOS and Windows execution",
-      "Production redb and Iroh cutovers",
+      "omdb lifecycle and release acceptance on unqualified platforms; Iroh production cutover",
       "Native Lust compilation of this source revision",
     ],
   };
@@ -111,11 +112,16 @@ if (mode === "--verify-binaries") {
     if (mode === "--adapters") {
       const typechecker = Path.resolve(
         process.env.T3_CODE_LS_TEST_RUNTIME ?? Path.join(root, "tools", "server-test-runtime"),
-        "node_modules", ".bin", "effect-tsgo",
+        "node_modules",
+        ".bin",
+        "effect-tsgo",
       );
       for (const check of adapterChecks.filter((check) => check.typecheckProject)) {
         run(`Typecheck ${check.port} adapter`, typechecker, [
-          "tsrs", "--noEmit", "--project", check.typecheckProject,
+          "tsrs",
+          "--noEmit",
+          "--project",
+          check.typecheckProject,
         ]);
       }
       for (const check of adapterChecks) {

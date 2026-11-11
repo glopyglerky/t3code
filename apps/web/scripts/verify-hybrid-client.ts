@@ -18,6 +18,8 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
 import { chromium, type Browser, type Page } from "playwright";
+import { nativeExecutable } from "@t3tools/shared/nativeExecutable";
+import { inspectNativeReplay } from "./hybrid-client-database.ts";
 import {
   assertReplayTurnLinks,
   replayTurnIdentity,
@@ -401,6 +403,8 @@ async function assertCompleted(page: Page, threadId: string, identity: ReplayTur
   Assert.equal(message.streaming, false);
   return {
     ...identity,
+    projectId: snapshot.projection.thread.projectId,
+    threadId,
     snapshotSequence: snapshot.snapshotSequence,
     runStatus: run.status,
     attemptStatus: attempt.status,
@@ -472,6 +476,7 @@ async function exercise(implementation: Implementation): Promise<void> {
     completedSnapshots: [] as Array<
       Awaited<ReturnType<typeof assertCompleted>> & { checkpoint: string }
     >,
+    persistence: [] as Array<ReturnType<typeof inspectNativeReplay> & { checkpoint: string }>,
     browserErrors: [] as string[],
     error: null as string | null,
   };
@@ -485,6 +490,21 @@ async function exercise(implementation: Implementation): Promise<void> {
     proof.completedSteps.push(step);
     saveProof();
     console.log(`[${implementation}] ${step}`);
+  };
+  const inspectPersistence = (checkpoint: string, closed = false) => {
+    if (implementation !== "native") return;
+    const expected = proof.completedSnapshots.at(-1);
+    Assert.ok(expected, "A completed client snapshot must precede native row verification");
+    proof.persistence.push({
+      checkpoint,
+      ...inspectNativeReplay({
+        executable: nativeExecutable("db"),
+        stateDirectory,
+        expected,
+        closed,
+      }),
+    });
+    saveProof();
   };
   saveProof();
   const contextOptions = {
@@ -555,6 +575,7 @@ async function exercise(implementation: Implementation): Promise<void> {
       ...(await assertCompleted(page, threadId, turnIdentity)),
     });
     proof.threadUrl = page.url();
+    inspectPersistence("initial");
     completed("Received the completed replay turn on the original thread route");
 
     starting("client reload");
@@ -564,10 +585,12 @@ async function exercise(implementation: Implementation): Promise<void> {
       ...(await assertCompleted(page, threadId, turnIdentity)),
     });
     Assert.equal(page.url(), proof.threadUrl);
+    inspectPersistence("client-reload");
     completed("Reconnected after a client reload with the same completed thread");
 
     starting("owned server restart");
     await application.stop();
+    inspectPersistence("closed-before-restart", true);
     application = await startApplication(
       implementation,
       stateDirectory,
@@ -594,10 +617,17 @@ async function exercise(implementation: Implementation): Promise<void> {
       ...(await assertCompleted(page, threadId, turnIdentity)),
     });
     Assert.equal(page.url(), proof.threadUrl);
+    inspectPersistence("server-restart");
     completed(
       "Recovered the same durable thread after server restart in a fresh client with the existing session",
     );
     await capture(page, directory, "completed");
+    if (implementation === "native") {
+      Assert.equal(proof.persistence.length, 4);
+      completed(
+        "Verified canonical omdb rows and event heads through read-only native inspection, with no application SQLite files",
+      );
+    }
     proof.status = "passed";
   } catch (error) {
     proof.status = "failed";

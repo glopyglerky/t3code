@@ -38,37 +38,54 @@ export class McpAppModelContext extends Context.Service<
   }
 >()("t3/mcpApps/McpAppModelContext") {}
 
+export type SetMcpAppModelContextInput = Parameters<McpAppModelContext["Service"]["set"]>[0];
+
+export interface McpAppModelContextRows<E> {
+  readonly remove: (input: SetMcpAppModelContextInput) => Effect.Effect<void, E>;
+  readonly upsert: (
+    input: SetMcpAppModelContextInput & { readonly updatedAt: string },
+  ) => Effect.Effect<void, E>;
+  readonly forThread: (
+    threadId: ThreadId,
+  ) => Effect.Effect<ReadonlyArray<McpAppModelContextEntry>, E>;
+}
+
+/** Shared input normalization and clock behavior, independent of the selected store. */
+export function modelContextFromRows<E>(
+  rows: McpAppModelContextRows<E>,
+): McpAppModelContext["Service"] {
+  const fail = (cause: unknown) => new McpAppModelContextError({ cause });
+  return McpAppModelContext.of({
+    set: Effect.fn("McpAppModelContext.set")(function* (input) {
+      if (input.text.trim() === "") return yield* rows.remove(input).pipe(Effect.mapError(fail));
+      const updatedAt = DateTime.formatIso(yield* DateTime.now);
+      yield* rows.upsert({ ...input, updatedAt }).pipe(Effect.mapError(fail));
+    }),
+    forThread: Effect.fn("McpAppModelContext.forThread")((threadId) =>
+      rows.forThread(threadId).pipe(Effect.mapError(fail)),
+    ),
+  });
+}
+
 export const layer = Layer.effect(
   McpAppModelContext,
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
-    const fail = (cause: unknown) => new McpAppModelContextError({ cause });
-
-    const set = Effect.fn("McpAppModelContext.set")(function* (input: {
-      readonly threadId: ThreadId;
-      readonly itemId: TurnItemId;
-      readonly server: string;
-      readonly tool: string;
-      readonly text: string;
-    }) {
-      if (input.text.trim() === "") {
-        yield* sql`
+    return modelContextFromRows({
+      remove: (input) =>
+        sql`
           DELETE FROM mcp_app_model_context
           WHERE thread_id = ${input.threadId} AND item_id = ${input.itemId}
-        `.pipe(Effect.mapError(fail));
-        return;
-      }
-      const updatedAt = DateTime.formatIso(yield* DateTime.now);
-      yield* sql`
+        `.pipe(Effect.asVoid),
+      upsert: (input) =>
+        sql`
         INSERT INTO mcp_app_model_context (thread_id, item_id, server, tool, text, updated_at)
-        VALUES (${input.threadId}, ${input.itemId}, ${input.server}, ${input.tool}, ${input.text}, ${updatedAt})
+        VALUES (${input.threadId}, ${input.itemId}, ${input.server}, ${input.tool}, ${input.text}, ${input.updatedAt})
         ON CONFLICT(thread_id, item_id) DO UPDATE SET text = excluded.text, updated_at = excluded.updated_at
-      `.pipe(Effect.mapError(fail));
-    });
-
-    const forThread = Effect.fn("McpAppModelContext.forThread")(function* (threadId: ThreadId) {
-      // Match by id across fork lineage; later source rollbacks leave the fork's copy intact.
-      return yield* sql<McpAppModelContextEntry>`
+      `.pipe(Effect.asVoid),
+      forThread: (threadId) => {
+        // Match by id across fork lineage; later source rollbacks leave the fork's copy intact.
+        return sql<McpAppModelContextEntry>`
         SELECT context.item_id AS "itemId", context.server, context.tool, context.text
         FROM mcp_app_model_context AS context
         JOIN orchestration_v2_projection_turn_items AS item
@@ -82,10 +99,9 @@ export const layer = Layer.effect(
             OR run.thread_id <> context.thread_id
           )
         ORDER BY context.updated_at, context.item_id
-      `.pipe(NodeSqliteClient.readOnly, Effect.mapError(fail));
+      `.pipe(NodeSqliteClient.readOnly);
+      },
     });
-
-    return McpAppModelContext.of({ set, forThread });
   }),
 );
 

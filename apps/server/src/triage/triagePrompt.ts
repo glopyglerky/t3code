@@ -81,7 +81,7 @@ Then work from evidence, not assumption. In rough order of value:
   service log or desktop backend logs from the context file if they exist. Recent
   failures usually leave a trail here.
 - The provider event log, for problems with claude/codex/cursor sessions.
-- The SQLite database. Read it freely, but only write when a write is necessary
+- The application database. Read it through the matching backend, but only write when a write is necessary
   to fix the problem the user described, and get their explicit permission
   before any write.
 - Service state: is the server installed as a service (systemd, launchd, Windows)?
@@ -298,7 +298,7 @@ ${input.entry.kind === "app" ? IN_APP_SECTION : ""}${input.sourceClone === undef
 ## Paths
 
 - State dir: ${input.paths.stateDir}
-- Database (SQLite; write only with the user's explicit permission): ${input.paths.dbPath}
+- Application database (write only with the user's explicit permission): ${input.paths.dbPath}
 - Settings: ${input.paths.settingsPath}
 - Logs dir: ${input.paths.logsDir}
 - Service log (systemd/launchd service installs only): ${input.paths.serviceLogPath}

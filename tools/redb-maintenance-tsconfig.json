@@ -1,0 +1,10 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": { "types": ["node"], "lib": ["ESNext", "esnext.disposable"] },
+  "files": [
+    "../apps/server/src/orchestration-v2/ProjectionMaintenance.ts",
+    "../apps/server/src/orchestration-v2/MaintenanceRows.ts",
+    "../apps/server/src/orchestration-v2/SqliteMaintenanceRows.ts",
+    "../apps/server/src/orchestration-v2/NativeMaintenanceRows.ts"
+  ]
+}

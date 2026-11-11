@@ -22,7 +22,6 @@ import {
   TurnItemId,
 } from "@t3tools/contracts";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
-import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -30,7 +29,8 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import * as SqlClient from "effect/sql/SqlClient";
+import type * as SqlClient from "effect/sql/SqlClient";
+import { makeSqliteRows } from "./LegacyV1SqliteRows.ts";
 
 import * as EventSink from "../EventSink.ts";
 import { randomUuidV4 } from "@t3tools/provider-core/server/randomUuid";
@@ -38,7 +38,7 @@ import { randomUuidV4 } from "@t3tools/provider-core/server/randomUuid";
 const IMPORT_EVENT_PREFIX = "migration:v1";
 const TRANSCRIPT_EVENT_BATCH_SIZE = 100;
 
-interface LegacyThreadRow {
+export interface LegacyThreadRow {
   readonly thread_id: string;
   readonly project_id: string;
   readonly title: string;
@@ -65,11 +65,11 @@ interface LegacyThreadRow {
   readonly deleted_at: string | null;
 }
 
-interface LegacyRepairRow extends LegacyThreadRow {
+export interface LegacyRepairRow extends LegacyThreadRow {
   readonly payload_json: string;
 }
 
-interface LegacyMessageRow {
+export interface LegacyMessageRow {
   readonly message_id: string;
   readonly thread_id: string;
   readonly role: "user" | "assistant";
@@ -82,9 +82,45 @@ interface LegacyMessageRow {
   readonly ordinal: number;
 }
 
-interface LegacyImportRow {
+export interface LegacyImportRow {
   readonly thread_id: string;
   readonly transcript_imported_at: string | null;
+}
+
+export interface LegacyV1Rows<E> {
+  readonly messages: (threadId: ThreadId) => Effect.Effect<readonly LegacyMessageRow[], E>;
+  readonly latestMessage: (
+    threadId: ThreadId,
+    userOnly: boolean,
+  ) => Effect.Effect<readonly LegacyMessageRow[], E>;
+  readonly repairs: Effect.Effect<readonly LegacyRepairRow[], E>;
+  readonly pendingThreads: Effect.Effect<readonly LegacyThreadRow[], E>;
+  readonly pendingThreadCount: Effect.Effect<number, E>;
+  readonly getImport: (threadId: ThreadId) => Effect.Effect<readonly LegacyImportRow[], E>;
+  readonly importedEvents: (
+    threadId: ThreadId,
+  ) => Effect.Effect<readonly { readonly event_id: string }[], E>;
+  readonly pendingImports: Effect.Effect<readonly LegacyImportRow[], E>;
+  readonly insertPosition: (input: {
+    readonly threadId: ThreadId;
+    readonly turnItemId: TurnItemId;
+    readonly ordinal: number;
+  }) => Effect.Effect<unknown, E>;
+  readonly insertShell: (input: {
+    readonly threadId: ThreadId;
+    readonly sourceUpdatedAt: string;
+    readonly shellImportedAt: string;
+    readonly importedMessageCount: number;
+  }) => Effect.Effect<unknown, E>;
+  readonly complete: (input: {
+    readonly threadId: ThreadId;
+    readonly completedAt: string;
+    readonly messageCount: number;
+  }) => Effect.Effect<unknown, E>;
+  readonly failure: (threadId: string) => Effect.Effect<unknown, E>;
+  readonly withTransaction: <A, E2, R>(
+    body: Effect.Effect<A, E2, R>,
+  ) => Effect.Effect<A, E | E2, R>;
 }
 
 export interface LegacyV1ImportSummary {
@@ -335,96 +371,19 @@ function chunks<A>(items: ReadonlyArray<A>, size: number): Array<ReadonlyArray<A
   return result;
 }
 
-const make = Effect.gen(function* () {
-  const sql = yield* SqlClient.SqlClient;
+export const makeFromRows = Effect.fn("LegacyV1ThreadImporter.makeFromRows")(function* <E>(
+  storage: LegacyV1Rows<E>,
+) {
   const eventSink = yield* EventSink.EventSinkV2;
   const transcriptImports = yield* KeyedLock.make<ThreadId>();
 
-  const listMessages = (threadId: ThreadId) =>
-    sql<LegacyMessageRow>`
-      SELECT
-        message_id,
-        thread_id,
-        role,
-        text,
-        attachments_json,
-        context_json,
-        is_streaming,
-        created_at,
-        updated_at,
-        ROW_NUMBER() OVER (
-          PARTITION BY thread_id
-          ORDER BY created_at ASC, message_id ASC
-        ) AS ordinal
-      FROM projection_thread_messages
-      WHERE thread_id = ${threadId}
-        AND role IN ('user', 'assistant')
-      ORDER BY created_at ASC, message_id ASC
-    `.pipe(NodeSqliteClient.readOnly);
+  const listMessages = (threadId: ThreadId) => storage.messages(threadId);
 
   const listShellMessages = Effect.fn("LegacyV1ThreadImporter.listShellMessages")(function* (
     threadId: ThreadId,
   ) {
-    const latest = yield* sql<LegacyMessageRow>`
-        SELECT
-          message.message_id,
-          message.thread_id,
-          message.role,
-          message.text,
-          message.attachments_json,
-          message.context_json,
-          message.is_streaming,
-          message.created_at,
-          message.updated_at,
-          (
-            SELECT COUNT(*)
-            FROM projection_thread_messages AS earlier
-            WHERE earlier.thread_id = message.thread_id
-              AND earlier.role IN ('user', 'assistant')
-              AND (
-                earlier.created_at < message.created_at
-                OR (
-                  earlier.created_at = message.created_at
-                  AND earlier.message_id <= message.message_id
-                )
-              )
-          ) AS ordinal
-        FROM projection_thread_messages AS message
-        WHERE message.thread_id = ${threadId}
-          AND message.role IN ('user', 'assistant')
-        ORDER BY message.created_at DESC, message.message_id DESC
-        LIMIT 1
-      `.pipe(NodeSqliteClient.readOnly);
-    const latestUser = yield* sql<LegacyMessageRow>`
-        SELECT
-          message.message_id,
-          message.thread_id,
-          message.role,
-          message.text,
-          message.attachments_json,
-          message.context_json,
-          message.is_streaming,
-          message.created_at,
-          message.updated_at,
-          (
-            SELECT COUNT(*)
-            FROM projection_thread_messages AS earlier
-            WHERE earlier.thread_id = message.thread_id
-              AND earlier.role IN ('user', 'assistant')
-              AND (
-                earlier.created_at < message.created_at
-                OR (
-                  earlier.created_at = message.created_at
-                  AND earlier.message_id <= message.message_id
-                )
-              )
-          ) AS ordinal
-        FROM projection_thread_messages AS message
-        WHERE message.thread_id = ${threadId}
-          AND message.role = 'user'
-        ORDER BY message.created_at DESC, message.message_id DESC
-        LIMIT 1
-      `.pipe(NodeSqliteClient.readOnly);
+    const latest = yield* storage.latestMessage(threadId, false);
+    const latestUser = yield* storage.latestMessage(threadId, true);
     return [latestUser[0], latest[0]].filter(
       (message, index, selected): message is LegacyMessageRow =>
         message !== undefined &&
@@ -434,49 +393,7 @@ const make = Effect.gen(function* () {
 
   const reconcileShellsBase = Effect.gen(function* () {
     const now = DateTime.formatIso(yield* DateTime.now);
-    const repairRows = yield* sql<LegacyRepairRow>`
-      SELECT
-        thread.thread_id,
-        thread.project_id,
-        thread.title,
-        thread.model_selection_json,
-        thread.runtime_mode,
-        thread.interaction_mode,
-        thread.branch,
-        thread.worktree_path,
-        thread.created_at,
-        thread.updated_at,
-        thread.archived_at,
-        thread.settled_override,
-        thread.settled_at,
-        thread.unsettled_at,
-        thread.snoozed_until,
-        thread.snoozed_at,
-        thread.pinned_at,
-        thread.auto_settle_disabled_at,
-        thread.pin_order_key,
-        (SELECT json_group_array(json_object('host', pr.host, 'repository', pr.repository, 'number', pr.number, 'url', pr.url, 'source', pr.source, 'linkedAt', pr.linked_at, 'snapshot', json(pr.snapshot_json), 'stack', json(pr.stack_json))) FROM projection_thread_pull_requests pr WHERE pr.thread_id = thread.thread_id) AS pull_requests_json,
-        thread.linked_pull_request_json,
-        thread.branch_pull_request_json,
-        thread.active_order_key,
-        thread.deleted_at,
-        projection.payload_json
-      FROM orchestration_v2_legacy_imports AS legacy_import
-      INNER JOIN projection_threads AS thread
-        ON thread.thread_id = legacy_import.thread_id
-      INNER JOIN orchestration_v2_projection_threads AS projection
-        ON projection.thread_id = legacy_import.thread_id
-      WHERE json_type(projection.payload_json, '$.pinnedAt') IS NULL
-         OR json_type(projection.payload_json, '$.pinOrderKey') IS NULL
-         OR json_type(projection.payload_json, '$.snoozedUntil') IS NULL
-         OR json_type(projection.payload_json, '$.snoozedAt') IS NULL
-         OR json_type(projection.payload_json, '$.unsettledAt') IS NULL
-         OR json_type(projection.payload_json, '$.linkedPullRequest') IS NULL
-         OR json_type(projection.payload_json, '$.pullRequests') IS NULL
-         OR json_type(projection.payload_json, '$.branchPullRequest') IS NULL
-         OR json_type(projection.payload_json, '$.activeOrderKey') IS NULL
-      ORDER BY thread.created_at ASC, thread.thread_id ASC
-    `.pipe(NodeSqliteClient.readOnly);
+    const repairRows = yield* storage.repairs;
     let repairedThreadCount = 0;
     for (const row of repairRows) {
       const decoded = decodeStoredThread(row.payload_json);
@@ -538,43 +455,7 @@ const make = Effect.gen(function* () {
       });
       repairedThreadCount += 1;
     }
-    const rows = yield* sql<LegacyThreadRow>`
-      SELECT
-        thread.thread_id,
-        thread.project_id,
-        thread.title,
-        thread.model_selection_json,
-        thread.runtime_mode,
-        thread.interaction_mode,
-        thread.branch,
-        thread.worktree_path,
-        thread.created_at,
-        thread.updated_at,
-        thread.archived_at,
-        thread.settled_override,
-        thread.settled_at,
-        thread.unsettled_at,
-        thread.snoozed_until,
-        thread.snoozed_at,
-        thread.pinned_at,
-        thread.auto_settle_disabled_at,
-        thread.pin_order_key,
-        (SELECT json_group_array(json_object('host', pr.host, 'repository', pr.repository, 'number', pr.number, 'url', pr.url, 'source', pr.source, 'linkedAt', pr.linked_at, 'snapshot', json(pr.snapshot_json), 'stack', json(pr.stack_json))) FROM projection_thread_pull_requests pr WHERE pr.thread_id = thread.thread_id) AS pull_requests_json,
-        thread.linked_pull_request_json,
-        thread.branch_pull_request_json,
-        thread.active_order_key,
-        thread.deleted_at
-      FROM projection_threads AS thread
-      WHERE NOT EXISTS (
-        SELECT 1
-        FROM orchestration_events AS event INDEXED BY orchestration_events_v2_created_threads_idx
-        WHERE event.application_event_version = 2
-          AND event.aggregate_kind = 'thread'
-          AND event.stream_id = thread.thread_id
-          AND event.event_type = 'thread.created'
-      )
-      ORDER BY thread.created_at ASC, thread.thread_id ASC
-    `.pipe(NodeSqliteClient.readOnly);
+    const rows = yield* storage.pendingThreads;
     let importedThreadCount = repairedThreadCount;
     let importedMessageCount = 0;
     for (const row of rows) {
@@ -599,46 +480,27 @@ const make = Effect.gen(function* () {
           payload: thread,
         },
       ];
-      yield* sql.withTransaction(
+      yield* storage.withTransaction(
         Effect.gen(function* () {
           yield* Effect.forEach(
             previews,
             (message) =>
-              sql`
-                INSERT INTO orchestration_v2_turn_item_positions (
-                  thread_id,
-                  turn_item_id,
-                  ordinal
-                )
-                VALUES (
-                  ${thread.id},
-                  ${TurnItemId.make(`${IMPORT_EVENT_PREFIX}:turn-item:${message.message_id}`)},
-                  ${message.ordinal}
-                )
-                ON CONFLICT(thread_id, turn_item_id) DO NOTHING
-              `,
+              storage.insertPosition({
+                threadId: thread.id,
+                turnItemId: TurnItemId.make(
+                  `${IMPORT_EVENT_PREFIX}:turn-item:${message.message_id}`,
+                ),
+                ordinal: message.ordinal,
+              }),
             { discard: true },
           );
           yield* eventSink.write({ events });
-          yield* sql`
-            INSERT INTO orchestration_v2_legacy_imports (
-              thread_id,
-              source_updated_at,
-              shell_imported_at,
-              transcript_imported_at,
-              imported_message_count,
-              last_error
-            )
-            VALUES (
-              ${thread.id},
-              ${row.updated_at},
-              ${now},
-              NULL,
-              ${previews.length},
-              NULL
-            )
-            ON CONFLICT(thread_id) DO NOTHING
-          `;
+          yield* storage.insertShell({
+            threadId: thread.id,
+            sourceUpdatedAt: row.updated_at,
+            shellImportedAt: now,
+            importedMessageCount: previews.length,
+          });
         }),
       );
       importedThreadCount += 1;
@@ -651,27 +513,7 @@ const make = Effect.gen(function* () {
     Effect.mapError((cause) => new LegacyV1ThreadImportError({ operation: "import", cause })),
   );
 
-  const pendingThreadCount = sql<{ readonly count: number }>`
-    SELECT COUNT(*) AS count
-    FROM (
-      SELECT thread.thread_id
-      FROM projection_threads AS thread
-      WHERE NOT EXISTS (
-        SELECT 1
-        FROM orchestration_events AS event INDEXED BY orchestration_events_v2_created_threads_idx
-        WHERE event.application_event_version = 2
-          AND event.aggregate_kind = 'thread'
-          AND event.stream_id = thread.thread_id
-          AND event.event_type = 'thread.created'
-      )
-      UNION
-      SELECT legacy_import.thread_id
-      FROM orchestration_v2_legacy_imports AS legacy_import
-      WHERE legacy_import.transcript_imported_at IS NULL
-    )
-  `.pipe(
-    NodeSqliteClient.readOnly,
-    Effect.map((rows) => rows[0]?.count ?? 0),
+  const pendingThreadCount = storage.pendingThreadCount.pipe(
     Effect.mapError(
       (cause) => new LegacyV1ThreadImportError({ operation: "inspect pending", cause }),
     ),
@@ -684,12 +526,7 @@ const make = Effect.gen(function* () {
     transcriptImports.withLock(
       threadId,
       Effect.gen(function* () {
-        const imports = yield* sql<LegacyImportRow>`
-          SELECT thread_id, transcript_imported_at
-          FROM orchestration_v2_legacy_imports
-          WHERE thread_id = ${threadId}
-          LIMIT 1
-        `.pipe(NodeSqliteClient.readOnly);
+        const imports = yield* storage.getImport(threadId);
         const imported = imports[0];
         if (imported === undefined || imported.transcript_imported_at !== null) {
           confirmedTranscriptThreadIds.add(threadId);
@@ -697,14 +534,7 @@ const make = Effect.gen(function* () {
         }
         const messages = yield* listMessages(threadId);
         // Hint the index to skip V1 events without scanning their payloads.
-        const existingRows = yield* sql<{ readonly event_id: string }>`
-          SELECT event_id
-          FROM orchestration_events INDEXED BY idx_orchestration_events_agent_stream_sequence
-          WHERE application_event_version = 2
-            AND aggregate_kind = 'thread'
-            AND stream_id = ${threadId}
-            AND event_id LIKE ${`${IMPORT_EVENT_PREFIX}:message:%`}
-        `.pipe(NodeSqliteClient.readOnly);
+        const existingRows = yield* storage.importedEvents(threadId);
         const existing = new Set(existingRows.map((row) => row.event_id));
         const missing = messages.filter(
           (message) => !existing.has(`${IMPORT_EVENT_PREFIX}:message:${message.message_id}`),
@@ -713,33 +543,20 @@ const make = Effect.gen(function* () {
           yield* Effect.forEach(
             batch,
             (message) =>
-              sql`
-                INSERT INTO orchestration_v2_turn_item_positions (
-                  thread_id,
-                  turn_item_id,
-                  ordinal
-                )
-                VALUES (
-                  ${threadId},
-                  ${TurnItemId.make(`${IMPORT_EVENT_PREFIX}:turn-item:${message.message_id}`)},
-                  ${message.ordinal}
-                )
-                ON CONFLICT(thread_id, turn_item_id) DO NOTHING
-              `,
+              storage.insertPosition({
+                threadId: threadId,
+                turnItemId: TurnItemId.make(
+                  `${IMPORT_EVENT_PREFIX}:turn-item:${message.message_id}`,
+                ),
+                ordinal: message.ordinal,
+              }),
             { discard: true },
           );
           yield* eventSink.write({ events: batch.flatMap(messageEvents) });
           yield* Effect.yieldNow;
         }
         const now = DateTime.formatIso(yield* DateTime.now);
-        yield* sql`
-          UPDATE orchestration_v2_legacy_imports
-          SET
-            transcript_imported_at = ${now},
-            imported_message_count = ${messages.length},
-            last_error = NULL
-          WHERE thread_id = ${threadId}
-        `;
+        yield* storage.complete({ threadId, completedAt: now, messageCount: messages.length });
         confirmedTranscriptThreadIds.add(threadId);
         return {
           importedThreadCount: 1,
@@ -763,12 +580,7 @@ const make = Effect.gen(function* () {
         );
 
   const importPendingTranscripts = Effect.gen(function* () {
-    const rows = yield* sql<LegacyImportRow>`
-      SELECT thread_id, transcript_imported_at
-      FROM orchestration_v2_legacy_imports
-      WHERE transcript_imported_at IS NULL
-      ORDER BY shell_imported_at ASC, thread_id ASC
-    `.pipe(NodeSqliteClient.readOnly);
+    const rows = yield* storage.pendingImports;
     let importedThreadCount = 0;
     let importedMessageCount = 0;
     for (const row of rows) {
@@ -781,11 +593,7 @@ const make = Effect.gen(function* () {
               cause,
             }).pipe(
               Effect.andThen(() =>
-                sql`
-                    UPDATE orchestration_v2_legacy_imports
-                    SET last_error = 'Transcript hydration failed; retry on next open.'
-                    WHERE thread_id = ${row.thread_id}
-                  `.pipe(
+                storage.failure(row.thread_id).pipe(
                   Effect.catchCauseIf(
                     (cause) => !Cause.hasInterrupts(cause),
                     () => Effect.void,
@@ -817,6 +625,10 @@ const make = Effect.gen(function* () {
     ensureTranscript,
     importPendingTranscripts,
   });
+});
+
+export const make = Effect.gen(function* () {
+  return yield* makeFromRows(yield* makeSqliteRows);
 });
 
 export const layer: Layer.Layer<

@@ -1,0 +1,16 @@
+{
+  "extends": "../apps/web/tsconfig.json",
+  "compilerOptions": {
+    "composite": false,
+    "types": ["node"],
+    "lib": ["ESNext", "DOM", "DOM.Iterable"]
+  },
+  "include": [
+    "../apps/web/scripts/hybrid-client-database.ts",
+    "../apps/web/scripts/hybrid-client-database.test.ts",
+    "../apps/web/scripts/hybrid-client-turn.ts",
+    "../apps/web/scripts/hybrid-client-turn.test.ts",
+    "../apps/web/scripts/verify-hybrid-client.ts"
+  ],
+  "exclude": []
+}

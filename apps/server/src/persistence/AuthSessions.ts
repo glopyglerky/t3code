@@ -122,7 +122,7 @@ export class AuthSessionRepository extends Context.Service<
   }
 >()("t3/persistence/AuthSessions/AuthSessionRepository") {}
 
-const AuthSessionDbRow = Schema.Struct({
+export const AuthSessionDbRow = Schema.Struct({
   sessionId: AuthSessionId,
   subject: Schema.String,
   scopes: Schema.fromJsonString(AuthEnvironmentScopes),
@@ -139,7 +139,7 @@ const AuthSessionDbRow = Schema.Struct({
   revokedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
 });
 
-const AuthSessionRawDbRow = Schema.Struct({
+export const AuthSessionRawDbRow = Schema.Struct({
   sessionId: Schema.String,
   subject: Schema.Unknown,
   scopes: Schema.Unknown,
@@ -156,9 +156,9 @@ const AuthSessionRawDbRow = Schema.Struct({
   revokedAt: Schema.Unknown,
 });
 
-const decodeAuthSessionDbRow = Schema.decodeUnknownEffect(AuthSessionDbRow);
+export const decodeAuthSessionDbRow = Schema.decodeUnknownEffect(AuthSessionDbRow);
 
-function toAuthSessionRecord(row: typeof AuthSessionDbRow.Type): AuthSessionRecord {
+export function toAuthSessionRecord(row: typeof AuthSessionDbRow.Type): AuthSessionRecord {
   return {
     sessionId: row.sessionId,
     subject: row.subject,
@@ -179,7 +179,7 @@ function toAuthSessionRecord(row: typeof AuthSessionDbRow.Type): AuthSessionReco
   };
 }
 
-function toPersistenceSqlOrDecodeError(
+export function toPersistenceSqlOrDecodeError(
   sqlOperation: string,
   decodeOperation: string,
   correlation?: PersistenceErrorCorrelation,

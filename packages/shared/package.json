@@ -543,6 +543,10 @@
       "types": "./src/speech.ts",
       "import": "./src/speech.ts"
     },
+    "./applicationDatabase": {
+      "types": "./src/applicationDatabase.ts",
+      "import": "./src/applicationDatabase.ts"
+    },
     "./nativeExecutable": {
       "types": "./src/nativeExecutable.ts",
       "import": "./src/nativeExecutable.ts"

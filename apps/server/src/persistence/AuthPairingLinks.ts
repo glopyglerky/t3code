@@ -78,7 +78,7 @@ export const GetAuthPairingLinkByCredentialInput = Schema.Struct({
 });
 export type GetAuthPairingLinkByCredentialInput = typeof GetAuthPairingLinkByCredentialInput.Type;
 
-const AuthPairingLinkRawDbRow = Schema.Struct({
+export const AuthPairingLinkRawDbRow = Schema.Struct({
   id: Schema.String,
   credential: Schema.Unknown,
   method: Schema.Unknown,
@@ -92,7 +92,7 @@ const AuthPairingLinkRawDbRow = Schema.Struct({
   revokedAt: Schema.Unknown,
 });
 
-const decodeAuthPairingLinkDbRow = Schema.decodeUnknownEffect(AuthPairingLinkRecord);
+export const decodeAuthPairingLinkDbRow = Schema.decodeUnknownEffect(AuthPairingLinkRecord);
 
 export class AuthPairingLinkRepository extends Context.Service<
   AuthPairingLinkRepository,
@@ -115,7 +115,7 @@ export class AuthPairingLinkRepository extends Context.Service<
   }
 >()("t3/persistence/AuthPairingLinks/AuthPairingLinkRepository") {}
 
-function toPersistenceSqlOrDecodeError(
+export function toPersistenceSqlOrDecodeError(
   sqlOperation: string,
   decodeOperation: string,
   correlation?: PersistenceErrorCorrelation,

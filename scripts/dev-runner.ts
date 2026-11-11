@@ -634,12 +634,15 @@ const prepareFirstStart = Effect.fn("dev-runner.prepareFirstStart")(function* (i
       }
     }
     const source = path.join(yield* HostProcess.HomeDirectory, ".t3", "userdata", "statev2.sqlite");
-    // A V1 state.sqlite counts as data too: the server imports it only while
-    // statev2.sqlite is missing, so seeding would hide it.
+    // Both database generations and a native activation marker mean this home
+    // already owns state. A missing native file must fail startup, not seed a
+    // stale SQLite backup as though the directory were empty.
     if (
       input.seed &&
       !(yield* exists(path.join(stateDir, "statev2.sqlite"))) &&
-      !(yield* exists(path.join(stateDir, "state.sqlite")))
+      !(yield* exists(path.join(stateDir, "state.sqlite"))) &&
+      !(yield* exists(path.join(stateDir, "statev2.omdb"))) &&
+      !(yield* exists(path.join(stateDir, "server-owner.sqlite")))
     ) {
       const info = yield* fs.stat(source).pipe(Effect.option);
       if (Option.isSome(info)) {

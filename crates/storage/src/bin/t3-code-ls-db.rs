@@ -8,14 +8,28 @@ use t3_code_ls_core::json as core_json;
 use t3_code_ls_storage::application::{
     ApplicationSchema, ApplicationTransactionMode, ApplicationTransactions,
 };
-use t3_code_ls_storage::application_events::{EventAppendRow, EventLatest, EventRead, EventStats};
+use t3_code_ls_storage::application_auth::AuthOperation;
+use t3_code_ls_storage::application_auxiliary_reads::AuxiliaryRead;
+use t3_code_ls_storage::application_events::{
+    EventAppendRow, EventLatest, EventRead, EventStats, MaintenanceRead, MaintenanceWrite,
+};
+use t3_code_ls_storage::application_legacy_v1::{LegacyV1Read, LegacyV1Write};
+use t3_code_ls_storage::application_peers::PeerOperation;
 use t3_code_ls_storage::application_positions::PositionAllocate;
+use t3_code_ls_storage::application_projections::records::ProjectionRecordsQuery;
+use t3_code_ls_storage::application_projections::records::window::ProjectionWindowQuery;
 use t3_code_ls_storage::application_projections::{
-    ProjectionApply, ProjectionGuard, ProjectionRead,
+    ProjectionApply, ProjectionContextQuery, ProjectionControlQuery, ProjectionGuard,
+    ProjectionHistoryQuery, ProjectionLookup, ProjectionRead, ProjectionRecoveryQuery,
+    ProjectionShellQuery,
 };
 use t3_code_ls_storage::application_projects::{ProjectRecord, ProjectSelection};
 use t3_code_ls_storage::application_pull_requests::{FileUpdate, GuideKey, ViewedScope};
 use t3_code_ls_storage::application_receipts::ReceiptRow;
+use t3_code_ls_storage::application_runtime_state::RuntimeStateOperation;
+use t3_code_ls_storage::application_scheduled::{ScheduledRead, ScheduledWrite};
+use t3_code_ls_storage::application_search::ThreadSearchQuery;
+use t3_code_ls_storage::application_thread_find::ThreadFindQuery;
 use t3_code_ls_storage::outbox::{self, EnqueueEffect};
 use t3_code_ls_storage::project_service::{ProjectRequest, execute_project};
 use t3_code_ls_storage::sqlite_import::ImportLimits;
@@ -24,6 +38,116 @@ use t3_code_ls_storage::{CommitBatch, Error, MAX_BATCH_BYTES, OutboxBatch, Store
 #[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
+    Shutdown {},
+    ApplicationProjectionsContext {
+        transaction_id: String,
+        query: ProjectionContextQuery,
+    },
+    ApplicationProjectionsRecovery {
+        transaction_id: String,
+        query: ProjectionRecoveryQuery,
+    },
+    ApplicationProjectionsShell {
+        transaction_id: String,
+        query: ProjectionShellQuery,
+    },
+    ApplicationThreadSearchRead {
+        transaction_id: String,
+        query: ThreadSearchQuery,
+    },
+    ApplicationBootstrap {},
+    ApplicationMigrations {},
+    ApplicationProjectionWindowQuery {
+        transaction_id: String,
+        query: ProjectionWindowQuery,
+    },
+    StorageStatistics {},
+    StorageBackup {
+        destination: PathBuf,
+    },
+    StorageCompact {},
+    ApplicationMessageRowidsPrepare {},
+    ApplicationLegacyV1Prepare {},
+    ApplicationLegacyV1Read {
+        transaction_id: String,
+        query: LegacyV1Read,
+    },
+    ApplicationLegacyV1Write {
+        transaction_id: String,
+        mutation: LegacyV1Write,
+    },
+    ApplicationMaintenancePrepare {},
+    ApplicationMaintenanceRead {
+        transaction_id: String,
+        query: MaintenanceRead,
+    },
+    ApplicationMaintenanceWrite {
+        transaction_id: String,
+        mutation: MaintenanceWrite,
+    },
+    ApplicationThreadFindRead {
+        transaction_id: String,
+        query: ThreadFindQuery,
+    },
+    ApplicationProjectionsControl {
+        transaction_id: String,
+        query: ProjectionControlQuery,
+    },
+    ApplicationAuxiliaryPrepare {},
+    ApplicationThreadSearchPrepare {},
+    ApplicationAuxiliaryRead {
+        transaction_id: String,
+        query: AuxiliaryRead,
+    },
+    ApplicationProjectionsHistory {
+        transaction_id: String,
+        query: ProjectionHistoryQuery,
+    },
+    ApplicationProjectionReadsPrepare {},
+    ApplicationProjectionsLookup {
+        transaction_id: String,
+        query: ProjectionLookup,
+    },
+    ApplicationProjectionsRecords {
+        transaction_id: String,
+        query: ProjectionRecordsQuery,
+    },
+    ApplicationScheduledPrepare {},
+    ApplicationScheduledRead {
+        transaction_id: String,
+        query: ScheduledRead,
+    },
+    ApplicationScheduledWrite {
+        transaction_id: String,
+        mutation: ScheduledWrite,
+    },
+    ApplicationAuthPrepare {},
+    ApplicationAuthRead {
+        transaction_id: String,
+        request: AuthOperation,
+    },
+    ApplicationAuthWrite {
+        transaction_id: String,
+        request: AuthOperation,
+    },
+    ApplicationPeersPrepare {},
+    ApplicationPeersRead {
+        transaction_id: String,
+        request: PeerOperation,
+    },
+    ApplicationPeersWrite {
+        transaction_id: String,
+        request: PeerOperation,
+    },
+    ApplicationRuntimeStatePrepare {},
+    ApplicationRuntimeStateRead {
+        transaction_id: String,
+        request: RuntimeStateOperation,
+    },
+    ApplicationRuntimeStateWrite {
+        transaction_id: String,
+        request: RuntimeStateOperation,
+    },
     ApplicationSchema {},
     ApplicationInit {
         schema: ApplicationSchema,
@@ -348,6 +472,19 @@ impl Request {
     fn is_unscoped_mutation(&self) -> bool {
         match self {
             Self::ApplicationInit { .. }
+            | Self::ApplicationAuthPrepare { .. }
+            | Self::ApplicationPeersPrepare { .. }
+            | Self::ApplicationRuntimeStatePrepare { .. }
+            | Self::ApplicationScheduledPrepare { .. }
+            | Self::ApplicationProjectionReadsPrepare { .. }
+            | Self::ApplicationAuxiliaryPrepare { .. }
+            | Self::ApplicationMessageRowidsPrepare { .. }
+            | Self::ApplicationThreadSearchPrepare { .. }
+            | Self::ApplicationLegacyV1Prepare { .. }
+            | Self::ApplicationMaintenancePrepare { .. }
+            | Self::StorageCompact { .. }
+            | Self::ApplicationBootstrap { .. }
+            | Self::StorageBackup { .. }
             | Self::ApplicationEventsPrepare { .. }
             | Self::ApplicationReceiptsPrepare { .. }
             | Self::ApplicationPositionsPrepare { .. }
@@ -369,7 +506,33 @@ impl Request {
             | Self::OutboxPrune { .. }
             | Self::Project { .. }
             | Self::ArchiveSqlite { .. } => true,
-            Self::ApplicationSchema { .. }
+            Self::Shutdown { .. }
+            | Self::ApplicationSchema { .. }
+            | Self::ApplicationProjectionsContext { .. }
+            | Self::ApplicationProjectionsRecovery { .. }
+            | Self::ApplicationProjectionsShell { .. }
+            | Self::ApplicationThreadSearchRead { .. }
+            | Self::ApplicationMigrations { .. }
+            | Self::ApplicationProjectionWindowQuery { .. }
+            | Self::StorageStatistics { .. }
+            | Self::ApplicationLegacyV1Read { .. }
+            | Self::ApplicationLegacyV1Write { .. }
+            | Self::ApplicationMaintenanceRead { .. }
+            | Self::ApplicationMaintenanceWrite { .. }
+            | Self::ApplicationThreadFindRead { .. }
+            | Self::ApplicationProjectionsControl { .. }
+            | Self::ApplicationAuthRead { .. }
+            | Self::ApplicationAuthWrite { .. }
+            | Self::ApplicationPeersRead { .. }
+            | Self::ApplicationPeersWrite { .. }
+            | Self::ApplicationRuntimeStateRead { .. }
+            | Self::ApplicationRuntimeStateWrite { .. }
+            | Self::ApplicationScheduledRead { .. }
+            | Self::ApplicationScheduledWrite { .. }
+            | Self::ApplicationProjectionsLookup { .. }
+            | Self::ApplicationProjectionsRecords { .. }
+            | Self::ApplicationAuxiliaryRead { .. }
+            | Self::ApplicationProjectionsHistory { .. }
             | Self::ApplicationBegin { .. }
             | Self::ApplicationSavepoint { .. }
             | Self::ApplicationRelease { .. }
@@ -437,6 +600,94 @@ async fn evaluate(
         return Err(Error::WriterBusy);
     }
     match request {
+        Request::Shutdown {} => {
+            return Err(Error::Invalid(
+                "shutdown must be handled by the helper owner".into(),
+            ));
+        }
+        Request::ApplicationProjectionsContext {
+            transaction_id,
+            query,
+        } => Ok(transactions
+            .projections_context(&transaction_id, query)
+            .await?),
+        Request::ApplicationProjectionsRecovery {
+            transaction_id,
+            query,
+        } => Ok(transactions
+            .projections_recovery(&transaction_id, query)
+            .await?),
+        Request::ApplicationProjectionsShell {
+            transaction_id,
+            query,
+        } => Ok(transactions
+            .projections_shell(&transaction_id, query)
+            .await?),
+        Request::ApplicationThreadSearchRead {
+            transaction_id,
+            query,
+        } => Ok(transactions.thread_search(&transaction_id, query).await?),
+        Request::ApplicationBootstrap {} => {
+            serde_json::to_value(store.bootstrap_application().await?)
+        }
+        Request::ApplicationMigrations {} => {
+            serde_json::to_value(store.application_migrations().await?)
+        }
+        Request::ApplicationProjectionWindowQuery {
+            transaction_id,
+            query,
+        } => Ok(transactions
+            .projection_window_query(&transaction_id, query)
+            .await?),
+        Request::StorageStatistics {} => serde_json::to_value(store.storage_statistics().await?),
+        Request::StorageBackup { destination } => {
+            serde_json::to_value(store.storage_backup(destination).await?)
+        }
+        Request::StorageCompact {} => serde_json::to_value(store.storage_compact().await?),
+        Request::ApplicationMessageRowidsPrepare {} => {
+            serde_json::to_value(store.prepare_application_message_rowids().await?)
+        }
+        Request::ApplicationThreadSearchPrepare {} => {
+            serde_json::to_value(store.prepare_application_search().await?)
+        }
+        Request::ApplicationLegacyV1Prepare {} => {
+            serde_json::to_value(store.prepare_application_legacy_v1().await?)
+        }
+        Request::ApplicationLegacyV1Read {
+            transaction_id,
+            query,
+        } => Ok(transactions.legacy_v1_read(&transaction_id, query).await?),
+        Request::ApplicationLegacyV1Write {
+            transaction_id,
+            mutation,
+        } => Ok(transactions
+            .legacy_v1_write(&transaction_id, mutation)
+            .await?),
+        Request::ApplicationMaintenancePrepare {} => {
+            serde_json::to_value(store.prepare_application_maintenance().await?)
+        }
+        Request::ApplicationMaintenanceRead {
+            transaction_id,
+            query,
+        } => Ok(transactions
+            .maintenance_read(&transaction_id, query)
+            .await?),
+        Request::ApplicationMaintenanceWrite {
+            transaction_id,
+            mutation,
+        } => Ok(transactions
+            .maintenance_write(&transaction_id, mutation)
+            .await?),
+        Request::ApplicationThreadFindRead {
+            transaction_id,
+            query,
+        } => Ok(transactions.thread_find(&transaction_id, query).await?),
+        Request::ApplicationProjectionsControl {
+            transaction_id,
+            query,
+        } => Ok(transactions
+            .projections_control(&transaction_id, query)
+            .await?),
         Request::ApplicationSchema {} => serde_json::to_value(transactions.schema().await?),
         Request::ApplicationInit { schema } => {
             Ok(json!({"initialized": transactions.initialize(schema).await?}))
@@ -661,18 +912,141 @@ async fn evaluate(
         Request::ApplicationViewedFilesPrepare {} => {
             serde_json::to_value(store.prepare_application_viewed_files().await?)
         }
-        Request::ApplicationGuideGet { transaction_id, key } => {
-            serde_json::to_value(transactions.guide_get(&transaction_id, key).await?)
+        Request::ApplicationAuthPrepare {} => {
+            serde_json::to_value(store.prepare_application_auth().await?)
         }
-        Request::ApplicationGuidePut { transaction_id, key, guide_json } => {
-            transactions.guide_put(&transaction_id, key, guide_json).await?;
+        Request::ApplicationScheduledPrepare {} => {
+            serde_json::to_value(store.prepare_application_scheduled().await?)
+        }
+        Request::ApplicationProjectionReadsPrepare {} => {
+            serde_json::to_value(store.prepare_application_projection_reads().await?)
+        }
+        Request::ApplicationAuxiliaryPrepare {} => {
+            serde_json::to_value(store.prepare_application_auxiliary().await?)
+        }
+        Request::ApplicationAuxiliaryRead {
+            transaction_id,
+            query,
+        } => Ok(transactions.auxiliary_read(&transaction_id, query).await?),
+        Request::ApplicationProjectionsHistory {
+            transaction_id,
+            query,
+        } => Ok(transactions
+            .projections_history(&transaction_id, query)
+            .await?),
+        Request::ApplicationProjectionsLookup {
+            transaction_id,
+            query,
+        } => Ok(transactions
+            .projections_lookup(&transaction_id, query)
+            .await?),
+        Request::ApplicationProjectionsRecords {
+            transaction_id,
+            query,
+        } => serde_json::to_value(
+            transactions
+                .projection_records(&transaction_id, query)
+                .await?,
+        ),
+        Request::ApplicationScheduledRead {
+            transaction_id,
+            query,
+        } => Ok(transactions.scheduled_read(&transaction_id, query).await?),
+        Request::ApplicationScheduledWrite {
+            transaction_id,
+            mutation,
+        } => Ok(transactions
+            .scheduled_write(&transaction_id, mutation)
+            .await?),
+        Request::ApplicationAuthRead {
+            transaction_id,
+            request,
+        } => Ok(transactions.auth_read(&transaction_id, request).await?),
+        Request::ApplicationAuthWrite {
+            transaction_id,
+            request,
+        } => Ok(transactions.auth_write(&transaction_id, request).await?),
+        Request::ApplicationPeersPrepare {} => {
+            serde_json::to_value(store.prepare_application_peers().await?)
+        }
+        Request::ApplicationPeersRead {
+            transaction_id,
+            request,
+        } => {
+            if request.is_write() {
+                return Err(Error::Invalid(
+                    "write operation requires the peer writer route".into(),
+                ));
+            }
+            Ok(transactions.peers(&transaction_id, request).await?)
+        }
+        Request::ApplicationPeersWrite {
+            transaction_id,
+            request,
+        } => {
+            if !request.is_write() {
+                return Err(Error::Invalid(
+                    "read operation requires the peer reader route".into(),
+                ));
+            }
+            Ok(transactions.peers(&transaction_id, request).await?)
+        }
+        Request::ApplicationRuntimeStatePrepare {} => {
+            serde_json::to_value(store.prepare_application_runtime_state().await?)
+        }
+        Request::ApplicationRuntimeStateRead {
+            transaction_id,
+            request,
+        } => {
+            if request.is_write() {
+                return Err(Error::Invalid(
+                    "write operation requires the runtime writer route".into(),
+                ));
+            }
+            Ok(transactions.runtime_state(&transaction_id, request).await?)
+        }
+        Request::ApplicationRuntimeStateWrite {
+            transaction_id,
+            request,
+        } => {
+            if !request.is_write() {
+                return Err(Error::Invalid(
+                    "read operation requires the runtime reader route".into(),
+                ));
+            }
+            Ok(transactions.runtime_state(&transaction_id, request).await?)
+        }
+        Request::ApplicationGuideGet {
+            transaction_id,
+            key,
+        } => serde_json::to_value(transactions.guide_get(&transaction_id, key).await?),
+        Request::ApplicationGuidePut {
+            transaction_id,
+            key,
+            guide_json,
+        } => {
+            transactions
+                .guide_put(&transaction_id, key, guide_json)
+                .await?;
             Ok(json!({"written":true}))
         }
-        Request::ApplicationViewedFilesList { transaction_id, scope } => {
-            serde_json::to_value(transactions.viewed_files_list(&transaction_id, scope).await?)
-        }
-        Request::ApplicationViewedFilesSet { transaction_id, scope, files, viewed_at } => {
-            transactions.viewed_files_set(&transaction_id, scope, files, viewed_at).await?;
+        Request::ApplicationViewedFilesList {
+            transaction_id,
+            scope,
+        } => serde_json::to_value(
+            transactions
+                .viewed_files_list(&transaction_id, scope)
+                .await?,
+        ),
+        Request::ApplicationViewedFilesSet {
+            transaction_id,
+            scope,
+            files,
+            viewed_at,
+        } => {
+            transactions
+                .viewed_files_set(&transaction_id, scope, files, viewed_at)
+                .await?;
             Ok(json!({"written":true}))
         }
         Request::ApplicationProjectionsPrepare {} => {
@@ -1093,14 +1467,50 @@ fn error_response(error: &Error) -> Value {
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let store = match args.as_slice() {
-        [mode, path] if mode == "initialize-local" => Store::initialize_local(path).await?,
-        [mode, path] if mode == "local" => Store::open_local(path).await?,
+    if let [mode, path] = args.as_slice() {
+        if mode == "owner-lock" {
+            return t3_code_ls_storage::application_server_ownership::run(Path::new(path))
+                .map_err(Into::into);
+        }
+    }
+    let opened = match args.as_slice() {
+        [mode, path] if mode == "initialize-local" => Store::initialize_local(path).await,
+        [mode, path] if mode == "local" => Store::open_local(path).await,
+        [mode, path] if mode == "read-only-local" => Store::open_read_only(path).await,
+        [mode, path] if mode == "exclusive-local" => Store::open_exclusive(path).await,
         _ => {
             return Err(Error::Invalid(
-                "usage: t3-code-ls-db initialize-local PATH | local PATH".into(),
+                "usage: t3-code-ls-db initialize-local PATH | local PATH | read-only-local PATH | exclusive-local PATH | owner-lock PATH".into(),
             )
             .into());
+        }
+    };
+    let store = match opened {
+        Ok(store) => store,
+        Err(error) => {
+            // Never emit an unsolicited response. A failed open cannot have
+            // executed the caller's request, and a proven lock collision must
+            // remain writer_busy rather than an uncertain transport exit.
+            let mut frame = Vec::new();
+            let count = io::stdin()
+                .lock()
+                .take((MAX_BATCH_BYTES + 1) as u64)
+                .read_until(b'\n', &mut frame)?;
+            if count != 0 {
+                let response = if count > MAX_BATCH_BYTES {
+                    error_response(&Error::Invalid("frame exceeds 16 MiB".into()))
+                } else {
+                    match decode_frame(&frame) {
+                        Ok(_) => error_response(&error),
+                        Err(error) => error_response(&error),
+                    }
+                };
+                let mut output = io::stdout().lock();
+                serde_json::to_writer(&mut output, &response)?;
+                writeln!(output)?;
+                output.flush()?;
+            }
+            return Ok(());
         }
     };
     let planner = std::env::var_os("T3_CODE_LS_PROJECT_STORE_EXECUTABLE").map(PathBuf::from);
@@ -1128,6 +1538,19 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             return Err(Error::Invalid("frame exceeds 16 MiB".into()).into());
         }
         let response = match decode_frame(&frame) {
+            Ok(Request::Shutdown {}) => {
+                // Abort any leftover uncommitted transactions, then drop the
+                // database handles before acknowledging a clean shutdown.
+                drop(transactions);
+                let response = match store.shutdown().await {
+                    Ok(()) => json!({"ok": true, "result": null}),
+                    Err(error) => error_response(&error),
+                };
+                serde_json::to_writer(&mut output, &response)?;
+                writeln!(output)?;
+                output.flush()?;
+                return Ok(());
+            }
             Ok(request) => {
                 match evaluate(&store, &mut transactions, planner.as_deref(), request).await {
                     Ok(result) => json!({"ok": true, "result": result}),

@@ -37,7 +37,9 @@ const fault = {
 const schema = {
   version: 1,
   tables: ["accounts", "savepoint_accounts"].map((name) => ({
-    name, columns: ["id", "payload"], primary_key: ["id"],
+    name,
+    columns: ["id", "payload"],
+    primary_key: ["id"],
   })),
 };
 const row = (id, payload = {}) => ({ id, payload });
@@ -57,11 +59,12 @@ function failure(effect, tag, reason) {
 
 function instrument(database) {
   return NativeDatabase.NativeDatabase.of({
-    request: (input, response) => Effect.suspend(() => {
-      requests.push(input.operation);
-      frames.push(input);
-      return database.request(input, response);
-    }),
+    request: (input, response) =>
+      Effect.suspend(() => {
+        requests.push(input.operation);
+        frames.push(input);
+        return database.request(input, response);
+      }),
     withSession: (use) =>
       database.withSession((session) =>
         use({
@@ -100,13 +103,17 @@ function instrument(database) {
               if (input.operation === fault.dropOperation) {
                 fault.dropOperation = undefined;
                 yield* session.discard;
-                return yield* new NativeDatabase.NativeDatabaseOutcomeUnknown({ stage: "response" });
+                return yield* new NativeDatabase.NativeDatabaseOutcomeUnknown({
+                  stage: "response",
+                });
               }
               if (input.operation === "application_commit" && fault.dropCommit) {
                 fault.dropCommit = false;
                 // The actual native commit completed; discard only its acknowledgement.
                 yield* session.discard;
-                return yield* new NativeDatabase.NativeDatabaseOutcomeUnknown({ stage: "response" });
+                return yield* new NativeDatabase.NativeDatabaseOutcomeUnknown({
+                  stage: "response",
+                });
               }
               return result;
             }),
@@ -119,41 +126,55 @@ function instrument(database) {
 function savepointHistory(driver) {
   return Effect.gen(function* () {
     const failed = new Error("nested-history-failure");
-    yield* driver.transaction(Effect.gen(function* () {
-      yield* driver.put("before", { value: 1 });
-      yield* driver.put("retained", null);
-      const result = yield* driver.transaction(
-        driver.put("released", "nested-success").pipe(Effect.as(42)),
-      );
-      Assert.equal(result, 42);
-      const rejected = yield* driver.transaction(Effect.gen(function* () {
-        yield* driver.put("before", { value: 2 });
-        yield* driver.delete("retained");
-        yield* driver.put("removed", "nested-failure");
-        yield* driver.transaction(driver.put("released-grandchild", "still-in-parent"));
-        return yield* Effect.fail(failed);
-      })).pipe(Effect.catch(Effect.succeed));
-      Assert.equal(rejected, failed);
-      Assert.deepEqual(yield* driver.get("before"), row("before", { value: 1 }));
-      Assert.deepEqual(yield* driver.get("retained"), row("retained", null));
-      Assert.equal(yield* driver.get("released-grandchild"), null);
-      const defect = yield* driver.transaction(
-        driver.put("defective", "discarded").pipe(Effect.andThen(Effect.die("nested-history-defect"))),
-      ).pipe(Effect.exit);
-      Assert.ok(Exit.isFailure(defect));
-      Assert.equal(yield* driver.get("defective"), null);
-      const cancelled = yield* driver.transaction(
-        driver.put("cancelled", "discarded").pipe(Effect.andThen(Effect.interrupt)),
-      ).pipe(Effect.exit, Effect.uninterruptible);
-      Assert.ok(Exit.isFailure(cancelled));
-      Assert.equal(yield* driver.get("cancelled"), null);
-      yield* driver.transaction(driver.put("sibling", [1, "after-failure"]));
-    }));
-    const outerFailed = yield* driver.transaction(Effect.gen(function* () {
-      yield* driver.put("outer-rolled-back", "discarded");
-      yield* driver.transaction(driver.put("released-then-outer-failed", "discarded"));
-      return yield* Effect.fail(failed);
-    })).pipe(Effect.catch(Effect.succeed));
+    yield* driver.transaction(
+      Effect.gen(function* () {
+        yield* driver.put("before", { value: 1 });
+        yield* driver.put("retained", null);
+        const result = yield* driver.transaction(
+          driver.put("released", "nested-success").pipe(Effect.as(42)),
+        );
+        Assert.equal(result, 42);
+        const rejected = yield* driver
+          .transaction(
+            Effect.gen(function* () {
+              yield* driver.put("before", { value: 2 });
+              yield* driver.delete("retained");
+              yield* driver.put("removed", "nested-failure");
+              yield* driver.transaction(driver.put("released-grandchild", "still-in-parent"));
+              return yield* Effect.fail(failed);
+            }),
+          )
+          .pipe(Effect.catch(Effect.succeed));
+        Assert.equal(rejected, failed);
+        Assert.deepEqual(yield* driver.get("before"), row("before", { value: 1 }));
+        Assert.deepEqual(yield* driver.get("retained"), row("retained", null));
+        Assert.equal(yield* driver.get("released-grandchild"), null);
+        const defect = yield* driver
+          .transaction(
+            driver
+              .put("defective", "discarded")
+              .pipe(Effect.andThen(Effect.die("nested-history-defect"))),
+          )
+          .pipe(Effect.exit);
+        Assert.ok(Exit.isFailure(defect));
+        Assert.equal(yield* driver.get("defective"), null);
+        const cancelled = yield* driver
+          .transaction(driver.put("cancelled", "discarded").pipe(Effect.andThen(Effect.interrupt)))
+          .pipe(Effect.exit, Effect.uninterruptible);
+        Assert.ok(Exit.isFailure(cancelled));
+        Assert.equal(yield* driver.get("cancelled"), null);
+        yield* driver.transaction(driver.put("sibling", [1, "after-failure"]));
+      }),
+    );
+    const outerFailed = yield* driver
+      .transaction(
+        Effect.gen(function* () {
+          yield* driver.put("outer-rolled-back", "discarded");
+          yield* driver.transaction(driver.put("released-then-outer-failed", "discarded"));
+          return yield* Effect.fail(failed);
+        }),
+      )
+      .pipe(Effect.catch(Effect.succeed));
     Assert.equal(outerFailed, failed);
     Assert.equal(yield* driver.get("released-then-outer-failed"), null);
     return yield* driver.list;
@@ -161,22 +182,30 @@ function savepointHistory(driver) {
 }
 
 function sqliteSavepointHistory() {
-  return Effect.runPromise(Effect.gen(function* () {
-  const sql = yield* SqlClient.SqlClient;
-  yield* sql`CREATE TABLE savepoint_accounts(id TEXT PRIMARY KEY, payload TEXT NOT NULL)`;
-  return yield* savepointHistory({
-    transaction: sql.withTransaction,
-    put: (id, payload) => sql`INSERT INTO savepoint_accounts(id,payload) VALUES (${id},${JSON.stringify(payload)})
+  return Effect.runPromise(
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`CREATE TABLE savepoint_accounts(id TEXT PRIMARY KEY, payload TEXT NOT NULL)`;
+      return yield* savepointHistory({
+        transaction: sql.withTransaction,
+        put: (
+          id,
+          payload,
+        ) => sql`INSERT INTO savepoint_accounts(id,payload) VALUES (${id},${JSON.stringify(payload)})
       ON CONFLICT(id) DO UPDATE SET payload=excluded.payload`,
-    delete: (id) => sql`DELETE FROM savepoint_accounts WHERE id=${id}`,
-    get: (id) => sql`SELECT id,payload FROM savepoint_accounts WHERE id=${id}`.pipe(
-      Effect.map((rows) => rows.length === 0 ? null : row(rows[0].id, JSON.parse(rows[0].payload))),
-    ),
-    list: sql`SELECT id,payload FROM savepoint_accounts ORDER BY id`.pipe(
-      Effect.map((rows) => rows.map((entry) => row(entry.id, JSON.parse(entry.payload)))),
-    ),
-  });
-  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })), Effect.scoped));
+        delete: (id) => sql`DELETE FROM savepoint_accounts WHERE id=${id}`,
+        get: (id) =>
+          sql`SELECT id,payload FROM savepoint_accounts WHERE id=${id}`.pipe(
+            Effect.map((rows) =>
+              rows.length === 0 ? null : row(rows[0].id, JSON.parse(rows[0].payload)),
+            ),
+          ),
+        list: sql`SELECT id,payload FROM savepoint_accounts ORDER BY id`.pipe(
+          Effect.map((rows) => rows.map((entry) => row(entry.id, JSON.parse(entry.payload)))),
+        ),
+      });
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })), Effect.scoped),
+  );
 }
 
 async function run(body) {
@@ -195,159 +224,265 @@ async function run(body) {
 function afterCommitHistory(client, secondClient) {
   return Effect.gen(function* () {
     const published = [];
-    const publish = (name) => Effect.sync(() => { published.push(name); });
+    const publish = (name) =>
+      Effect.sync(() => {
+        published.push(name);
+      });
     const durable = row("hook-durable", { committed: true });
-    yield* client.withTransaction(Effect.gen(function* () {
-      yield* client.put("accounts", [durable.id], durable);
-      yield* client.afterCommit(Effect.gen(function* () {
-        Assert.equal(yield* client.isInTransaction, false);
-        Assert.deepEqual(yield* client.get("accounts", [durable.id]).pipe(Effect.orDie), durable);
-        yield* publish("durable");
-      }));
-      Assert.deepEqual(published, []);
-    }));
+    yield* client.withTransaction(
+      Effect.gen(function* () {
+        yield* client.put("accounts", [durable.id], durable);
+        yield* client.afterCommit(
+          Effect.gen(function* () {
+            Assert.equal(yield* client.isInTransaction, false);
+            Assert.deepEqual(
+              yield* client.get("accounts", [durable.id]).pipe(Effect.orDie),
+              durable,
+            );
+            yield* publish("durable");
+          }),
+        );
+        Assert.deepEqual(published, []);
+      }),
+    );
     Assert.deepEqual(published, ["durable"]);
-    checked("Post-commit callbacks run after the root acknowledgement and session release, with a real durable read and no inherited transaction");
+    checked(
+      "Post-commit callbacks run after the root acknowledgement and session release, with a real durable read and no inherited transaction",
+    );
 
-    yield* client.withTransaction(Effect.gen(function* () {
-      yield* client.afterCommit(publish("parent-before"));
-      const rejected = yield* client.withTransaction(Effect.gen(function* () {
-        yield* client.afterCommit(publish("discarded-child"));
-        yield* client.withTransaction(client.afterCommit(publish("discarded-grandchild")));
-        return yield* Effect.fail("discard-hook-scope");
-      })).pipe(Effect.catch(Effect.succeed));
-      Assert.equal(rejected, "discard-hook-scope");
-      const defect = yield* client.withTransaction(
-        client.afterCommit(publish("discarded-defect")).pipe(Effect.andThen(Effect.die("hook-defect"))),
-      ).pipe(Effect.exit);
-      Assert.ok(Exit.isFailure(defect));
-      const interrupted = yield* client.withTransaction(
-        client.afterCommit(publish("discarded-interrupted")).pipe(Effect.andThen(Effect.interrupt)),
-      ).pipe(Effect.exit, Effect.uninterruptible);
-      Assert.ok(Exit.isFailure(interrupted));
-      yield* client.withTransaction(client.afterCommit(publish("released-child")));
-      yield* client.afterCommit(publish("parent-after"));
-      Assert.deepEqual(published, ["durable"]);
-    }));
+    yield* client.withTransaction(
+      Effect.gen(function* () {
+        yield* client.afterCommit(publish("parent-before"));
+        const rejected = yield* client
+          .withTransaction(
+            Effect.gen(function* () {
+              yield* client.afterCommit(publish("discarded-child"));
+              yield* client.withTransaction(client.afterCommit(publish("discarded-grandchild")));
+              return yield* Effect.fail("discard-hook-scope");
+            }),
+          )
+          .pipe(Effect.catch(Effect.succeed));
+        Assert.equal(rejected, "discard-hook-scope");
+        const defect = yield* client
+          .withTransaction(
+            client
+              .afterCommit(publish("discarded-defect"))
+              .pipe(Effect.andThen(Effect.die("hook-defect"))),
+          )
+          .pipe(Effect.exit);
+        Assert.ok(Exit.isFailure(defect));
+        const interrupted = yield* client
+          .withTransaction(
+            client
+              .afterCommit(publish("discarded-interrupted"))
+              .pipe(Effect.andThen(Effect.interrupt)),
+          )
+          .pipe(Effect.exit, Effect.uninterruptible);
+        Assert.ok(Exit.isFailure(interrupted));
+        yield* client.withTransaction(client.afterCommit(publish("released-child")));
+        yield* client.afterCommit(publish("parent-after"));
+        Assert.deepEqual(published, ["durable"]);
+      }),
+    );
     Assert.deepEqual(published, ["durable", "parent-before", "released-child", "parent-after"]);
-    checked("Successful savepoints preserve callback order; rolled-back children discard their own released grandchildren, defects and interrupted callbacks");
+    checked(
+      "Successful savepoints preserve callback order; rolled-back children discard their own released grandchildren, defects and interrupted callbacks",
+    );
 
     for (const [name, end] of [
       ["failure", Effect.fail("hook-outer-failure")],
       ["defect", Effect.die("hook-outer-defect")],
     ]) {
-      const result = yield* client.withTransaction(Effect.gen(function* () {
-        yield* client.put("accounts", [`hook-${name}`], row(`hook-${name}`));
-        yield* client.afterCommit(publish(`discarded-${name}-parent`));
-        yield* client.withTransaction(client.afterCommit(publish(`discarded-${name}-released-child`)));
-        return yield* end;
-      })).pipe(Effect.exit);
+      const result = yield* client
+        .withTransaction(
+          Effect.gen(function* () {
+            yield* client.put("accounts", [`hook-${name}`], row(`hook-${name}`));
+            yield* client.afterCommit(publish(`discarded-${name}-parent`));
+            yield* client.withTransaction(
+              client.afterCommit(publish(`discarded-${name}-released-child`)),
+            );
+            return yield* end;
+          }),
+        )
+        .pipe(Effect.exit);
       Assert.ok(Exit.isFailure(result));
       Assert.equal(yield* client.get("accounts", [`hook-${name}`]), null);
     }
     const interruptedReady = yield* Deferred.make();
-    const interrupted = yield* client.withTransaction(Effect.gen(function* () {
-      yield* client.put("accounts", ["hook-interrupted"], row("hook-interrupted"));
-      yield* client.afterCommit(publish("discarded-interrupted-parent"));
-      yield* client.withTransaction(client.afterCommit(publish("discarded-interrupted-released-child")));
-      yield* Deferred.succeed(interruptedReady, undefined);
-      yield* Effect.never;
-    })).pipe(Effect.forkChild);
+    const interrupted = yield* client
+      .withTransaction(
+        Effect.gen(function* () {
+          yield* client.put("accounts", ["hook-interrupted"], row("hook-interrupted"));
+          yield* client.afterCommit(publish("discarded-interrupted-parent"));
+          yield* client.withTransaction(
+            client.afterCommit(publish("discarded-interrupted-released-child")),
+          );
+          yield* Deferred.succeed(interruptedReady, undefined);
+          yield* Effect.never;
+        }),
+      )
+      .pipe(Effect.forkChild);
     yield* Deferred.await(interruptedReady);
     yield* Fiber.interrupt(interrupted);
     Assert.equal(yield* client.get("accounts", ["hook-interrupted"]), null);
     Assert.deepEqual(published, ["durable", "parent-before", "released-child", "parent-after"]);
-    checked("Outer failure, defect and external interruption discard parent and released-child callbacks together with their writes");
+    checked(
+      "Outer failure, defect and external interruption discard parent and released-child callbacks together with their writes",
+    );
 
     const beforeMissing = requests.length;
-    yield* failure(client.afterCommit(publish("missing")), "RedbTransactionError", "missing-transaction");
+    yield* failure(
+      client.afterCommit(publish("missing")),
+      "RedbTransactionError",
+      "missing-transaction",
+    );
     Assert.equal(requests.length, beforeMissing);
     let closedRoot;
     let closedChild;
-    yield* client.withTransaction(Effect.gen(function* () {
-      closedRoot = yield* Effect.context();
-      const before = requests.length;
-      yield* failure(secondClient.afterCommit(publish("different-client")), "RedbTransactionError", "different-client");
-      const child = yield* failure(
-        client.afterCommit(publish("different-fiber")), "RedbTransactionError", "different-fiber",
-      ).pipe(Effect.forkChild);
-      yield* Fiber.join(child);
-      Assert.equal(requests.length, before);
-      closedChild = yield* client.withTransaction(Effect.gen(function* () {
+    yield* client.withTransaction(
+      Effect.gen(function* () {
+        closedRoot = yield* Effect.context();
+        const before = requests.length;
         yield* failure(
-          client.afterCommit(publish("different-scope")).pipe(Effect.provide(closedRoot)),
-          "RedbTransactionError", "different-scope",
+          secondClient.afterCommit(publish("different-client")),
+          "RedbTransactionError",
+          "different-client",
         );
-        return yield* Effect.context();
-      }));
-      yield* failure(
-        client.afterCommit(publish("closed-child")).pipe(Effect.provide(closedChild)),
-        "RedbTransactionError", "closed-transaction",
-      );
-    }));
+        const child = yield* failure(
+          client.afterCommit(publish("different-fiber")),
+          "RedbTransactionError",
+          "different-fiber",
+        ).pipe(Effect.forkChild);
+        yield* Fiber.join(child);
+        Assert.equal(requests.length, before);
+        closedChild = yield* client.withTransaction(
+          Effect.gen(function* () {
+            yield* failure(
+              client.afterCommit(publish("different-scope")).pipe(Effect.provide(closedRoot)),
+              "RedbTransactionError",
+              "different-scope",
+            );
+            return yield* Effect.context();
+          }),
+        );
+        yield* failure(
+          client.afterCommit(publish("closed-child")).pipe(Effect.provide(closedChild)),
+          "RedbTransactionError",
+          "closed-transaction",
+        );
+      }),
+    );
     const afterRoot = requests.length;
     yield* failure(
       client.afterCommit(publish("closed-root")).pipe(Effect.provide(closedRoot)),
-      "RedbTransactionError", "closed-transaction",
+      "RedbTransactionError",
+      "closed-transaction",
     );
     Assert.equal(requests.length, afterRoot);
     Assert.deepEqual(published, ["durable", "parent-before", "released-child", "parent-after"]);
-    checked("Callback registration rejects missing ownership, different clients or fibers, displaced parent scopes and closed root or savepoint contexts before any request");
+    checked(
+      "Callback registration rejects missing ownership, different clients or fibers, displaced parent scopes and closed root or savepoint contexts before any request",
+    );
 
-    yield* client.withTransaction(client.afterCommit(Effect.gen(function* () {
-      const before = requests.length;
-      yield* failure(
-        client.put("accounts", ["hook-reentry"], row("hook-reentry")),
-        "RedbTransactionError", "publication-write-reentry",
-      );
-      Assert.equal(requests.length, before);
-      Assert.deepEqual(yield* client.get("accounts", [durable.id]).pipe(Effect.orDie), durable);
-    })));
-    Assert.equal(yield* client.get("accounts", ["hook-reentry"]), null);
-    checked("A callback can read committed rows and rejects write reentry before acquiring its own publication lane");
-
-    let nestedPublication = false;
-    yield* client.withTransaction(client.afterCommit(
-      secondClient.withTransaction(Effect.gen(function* () {
-        yield* secondClient.put("accounts", ["hook-other-client"], row("hook-other-client"));
-        yield* secondClient.afterCommit(Effect.gen(function* () {
+    yield* client.withTransaction(
+      client.afterCommit(
+        Effect.gen(function* () {
           const before = requests.length;
           yield* failure(
-            client.put("accounts", ["hook-publication-cycle"], row("hook-publication-cycle")),
-            "RedbTransactionError", "publication-write-reentry",
+            client.put("accounts", ["hook-reentry"], row("hook-reentry")),
+            "RedbTransactionError",
+            "publication-write-reentry",
           );
           Assert.equal(requests.length, before);
-          Assert.deepEqual(yield* client.get("accounts", ["hook-other-client"]).pipe(Effect.orDie), row("hook-other-client"));
-          nestedPublication = true;
-        }));
-      })).pipe(Effect.orDie),
-    ));
+          Assert.deepEqual(yield* client.get("accounts", [durable.id]).pipe(Effect.orDie), durable);
+        }),
+      ),
+    );
+    Assert.equal(yield* client.get("accounts", ["hook-reentry"]), null);
+    checked(
+      "A callback can read committed rows and rejects write reentry before acquiring its own publication lane",
+    );
+
+    let nestedPublication = false;
+    yield* client.withTransaction(
+      client.afterCommit(
+        secondClient
+          .withTransaction(
+            Effect.gen(function* () {
+              yield* secondClient.put("accounts", ["hook-other-client"], row("hook-other-client"));
+              yield* secondClient.afterCommit(
+                Effect.gen(function* () {
+                  const before = requests.length;
+                  yield* failure(
+                    client.put(
+                      "accounts",
+                      ["hook-publication-cycle"],
+                      row("hook-publication-cycle"),
+                    ),
+                    "RedbTransactionError",
+                    "publication-write-reentry",
+                  );
+                  Assert.equal(requests.length, before);
+                  Assert.deepEqual(
+                    yield* client.get("accounts", ["hook-other-client"]).pipe(Effect.orDie),
+                    row("hook-other-client"),
+                  );
+                  nestedPublication = true;
+                }),
+              );
+            }),
+          )
+          .pipe(Effect.orDie),
+      ),
+    );
     Assert.equal(nestedPublication, true);
     Assert.equal(yield* client.get("accounts", ["hook-publication-cycle"]), null);
-    Assert.deepEqual(yield* client.get("accounts", ["hook-other-client"]), row("hook-other-client"));
-    checked("Cross-client publication may commit another client's write, but its nested callback retains ancestor ownership and rejects a cycle back to the first writer");
+    Assert.deepEqual(
+      yield* client.get("accounts", ["hook-other-client"]),
+      row("hook-other-client"),
+    );
+    checked(
+      "Cross-client publication may commit another client's write, but its nested callback retains ancestor ownership and rejects a cycle back to the first writer",
+    );
 
     const publicationOrder = [];
     const firstPublishing = yield* Deferred.make();
     const releaseFirst = yield* Deferred.make();
     const secondStarted = yield* Deferred.make();
     const secondCompleted = yield* Deferred.make();
-    const first = yield* client.withTransaction(Effect.gen(function* () {
-      yield* client.put("accounts", ["hook-first"], row("hook-first"));
-      yield* client.afterCommit(Effect.gen(function* () {
-        publicationOrder.push("first-start");
-        yield* Deferred.succeed(firstPublishing, undefined);
-        yield* Deferred.await(releaseFirst);
-        Assert.deepEqual(yield* client.get("accounts", ["hook-first"]).pipe(Effect.orDie), row("hook-first"));
-        publicationOrder.push("first-end");
-      }));
-    })).pipe(Effect.forkChild);
+    const first = yield* client
+      .withTransaction(
+        Effect.gen(function* () {
+          yield* client.put("accounts", ["hook-first"], row("hook-first"));
+          yield* client.afterCommit(
+            Effect.gen(function* () {
+              publicationOrder.push("first-start");
+              yield* Deferred.succeed(firstPublishing, undefined);
+              yield* Deferred.await(releaseFirst);
+              Assert.deepEqual(
+                yield* client.get("accounts", ["hook-first"]).pipe(Effect.orDie),
+                row("hook-first"),
+              );
+              publicationOrder.push("first-end");
+            }),
+          );
+        }),
+      )
+      .pipe(Effect.forkChild);
     yield* Deferred.await(firstPublishing);
     const second = yield* Deferred.succeed(secondStarted, undefined).pipe(
-      Effect.andThen(client.withTransaction(Effect.gen(function* () {
-        yield* client.put("accounts", ["hook-second"], row("hook-second"));
-        yield* client.afterCommit(Effect.sync(() => { publicationOrder.push("second"); }));
-      }))),
+      Effect.andThen(
+        client.withTransaction(
+          Effect.gen(function* () {
+            yield* client.put("accounts", ["hook-second"], row("hook-second"));
+            yield* client.afterCommit(
+              Effect.sync(() => {
+                publicationOrder.push("second");
+              }),
+            );
+          }),
+        ),
+      ),
       Effect.andThen(Deferred.succeed(secondCompleted, undefined)),
       Effect.forkChild,
     );
@@ -361,7 +496,9 @@ function afterCommitHistory(client, secondClient) {
     yield* Fiber.join(second);
     Assert.deepEqual(publicationOrder, ["first-start", "first-end", "second"]);
     Assert.deepEqual(yield* client.get("accounts", ["hook-second"]), row("hook-second"));
-    checked("A later writer waits for prior publication, while the publishing callback can still read durably without a session or publication-lane deadlock");
+    checked(
+      "A later writer waits for prior publication, while the publishing callback can still read durably without a session or publication-lane deadlock",
+    );
   });
 }
 
@@ -380,9 +517,16 @@ try {
       Assert.deepEqual(yield* client.initialize(schema), { initialized: true });
       yield* client.withTransaction(
         Effect.gen(function* () {
-          yield* client.put("accounts", ["first"], row("first", { nullable: null, nested: [1, "x"] }));
+          yield* client.put(
+            "accounts",
+            ["first"],
+            row("first", { nullable: null, nested: [1, "x"] }),
+          );
           yield* client.put("accounts", ["second"], row("second", "value"));
-          Assert.deepEqual(yield* client.get("accounts", ["first"]), row("first", { nullable: null, nested: [1, "x"] }));
+          Assert.deepEqual(
+            yield* client.get("accounts", ["first"]),
+            row("first", { nullable: null, nested: [1, "x"] }),
+          );
         }),
       );
       Assert.deepEqual(yield* client.get("accounts", ["second"]), row("second", "value"));
@@ -391,52 +535,106 @@ try {
       const original = new Error("rollback-body-failure");
       const rejected = yield* client
         .withTransaction(
-          client.put("accounts", ["rolled-back"], row("rolled-back")).pipe(Effect.andThen(Effect.fail(original))),
+          client
+            .put("accounts", ["rolled-back"], row("rolled-back"))
+            .pipe(Effect.andThen(Effect.fail(original))),
         )
         .pipe(Effect.catch(Effect.succeed));
       Assert.equal(rejected, original);
       Assert.equal(yield* client.get("accounts", ["rolled-back"]), null);
-      const defect = yield* client.withTransaction(
-        client.put("accounts", ["defect"], row("defect")).pipe(Effect.andThen(Effect.die("fixture-defect"))),
-      ).pipe(Effect.exit);
+      const defect = yield* client
+        .withTransaction(
+          client
+            .put("accounts", ["defect"], row("defect"))
+            .pipe(Effect.andThen(Effect.die("fixture-defect"))),
+        )
+        .pipe(Effect.exit);
       Assert.ok(Exit.isFailure(defect));
       Assert.equal(yield* client.get("accounts", ["defect"]), null);
-      checked("Failed and defective bodies roll back their staged rows and preserve the original failure");
+      checked(
+        "Failed and defective bodies roll back their staged rows and preserve the original failure",
+      );
 
       const nativeHistory = yield* savepointHistory({
         transaction: client.withTransaction,
         put: (id, payload) => client.put("savepoint_accounts", [id], row(id, payload)),
         delete: (id) => client.delete("savepoint_accounts", [id]),
         get: (id) => client.get("savepoint_accounts", [id]),
-        list: client.scan("savepoint_accounts", { limit: 100 }).pipe(
-          Effect.map((page) => page.rows.map((entry) => entry.row).sort((a, b) => a.id.localeCompare(b.id))),
-        ),
+        list: client
+          .scan("savepoint_accounts", { limit: 100 })
+          .pipe(
+            Effect.map((page) =>
+              page.rows.map((entry) => entry.row).sort((a, b) => a.id.localeCompare(b.id)),
+            ),
+          ),
       });
       Assert.deepEqual(nativeHistory, sqliteHistory);
-      Assert.deepEqual(nativeHistory.map((entry) => entry.id), ["before", "released", "retained", "sibling"]);
-      checked("Real SQLite and redb agree on nested success, update/delete rollback, defects, recovered cancellation, siblings and outer rollback of released grandchildren");
+      Assert.deepEqual(
+        nativeHistory.map((entry) => entry.id),
+        ["before", "released", "retained", "sibling"],
+      );
+      checked(
+        "Real SQLite and redb agree on nested success, update/delete rollback, defects, recovered cancellation, siblings and outer rollback of released grandchildren",
+      );
 
       const beforeNested = requests.length;
-      yield* client.withTransaction(client.withTransaction(client.put("accounts", ["nested-success"], row("nested-success"))));
+      yield* client.withTransaction(
+        client.withTransaction(client.put("accounts", ["nested-success"], row("nested-success"))),
+      );
       Assert.deepEqual(requests.slice(beforeNested), [
-        "application_begin", "application_savepoint", "application_put", "application_release", "application_commit",
+        "application_begin",
+        "application_savepoint",
+        "application_put",
+        "application_release",
+        "application_commit",
       ]);
       checked("Nested success releases its savepoint and only the outer scope commits");
 
-      yield* client.withTransaction(Effect.gen(function* () {
-        yield* client.put("accounts", ["outer-after-row-rejection"], row("outer-after-row-rejection"));
-        yield* failure(client.withTransaction(Effect.gen(function* () {
-          yield* client.put("accounts", ["rejected-scope"], row("rejected-scope"));
-          yield* failure(client.put("accounts", ["wrong-key"], row("different-key")), "NativeDatabaseRejected");
-          yield* failure(client.put("accounts", ["after-caught-row"], row("after-caught-row")), "NativeDatabaseRejected");
-        })), "NativeDatabaseRejected");
-        Assert.equal(yield* client.get("accounts", ["rejected-scope"]), null);
-        yield* client.withTransaction(client.put("accounts", ["sibling-after-row-rejection"], row("sibling-after-row-rejection")));
-      }));
-      Assert.deepEqual(yield* client.get("accounts", ["outer-after-row-rejection"]), row("outer-after-row-rejection"));
-      Assert.deepEqual(yield* client.get("accounts", ["sibling-after-row-rejection"]), row("sibling-after-row-rejection"));
+      yield* client.withTransaction(
+        Effect.gen(function* () {
+          yield* client.put(
+            "accounts",
+            ["outer-after-row-rejection"],
+            row("outer-after-row-rejection"),
+          );
+          yield* failure(
+            client.withTransaction(
+              Effect.gen(function* () {
+                yield* client.put("accounts", ["rejected-scope"], row("rejected-scope"));
+                yield* failure(
+                  client.put("accounts", ["wrong-key"], row("different-key")),
+                  "NativeDatabaseRejected",
+                );
+                yield* failure(
+                  client.put("accounts", ["after-caught-row"], row("after-caught-row")),
+                  "NativeDatabaseRejected",
+                );
+              }),
+            ),
+            "NativeDatabaseRejected",
+          );
+          Assert.equal(yield* client.get("accounts", ["rejected-scope"]), null);
+          yield* client.withTransaction(
+            client.put(
+              "accounts",
+              ["sibling-after-row-rejection"],
+              row("sibling-after-row-rejection"),
+            ),
+          );
+        }),
+      );
+      Assert.deepEqual(
+        yield* client.get("accounts", ["outer-after-row-rejection"]),
+        row("outer-after-row-rejection"),
+      );
+      Assert.deepEqual(
+        yield* client.get("accounts", ["sibling-after-row-rejection"]),
+        row("sibling-after-row-rejection"),
+      );
       Assert.equal(yield* client.get("accounts", ["after-caught-row"]), null);
-      checked("A caught native statement rejection forces its savepoint rollback while the parent and later sibling commit");
+      checked(
+        "A caught native statement rejection forces its savepoint rollback while the parent and later sibling commit",
+      );
 
       yield* client.withTransaction(
         Effect.gen(function* () {
@@ -458,42 +656,72 @@ try {
         }),
       );
       Assert.equal(yield* client.get("accounts", ["child"]), null);
-      checked("Inherited transaction context cannot authorize writes or nested savepoints by a child fiber");
+      checked(
+        "Inherited transaction context cannot authorize writes or nested savepoints by a child fiber",
+      );
 
       const secondClient = yield* RedbClient.make.pipe(
         Effect.provideService(NativeDatabase.NativeDatabase, database),
       );
       yield* afterCommitHistory(client, secondClient);
       yield* client.withTransaction(
-        failure(secondClient.get("accounts", ["first"]), "RedbTransactionError", "different-client").pipe(
-          Effect.andThen(failure(secondClient.withTransaction(Effect.void), "RedbTransactionError", "different-client")),
+        failure(
+          secondClient.get("accounts", ["first"]),
+          "RedbTransactionError",
+          "different-client",
+        ).pipe(
+          Effect.andThen(
+            failure(
+              secondClient.withTransaction(Effect.void),
+              "RedbTransactionError",
+              "different-client",
+            ),
+          ),
         ),
       );
-      checked("A different client cannot reuse the current transaction or create a nested savepoint");
+      checked(
+        "A different client cannot reuse the current transaction or create a nested savepoint",
+      );
 
       const ready = yield* Deferred.make();
       const release = yield* Deferred.make();
       const start = requests.length;
-      const writer = yield* client.withTransaction(
-        client.put("accounts", ["serialized"], row("serialized")).pipe(
-          Effect.andThen(Deferred.succeed(ready, undefined)),
-          Effect.andThen(Deferred.await(release)),
-        ),
-      ).pipe(Effect.forkChild);
+      const writer = yield* client
+        .withTransaction(
+          client
+            .put("accounts", ["serialized"], row("serialized"))
+            .pipe(
+              Effect.andThen(Deferred.succeed(ready, undefined)),
+              Effect.andThen(Deferred.await(release)),
+            ),
+        )
+        .pipe(Effect.forkChild);
       yield* Deferred.await(ready);
-      const other = yield* secondClient.put("accounts", ["serialized-other"], row("serialized-other")).pipe(Effect.forkChild);
-      const plain = yield* database.request({ operation: "snapshot" }, Schema.Unknown).pipe(Effect.forkChild);
+      const other = yield* secondClient
+        .put("accounts", ["serialized-other"], row("serialized-other"))
+        .pipe(Effect.forkChild);
+      const plain = yield* database
+        .request({ operation: "snapshot" }, Schema.Unknown)
+        .pipe(Effect.forkChild);
       yield* Effect.yieldNow;
       yield* Deferred.succeed(release, undefined);
       yield* Fiber.join(writer);
       yield* Fiber.join(other);
       yield* Fiber.join(plain);
-      const transactionRequests = requests.slice(start).filter((operation) => operation !== "snapshot");
+      const transactionRequests = requests
+        .slice(start)
+        .filter((operation) => operation !== "snapshot");
       Assert.deepEqual(transactionRequests, [
-        "application_begin", "application_put", "application_commit",
-        "application_begin", "application_put", "application_commit",
+        "application_begin",
+        "application_put",
+        "application_commit",
+        "application_begin",
+        "application_put",
+        "application_commit",
       ]);
-      checked("Transactions on one connection stay contiguous under concurrent clients and standalone requests");
+      checked(
+        "Transactions on one connection stay contiguous under concurrent clients and standalone requests",
+      );
 
       const beforeLegacy = yield* database.request({ operation: "snapshot" }, Schema.Unknown);
       const legacyCommit = {
@@ -503,81 +731,225 @@ try {
           request_digest: Crypto.createHash("sha256").update("legacy-writer-guard").digest("hex"),
           expected_revision: beforeLegacy.revision,
           events: [],
-          projections: [{ operation: "put", key: "legacy-writer-guard", payload: { accepted: true } }],
+          projections: [
+            { operation: "put", key: "legacy-writer-guard", payload: { accepted: true } },
+          ],
           effects: [],
           result: { accepted: true },
         },
       };
-      yield* database.withSession((session) => Effect.gen(function* () {
-        const transaction_id = "wire:legacy-writer-guard";
-        yield* session.request({ operation: "application_begin", transaction_id, mode: "write" }, Schema.Unknown);
-        yield* session.request({
-          operation: "application_put", transaction_id, table: "accounts",
-          key: ["wire-guard-staged"], row: row("wire-guard-staged"),
-        }, Schema.Unknown);
-        const rejected = yield* failure(session.request(legacyCommit, Schema.Unknown), "NativeDatabaseRejected");
-        Assert.equal(rejected.kind, "writer_busy");
-        Assert.equal(yield* session.request({ operation: "receipt", command_id: legacyCommit.batch.command_id }, Schema.Unknown), null);
-        Assert.deepEqual(yield* session.request({
-          operation: "application_get", transaction_id, table: "accounts", key: ["wire-guard-staged"],
-        }, Schema.Unknown), row("wire-guard-staged"));
-        yield* session.request({ operation: "application_rollback", transaction_id }, Schema.Unknown);
-        const accepted = yield* session.request(legacyCommit, Schema.Unknown);
-        Assert.equal(accepted.replayed, false);
-        Assert.equal(accepted.receipt.command_id, legacyCommit.batch.command_id);
-        Assert.equal(accepted.receipt.revision, beforeLegacy.revision + 1);
-        const after = yield* session.request({ operation: "snapshot" }, Schema.Unknown);
-        Assert.deepEqual(after.projections.find((entry) => entry.key === "legacy-writer-guard"), {
-          key: "legacy-writer-guard", payload: { accepted: true },
-        });
-      }));
+      yield* database.withSession((session) =>
+        Effect.gen(function* () {
+          const transaction_id = "wire:legacy-writer-guard";
+          yield* session.request(
+            { operation: "application_begin", transaction_id, mode: "write" },
+            Schema.Unknown,
+          );
+          yield* session.request(
+            {
+              operation: "application_put",
+              transaction_id,
+              table: "accounts",
+              key: ["wire-guard-staged"],
+              row: row("wire-guard-staged"),
+            },
+            Schema.Unknown,
+          );
+          const rejected = yield* failure(
+            session.request(legacyCommit, Schema.Unknown),
+            "NativeDatabaseRejected",
+          );
+          Assert.equal(rejected.kind, "writer_busy");
+          Assert.equal(
+            yield* session.request(
+              { operation: "receipt", command_id: legacyCommit.batch.command_id },
+              Schema.Unknown,
+            ),
+            null,
+          );
+          Assert.deepEqual(
+            yield* session.request(
+              {
+                operation: "application_get",
+                transaction_id,
+                table: "accounts",
+                key: ["wire-guard-staged"],
+              },
+              Schema.Unknown,
+            ),
+            row("wire-guard-staged"),
+          );
+          yield* session.request(
+            { operation: "application_rollback", transaction_id },
+            Schema.Unknown,
+          );
+          const accepted = yield* session.request(legacyCommit, Schema.Unknown);
+          Assert.equal(accepted.replayed, false);
+          Assert.equal(accepted.receipt.command_id, legacyCommit.batch.command_id);
+          Assert.equal(accepted.receipt.revision, beforeLegacy.revision + 1);
+          const after = yield* session.request({ operation: "snapshot" }, Schema.Unknown);
+          Assert.deepEqual(
+            after.projections.find((entry) => entry.key === "legacy-writer-guard"),
+            {
+              key: "legacy-writer-guard",
+              payload: { accepted: true },
+            },
+          );
+        }),
+      );
       Assert.equal(yield* client.get("accounts", ["wire-guard-staged"]), null);
-      checked("Direct-wire legacy commits reject with writer_busy while an application writer is live, preserve its scope and succeed unchanged after rollback");
+      checked(
+        "Direct-wire legacy commits reject with writer_busy while an application writer is live, preserve its scope and succeed unchanged after rollback",
+      );
 
-      const independentDatabase = yield* NativeDatabase.make({ executable, databasePath: fixture.databasePath });
+      const independentDatabase = yield* NativeDatabase.make({
+        executable,
+        databasePath: fixture.databasePath,
+      });
       const independentClient = yield* RedbClient.make.pipe(
         Effect.provideService(NativeDatabase.NativeDatabase, instrument(independentDatabase)),
+      );
+      yield* client.put("accounts", ["read-snapshot"], row("read-snapshot", "before"));
+      yield* client.put("savepoint_accounts", ["read-snapshot"], row("read-snapshot", "before"));
+      const snapshotStarted = yield* Deferred.make();
+      const snapshotWriterDone = yield* Deferred.make();
+      const snapshotWriter = yield* Deferred.await(snapshotStarted).pipe(
+        Effect.andThen(
+          independentClient.withTransaction(
+            Effect.gen(function* () {
+              yield* independentClient.put(
+                "accounts",
+                ["read-snapshot"],
+                row("read-snapshot", "after"),
+              );
+              yield* independentClient.put(
+                "savepoint_accounts",
+                ["read-snapshot"],
+                row("read-snapshot", "after"),
+              );
+            }),
+          ),
+        ),
+        Effect.andThen(Deferred.succeed(snapshotWriterDone, undefined)),
+        Effect.forkChild,
+      );
+      yield* client.withReadTransaction(
+        Effect.gen(function* () {
+          Assert.deepEqual(
+            yield* client.get("accounts", ["read-snapshot"]),
+            row("read-snapshot", "before"),
+          );
+          yield* Deferred.succeed(snapshotStarted, undefined);
+          yield* Deferred.await(snapshotWriterDone);
+          Assert.deepEqual(
+            yield* client.get("savepoint_accounts", ["read-snapshot"]),
+            row("read-snapshot", "before"),
+          );
+          Assert.deepEqual(
+            yield* client.withReadTransaction(client.get("accounts", ["read-snapshot"])),
+            row("read-snapshot", "before"),
+          );
+        }),
+      );
+      yield* Fiber.join(snapshotWriter);
+      Assert.deepEqual(
+        yield* client.get("accounts", ["read-snapshot"]),
+        row("read-snapshot", "after"),
+      );
+      const readWriteFailure = yield* failure(
+        client.withReadTransaction(
+          client.withTransaction(
+            client.put("accounts", ["read-root-write"], row("read-root-write")),
+          ),
+        ),
+        "NativeDatabaseRejected",
+      );
+      Assert.equal(readWriteFailure.kind, "invalid_request");
+      Assert.equal(yield* client.get("accounts", ["read-root-write"]), null);
+      yield* client.withTransaction(
+        Effect.gen(function* () {
+          yield* client.put("accounts", ["read-ambient"], row("read-ambient", "staged"));
+          Assert.deepEqual(
+            yield* client.withReadTransaction(client.get("accounts", ["read-ambient"])),
+            row("read-ambient", "staged"),
+          );
+        }),
+      );
+      checked(
+        "Explicit read transactions share one multi-repository snapshot across independent commits, permit concurrent writers, inherit ambient writes and never promote a read owner to write",
       );
       yield* client.put("accounts", ["writer-reservation"], row("writer-reservation", "before"));
       const reserved = yield* Deferred.make();
       const releaseReservation = yield* Deferred.make();
-      const reservation = yield* client.withTransaction(
-        client.put("accounts", ["writer-reservation"], row("writer-reservation", "after")).pipe(
-          Effect.andThen(Deferred.succeed(reserved, undefined)),
-          Effect.andThen(Deferred.await(releaseReservation)),
-        ),
-      ).pipe(Effect.forkChild);
+      const reservation = yield* client
+        .withTransaction(
+          client
+            .put("accounts", ["writer-reservation"], row("writer-reservation", "after"))
+            .pipe(
+              Effect.andThen(Deferred.succeed(reserved, undefined)),
+              Effect.andThen(Deferred.await(releaseReservation)),
+            ),
+        )
+        .pipe(Effect.forkChild);
       yield* Deferred.await(reserved);
       yield* Effect.gen(function* () {
-        Assert.deepEqual(yield* independentClient.get("accounts", ["writer-reservation"]), row("writer-reservation", "before"));
-        Assert.equal(frames.findLast((frame) => frame.operation === "application_begin").mode, "read");
+        Assert.deepEqual(
+          yield* independentClient.get("accounts", ["writer-reservation"]),
+          row("writer-reservation", "before"),
+        );
+        Assert.equal(
+          frames.findLast((frame) => frame.operation === "application_begin").mode,
+          "read",
+        );
         let entered = 0;
         const busyStart = requests.length;
         fault.lockTimeoutMs = 30;
-        const busy = yield* failure(independentClient.withTransaction(Effect.sync(() => { entered += 1; })), "NativeDatabaseRejected");
+        const busy = yield* failure(
+          independentClient.withTransaction(
+            Effect.sync(() => {
+              entered += 1;
+            }),
+          ),
+          "NativeDatabaseRejected",
+        );
         Assert.equal(busy.kind, "writer_busy");
         Assert.equal(entered, 0);
         Assert.deepEqual(requests.slice(busyStart), ["application_begin"]);
         const observed = yield* Deferred.make();
         fault.beginObserved = observed;
-        const waiting = yield* independentClient.withTransaction(Effect.sync(() => { entered += 1; })).pipe(Effect.forkChild);
+        const waiting = yield* independentClient
+          .withTransaction(
+            Effect.sync(() => {
+              entered += 1;
+            }),
+          )
+          .pipe(Effect.forkChild);
         yield* Deferred.await(observed);
         yield* Effect.promise(() => new Promise((resolve) => setImmediate(resolve)));
         yield* Fiber.interrupt(waiting);
         Assert.equal(entered, 0);
       }).pipe(Effect.ensuring(Deferred.succeed(releaseReservation, undefined)));
       yield* Fiber.join(reservation);
-      Assert.deepEqual(yield* independentClient.get("accounts", ["writer-reservation"]), row("writer-reservation", "after"));
+      Assert.deepEqual(
+        yield* independentClient.get("accounts", ["writer-reservation"]),
+        row("writer-reservation", "after"),
+      );
       yield* independentClient.withTransaction(Effect.void);
-      checked("Independent helpers reserve the writer before callbacks; busy acquisition never retries, cancellation never enters the body, and snapshot readers remain available");
+      checked(
+        "Independent helpers reserve the writer before callbacks; busy acquisition never retries, cancellation never enters the body, and snapshot readers remain available",
+      );
 
       const interruptedReady = yield* Deferred.make();
-      const interrupted = yield* client.withTransaction(
-        client.put("accounts", ["interrupted"], row("interrupted")).pipe(
-          Effect.andThen(Deferred.succeed(interruptedReady, undefined)),
-          Effect.andThen(Effect.never),
-        ),
-      ).pipe(Effect.forkChild);
+      const interrupted = yield* client
+        .withTransaction(
+          client
+            .put("accounts", ["interrupted"], row("interrupted"))
+            .pipe(
+              Effect.andThen(Deferred.succeed(interruptedReady, undefined)),
+              Effect.andThen(Effect.never),
+            ),
+        )
+        .pipe(Effect.forkChild);
       yield* Deferred.await(interruptedReady);
       yield* Fiber.interrupt(interrupted);
       Assert.equal(yield* client.get("accounts", ["interrupted"]), null);
@@ -585,25 +957,40 @@ try {
 
       const nestedInterruptedReady = yield* Deferred.make();
       const nestedInterruptedStart = requests.length;
-      const nestedInterrupted = yield* client.withTransaction(
-        client.put("accounts", ["interrupted-parent"], row("interrupted-parent")).pipe(
-          Effect.andThen(client.withTransaction(
-            client.put("accounts", ["interrupted-inner"], row("interrupted-inner")).pipe(
-              Effect.andThen(Deferred.succeed(nestedInterruptedReady, undefined)),
-              Effect.andThen(Effect.never),
+      const nestedInterrupted = yield* client
+        .withTransaction(
+          client
+            .put("accounts", ["interrupted-parent"], row("interrupted-parent"))
+            .pipe(
+              Effect.andThen(
+                client.withTransaction(
+                  client
+                    .put("accounts", ["interrupted-inner"], row("interrupted-inner"))
+                    .pipe(
+                      Effect.andThen(Deferred.succeed(nestedInterruptedReady, undefined)),
+                      Effect.andThen(Effect.never),
+                    ),
+                ),
+              ),
             ),
-          )),
-        ),
-      ).pipe(Effect.forkChild);
+        )
+        .pipe(Effect.forkChild);
       yield* Deferred.await(nestedInterruptedReady);
       yield* Fiber.interrupt(nestedInterrupted);
       Assert.deepEqual(requests.slice(nestedInterruptedStart), [
-        "application_begin", "application_put", "application_savepoint", "application_put",
-        "application_rollback_to", "application_release", "application_rollback",
+        "application_begin",
+        "application_put",
+        "application_savepoint",
+        "application_put",
+        "application_rollback_to",
+        "application_release",
+        "application_rollback",
       ]);
       Assert.equal(yield* client.get("accounts", ["interrupted-parent"]), null);
       Assert.equal(yield* client.get("accounts", ["interrupted-inner"]), null);
-      checked("External cancellation unwinds the inner savepoint before rolling back the outer transaction");
+      checked(
+        "External cancellation unwinds the inner savepoint before rolling back the outer transaction",
+      );
 
       const beforeMixed = requests.length;
       yield* Effect.gen(function* () {
@@ -615,23 +1002,34 @@ try {
         );
       }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })));
       Assert.equal(requests.length, beforeMixed);
-      yield* client.withTransaction(Effect.gen(function* () {
-        const before = requests.length;
-        yield* Effect.gen(function* () {
-          const sql = yield* SqlClient.SqlClient;
-          yield* failure(sql.withTransaction(client.withTransaction(Effect.void)), "RedbTransactionError", "mixed-storage-transaction");
-        }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })));
-        Assert.equal(requests.length, before);
-        yield* client.put("accounts", ["after-mixed-rejection"], row("after-mixed-rejection"));
-      }));
+      yield* client.withTransaction(
+        Effect.gen(function* () {
+          const before = requests.length;
+          yield* Effect.gen(function* () {
+            const sql = yield* SqlClient.SqlClient;
+            yield* failure(
+              sql.withTransaction(client.withTransaction(Effect.void)),
+              "RedbTransactionError",
+              "mixed-storage-transaction",
+            );
+          }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })));
+          Assert.equal(requests.length, before);
+          yield* client.put("accounts", ["after-mixed-rejection"], row("after-mixed-rejection"));
+        }),
+      );
       checked("An actual SqlClient transaction is rejected before sending any native request");
 
-      const invalid = yield* client.withTransaction(
-        Effect.gen(function* () {
-          yield* client.put("accounts", ["before-invalid"], row("before-invalid"));
-          yield* failure(client.put("accounts", ["wrong-key"], row("different-key")), "NativeDatabaseRejected");
-        }),
-      ).pipe(Effect.catch(Effect.succeed));
+      const invalid = yield* client
+        .withTransaction(
+          Effect.gen(function* () {
+            yield* client.put("accounts", ["before-invalid"], row("before-invalid"));
+            yield* failure(
+              client.put("accounts", ["wrong-key"], row("different-key")),
+              "NativeDatabaseRejected",
+            );
+          }),
+        )
+        .pipe(Effect.catch(Effect.succeed));
       Assert.equal(invalid._tag, "NativeDatabaseRejected");
       Assert.equal(yield* client.get("accounts", ["before-invalid"]), null);
       checked("Catching a rejected row operation cannot commit earlier staged writes");
@@ -647,65 +1045,116 @@ try {
       checked("Non-finite numbers and undefined keys or values fail without JSON coercion");
 
       let rootContext;
-      yield* client.withTransaction(Effect.gen(function* () {
-        rootContext = yield* Effect.context();
-        yield* client.withTransaction(Effect.gen(function* () {
+      yield* client.withTransaction(
+        Effect.gen(function* () {
+          rootContext = yield* Effect.context();
+          yield* client.withTransaction(
+            Effect.gen(function* () {
+              const before = requests.length;
+              yield* failure(
+                client
+                  .put("accounts", ["parent-context-in-child"], row("parent-context-in-child"))
+                  .pipe(Effect.provide(rootContext)),
+                "RedbTransactionError",
+                "different-scope",
+              );
+              Assert.equal(requests.length, before);
+              yield* client.put("accounts", ["active-scope"], row("active-scope"));
+            }),
+          );
+          const nestedContext = yield* client.withTransaction(Effect.context());
           const before = requests.length;
           yield* failure(
-            client.put("accounts", ["parent-context-in-child"], row("parent-context-in-child")).pipe(Effect.provide(rootContext)),
-            "RedbTransactionError", "different-scope",
+            client.get("accounts", ["first"]).pipe(Effect.provide(nestedContext)),
+            "RedbTransactionError",
+            "closed-transaction",
+          );
+          yield* failure(
+            client.withTransaction(Effect.void).pipe(Effect.provide(nestedContext)),
+            "RedbTransactionError",
+            "closed-transaction",
+          );
+          yield* failure(
+            client.initialize(schema),
+            "RedbTransactionError",
+            "initialization-in-transaction",
+          );
+          yield* failure(
+            client.prepareEvents,
+            "RedbTransactionError",
+            "initialization-in-transaction",
           );
           Assert.equal(requests.length, before);
-          yield* client.put("accounts", ["active-scope"], row("active-scope"));
-        }));
-        const nestedContext = yield* client.withTransaction(Effect.context());
-        const before = requests.length;
-        yield* failure(
-          client.get("accounts", ["first"]).pipe(Effect.provide(nestedContext)),
-          "RedbTransactionError", "closed-transaction",
-        );
-        yield* failure(
-          client.withTransaction(Effect.void).pipe(Effect.provide(nestedContext)),
-          "RedbTransactionError", "closed-transaction",
-        );
-        yield* failure(client.initialize(schema), "RedbTransactionError", "initialization-in-transaction");
-        yield* failure(client.prepareEvents, "RedbTransactionError", "initialization-in-transaction");
-        Assert.equal(requests.length, before);
-        yield* client.put("accounts", ["after-closed-scope"], row("after-closed-scope"));
-      }));
+          yield* client.put("accounts", ["after-closed-scope"], row("after-closed-scope"));
+        }),
+      );
       const afterRoot = requests.length;
-      yield* failure(client.get("accounts", ["first"]).pipe(Effect.provide(rootContext)), "RedbTransactionError", "closed-transaction");
+      yield* failure(
+        client.get("accounts", ["first"]).pipe(Effect.provide(rootContext)),
+        "RedbTransactionError",
+        "closed-transaction",
+      );
       Assert.equal(requests.length, afterRoot);
-      checked("Captured contexts cannot bypass the current savepoint or outlive their scope; initialization and index preparation reject inside transactions");
+      checked(
+        "Captured contexts cannot bypass the current savepoint or outlive their scope; initialization and index preparation reject inside transactions",
+      );
 
-      yield* client.withTransaction(Effect.gen(function* () {
-        for (const [index, operation, payload] of [
-          [0, "application_commit", {}],
-          [1, "application_events_read", { transaction_id: "forged" }],
-          [2, "application_events_read", { operation: "application_commit" }],
-        ]) {
-          const before = requests.length;
-          yield* failure(client.withTransaction(Effect.gen(function* () {
-            yield* client.put("accounts", [`forged-${index}`], row(`forged-${index}`));
-            yield* failure(client.request(operation, payload, Schema.Unknown), "NativeDatabaseInputError");
-          })), "NativeDatabaseInputError");
-          Assert.deepEqual(requests.slice(before), [
-            "application_savepoint", "application_put", "application_rollback_to", "application_release",
-          ]);
-          Assert.equal(yield* client.get("accounts", [`forged-${index}`]), null);
-        }
-        yield* client.put("accounts", ["after-forged-request"], row("after-forged-request"));
-      }));
-      Assert.deepEqual(yield* client.get("accounts", ["after-forged-request"]), row("after-forged-request"));
-      checked("The domain request hook rejects lifecycle operations and forged transaction IDs through the same savepoint failure handling");
+      yield* client.withTransaction(
+        Effect.gen(function* () {
+          for (const [index, operation, payload] of [
+            [0, "application_commit", {}],
+            [1, "application_events_read", { transaction_id: "forged" }],
+            [2, "application_events_read", { operation: "application_commit" }],
+          ]) {
+            const before = requests.length;
+            yield* failure(
+              client.withTransaction(
+                Effect.gen(function* () {
+                  yield* client.put("accounts", [`forged-${index}`], row(`forged-${index}`));
+                  yield* failure(
+                    client.request(operation, payload, Schema.Unknown),
+                    "NativeDatabaseInputError",
+                  );
+                }),
+              ),
+              "NativeDatabaseInputError",
+            );
+            Assert.deepEqual(requests.slice(before), [
+              "application_savepoint",
+              "application_put",
+              "application_rollback_to",
+              "application_release",
+            ]);
+            Assert.equal(yield* client.get("accounts", [`forged-${index}`]), null);
+          }
+          yield* client.put("accounts", ["after-forged-request"], row("after-forged-request"));
+        }),
+      );
+      Assert.deepEqual(
+        yield* client.get("accounts", ["after-forged-request"]),
+        row("after-forged-request"),
+      );
+      checked(
+        "The domain request hook rejects lifecycle operations and forged transaction IDs through the same savepoint failure handling",
+      );
 
       let escaped;
       yield* actual.withSession((session) =>
-        Effect.sync(() => { escaped = session; }).pipe(
-          Effect.andThen(failure(actual.request({ operation: "snapshot" }, Schema.Unknown), "NativeDatabaseInputError")),
+        Effect.sync(() => {
+          escaped = session;
+        }).pipe(
+          Effect.andThen(
+            failure(
+              actual.request({ operation: "snapshot" }, Schema.Unknown),
+              "NativeDatabaseInputError",
+            ),
+          ),
         ),
       );
-      yield* failure(escaped.request({ operation: "snapshot" }, Schema.Unknown), "NativeDatabaseInputError");
+      yield* failure(
+        escaped.request({ operation: "snapshot" }, Schema.Unknown),
+        "NativeDatabaseInputError",
+      );
       yield* actual.withSession((session) =>
         Effect.gen(function* () {
           const child = yield* failure(
@@ -718,117 +1167,219 @@ try {
       checked("A released session cannot be reused and nested raw acquisition cannot deadlock");
 
       fault.mismatchBegin = true;
-      const mismatch = yield* failure(client.put("accounts", ["bad-begin"], row("bad-begin")), "NativeDatabaseOutcomeUnknown");
+      const mismatch = yield* failure(
+        client.put("accounts", ["bad-begin"], row("bad-begin")),
+        "NativeDatabaseOutcomeUnknown",
+      );
       Assert.equal(mismatch.stage, "response");
       Assert.equal(yield* client.get("accounts", ["bad-begin"]), null);
       checked("A mismatched begin acknowledgement discards its helper before the body runs");
 
       let mismatchedBody = false;
-      yield* failure(client.withTransaction(Effect.gen(function* () {
-        yield* client.put("accounts", ["mismatched-savepoint-parent"], row("mismatched-savepoint-parent"));
-        fault.mismatchSavepoint = true;
-        yield* failure(client.withTransaction(Effect.sync(() => { mismatchedBody = true; })), "NativeDatabaseOutcomeUnknown");
-      })), "NativeDatabaseOutcomeUnknown");
+      yield* failure(
+        client.withTransaction(
+          Effect.gen(function* () {
+            yield* client.put(
+              "accounts",
+              ["mismatched-savepoint-parent"],
+              row("mismatched-savepoint-parent"),
+            );
+            fault.mismatchSavepoint = true;
+            yield* failure(
+              client.withTransaction(
+                Effect.sync(() => {
+                  mismatchedBody = true;
+                }),
+              ),
+              "NativeDatabaseOutcomeUnknown",
+            );
+          }),
+        ),
+        "NativeDatabaseOutcomeUnknown",
+      );
       Assert.equal(mismatchedBody, false);
       Assert.equal(yield* client.get("accounts", ["mismatched-savepoint-parent"]), null);
-      checked("A mismatched savepoint acknowledgement invalidates the outer transaction before the nested body runs");
+      checked(
+        "A mismatched savepoint acknowledgement invalidates the outer transaction before the nested body runs",
+      );
 
-      for (const operation of ["application_savepoint", "application_release", "application_rollback_to"]) {
+      for (const operation of [
+        "application_savepoint",
+        "application_release",
+        "application_rollback_to",
+      ]) {
         const before = requests.length;
         const parentId = `lost-${operation}-parent`;
         const innerId = `lost-${operation}-inner`;
-        yield* failure(client.withTransaction(Effect.gen(function* () {
-          yield* client.put("accounts", [parentId], row(parentId));
-          fault.dropOperation = operation;
-          yield* failure(client.withTransaction(
-            client.put("accounts", [innerId], row(innerId)).pipe(
-              Effect.andThen(operation === "application_rollback_to" ? Effect.fail("nested-failure") : Effect.void),
-            ),
-          ), "NativeDatabaseOutcomeUnknown");
-          const afterUnknown = requests.length;
-          yield* failure(client.get("accounts", [parentId]), "NativeDatabaseOutcomeUnknown");
-          Assert.equal(requests.length, afterUnknown);
-        })), "NativeDatabaseOutcomeUnknown");
-        Assert.equal(requests.slice(before).filter((entry) => entry === "application_begin").length, 1);
+        yield* failure(
+          client.withTransaction(
+            Effect.gen(function* () {
+              yield* client.put("accounts", [parentId], row(parentId));
+              fault.dropOperation = operation;
+              yield* failure(
+                client.withTransaction(
+                  client
+                    .put("accounts", [innerId], row(innerId))
+                    .pipe(
+                      Effect.andThen(
+                        operation === "application_rollback_to"
+                          ? Effect.fail("nested-failure")
+                          : Effect.void,
+                      ),
+                    ),
+                ),
+                "NativeDatabaseOutcomeUnknown",
+              );
+              const afterUnknown = requests.length;
+              yield* failure(client.get("accounts", [parentId]), "NativeDatabaseOutcomeUnknown");
+              Assert.equal(requests.length, afterUnknown);
+            }),
+          ),
+          "NativeDatabaseOutcomeUnknown",
+        );
+        Assert.equal(
+          requests.slice(before).filter((entry) => entry === "application_begin").length,
+          1,
+        );
         Assert.ok(!requests.slice(before).includes("application_commit"));
         Assert.equal(yield* client.get("accounts", [parentId]), null);
         Assert.equal(yield* client.get("accounts", [innerId]), null);
       }
-      checked("Lost savepoint, release and rollback acknowledgements remain unknown, abort the root and never retry or commit");
+      checked(
+        "Lost savepoint, release and rollback acknowledgements remain unknown, abort the root and never retry or commit",
+      );
 
       const beforeMalformed = requests.length;
-      yield* failure(client.withTransaction(Effect.gen(function* () {
-        yield* client.put("accounts", ["fatal-parent"], row("fatal-parent"));
-        yield* failure(client.withTransaction(Effect.gen(function* () {
-          yield* client.put("accounts", ["fatal-inner"], row("fatal-inner"));
-          fault.malformedRow = true;
-          yield* client.put("accounts", ["malformed"], row("malformed"));
-        })), "NativeDatabaseRejected");
-        const rejected = requests.length;
-        yield* failure(client.put("accounts", ["after-fatal"], row("after-fatal")), "NativeDatabaseRejected");
-        Assert.equal(requests.length, rejected);
-      })), "NativeDatabaseRejected");
+      yield* failure(
+        client.withTransaction(
+          Effect.gen(function* () {
+            yield* client.put("accounts", ["fatal-parent"], row("fatal-parent"));
+            yield* failure(
+              client.withTransaction(
+                Effect.gen(function* () {
+                  yield* client.put("accounts", ["fatal-inner"], row("fatal-inner"));
+                  fault.malformedRow = true;
+                  yield* client.put("accounts", ["malformed"], row("malformed"));
+                }),
+              ),
+              "NativeDatabaseRejected",
+            );
+            const rejected = requests.length;
+            yield* failure(
+              client.put("accounts", ["after-fatal"], row("after-fatal")),
+              "NativeDatabaseRejected",
+            );
+            Assert.equal(requests.length, rejected);
+          }),
+        ),
+        "NativeDatabaseRejected",
+      );
       Assert.ok(!requests.slice(beforeMalformed).includes("application_commit"));
       Assert.equal(yield* client.get("accounts", ["fatal-parent"]), null);
       Assert.equal(yield* client.get("accounts", ["fatal-inner"]), null);
-      checked("A malformed real helper frame discards the native session and failed savepoint recovery prevents all outer writes from committing");
+      checked(
+        "A malformed real helper frame discards the native session and failed savepoint recovery prevents all outer writes from committing",
+      );
 
       fault.discardBeforeCommit = true;
-      yield* failure(client.put("accounts", ["helper-exit"], row("helper-exit")), "NativeDatabaseOutcomeUnknown");
+      yield* failure(
+        client.put("accounts", ["helper-exit"], row("helper-exit")),
+        "NativeDatabaseOutcomeUnknown",
+      );
       Assert.equal(yield* client.get("accounts", ["helper-exit"]), null);
-      checked("Closing the helper before commit drops uncommitted state without reconnecting within the transaction");
+      checked(
+        "Closing the helper before commit drops uncommitted state without reconnecting within the transaction",
+      );
 
       const beforeUnknown = requests.length;
       let unknownPublished = 0;
       fault.dropCommit = true;
-      const unknown = yield* failure(client.withTransaction(
-        client.put("accounts", ["unknown-commit"], row("unknown-commit")).pipe(
-          Effect.andThen(client.afterCommit(Effect.sync(() => { unknownPublished += 1; }))),
-          Effect.andThen(client.withTransaction(
-            client.put("accounts", ["unknown-commit-inner"], row("unknown-commit-inner")).pipe(
-              Effect.andThen(client.afterCommit(Effect.sync(() => { unknownPublished += 1; }))),
+      const unknown = yield* failure(
+        client.withTransaction(
+          client.put("accounts", ["unknown-commit"], row("unknown-commit")).pipe(
+            Effect.andThen(
+              client.afterCommit(
+                Effect.sync(() => {
+                  unknownPublished += 1;
+                }),
+              ),
             ),
-          )),
+            Effect.andThen(
+              client.withTransaction(
+                client.put("accounts", ["unknown-commit-inner"], row("unknown-commit-inner")).pipe(
+                  Effect.andThen(
+                    client.afterCommit(
+                      Effect.sync(() => {
+                        unknownPublished += 1;
+                      }),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
         ),
-      ), "NativeDatabaseOutcomeUnknown");
+        "NativeDatabaseOutcomeUnknown",
+      );
       Assert.equal(unknown.stage, "response");
       Assert.deepEqual(requests.slice(beforeUnknown), [
-        "application_begin", "application_put", "application_savepoint", "application_put", "application_release", "application_commit",
+        "application_begin",
+        "application_put",
+        "application_savepoint",
+        "application_put",
+        "application_release",
+        "application_commit",
       ]);
       Assert.deepEqual(yield* client.get("accounts", ["unknown-commit"]), row("unknown-commit"));
-      Assert.deepEqual(yield* client.get("accounts", ["unknown-commit-inner"]), row("unknown-commit-inner"));
+      Assert.deepEqual(
+        yield* client.get("accounts", ["unknown-commit-inner"]),
+        row("unknown-commit-inner"),
+      );
       Assert.equal(unknownPublished, 0);
-      checked("A lost acknowledgement after a real commit stays unknown with exactly one commit, durable parent and child rows, no retry and no post-commit callbacks");
+      checked(
+        "A lost acknowledgement after a real commit stays unknown with exactly one commit, durable parent and child rows, no retry and no post-commit callbacks",
+      );
 
       const ids = new Set();
       let after = null;
-      yield* client.withTransaction(Effect.gen(function* () {
-        do {
-          const page = yield* client.scan("accounts", { after, limit: 2 });
-          Assert.ok(page.rows.length <= 2);
-          for (const entry of page.rows) {
-            Assert.deepEqual(entry.key, [entry.row.id]);
-            Assert.ok(!ids.has(entry.row.id));
-            ids.add(entry.row.id);
-          }
-          Assert.notEqual(page.next, after === null ? "" : after);
-          after = page.next;
-        } while (after !== null);
-      }));
+      yield* client.withTransaction(
+        Effect.gen(function* () {
+          do {
+            const page = yield* client.scan("accounts", { after, limit: 2 });
+            Assert.ok(page.rows.length <= 2);
+            for (const entry of page.rows) {
+              Assert.deepEqual(entry.key, [entry.row.id]);
+              Assert.ok(!ids.has(entry.row.id));
+              ids.add(entry.row.id);
+            }
+            Assert.notEqual(page.next, after === null ? "" : after);
+            after = page.next;
+          } while (after !== null);
+        }),
+      );
       Assert.ok(ids.has("first") && ids.has("unknown-commit"));
       Assert.equal(yield* client.delete("accounts", ["second"]), true);
       Assert.equal(yield* client.delete("accounts", ["second"]), false);
-      checked("Bounded cursor pages preserve row keys without duplicates and deletion reports existence");
+      checked(
+        "Bounded cursor pages preserve row keys without duplicates and deletion reports existence",
+      );
     }),
   );
 
-  await run((client) => Effect.gen(function* () {
-    Assert.deepEqual(yield* client.initialize(schema), { initialized: false });
-    Assert.deepEqual(yield* client.get("accounts", ["first"]), row("first", { nullable: null, nested: [1, "x"] }));
-    Assert.equal(yield* client.get("accounts", ["second"]), null);
-    Assert.deepEqual(yield* client.get("accounts", ["unknown-commit"]), row("unknown-commit"));
-    checked("A fresh helper reopens committed data and preserves deletion after the original scope closes");
-  }));
+  await run((client) =>
+    Effect.gen(function* () {
+      Assert.deepEqual(yield* client.initialize(schema), { initialized: false });
+      Assert.deepEqual(
+        yield* client.get("accounts", ["first"]),
+        row("first", { nullable: null, nested: [1, "x"] }),
+      );
+      Assert.equal(yield* client.get("accounts", ["second"]), null);
+      Assert.deepEqual(yield* client.get("accounts", ["unknown-commit"]), row("unknown-commit"));
+      checked(
+        "A fresh helper reopens committed data and preserves deletion after the original scope closes",
+      );
+    }),
+  );
 
   const sources = {};
   for (const source of [
@@ -844,10 +1395,13 @@ try {
     schema: 1,
     success: true,
     status: "passed",
-    databaseExecutableSha256: Crypto.createHash("sha256").update(await FS.readFile(executable)).digest("hex"),
+    databaseExecutableSha256: Crypto.createHash("sha256")
+      .update(await FS.readFile(executable))
+      .digest("hex"),
     implementation: "Real Effect RedbClient and NativeDatabase over the native redb row helper",
     scope: "Transaction adapter candidate; no production repository or database-default cutover",
-    faultInjection: "Explicitly discarded helper sessions, acknowledged commit/savepoint responses, mismatched acknowledgements, one malformed native request and a bounded writer acquisition timeout",
+    faultInjection:
+      "Explicitly discarded helper sessions, acknowledged commit/savepoint responses, mismatched acknowledgements, one malformed native request and a bounded writer acquisition timeout",
     sources,
     checks,
   };

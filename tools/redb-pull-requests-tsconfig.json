@@ -1,0 +1,9 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": { "types": ["node"], "lib": ["ESNext", "esnext.disposable"] },
+  "files": [
+    "../apps/server/src/persistence/PullRequestReviewGuides.ts",
+    "../apps/server/src/persistence/PullRequestFilesViewed.ts",
+    "../apps/server/src/persistence/NativePullRequestRows.ts"
+  ]
+}

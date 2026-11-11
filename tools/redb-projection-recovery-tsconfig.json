@@ -1,0 +1,10 @@
+{
+  "extends": "../apps/server/tsconfig.json",
+  "include": [
+    "../apps/server/src/orchestration-v2/ProjectionStore.ts",
+    "../apps/server/src/orchestration-v2/ProjectionRecoveryRows.ts",
+    "../apps/server/src/orchestration-v2/SqliteProjectionRecoveryRows.ts",
+    "../apps/server/src/orchestration-v2/NativeProjectionRecoveryRows.ts"
+  ],
+  "exclude": []
+}

@@ -15,9 +15,8 @@ import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as PeerLinks from "../peer/PeerLinks.ts";
-import * as ServerSettings from "../serverSettings.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
-import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as SelectedPersistence from "../persistence/SelectedPersistence.ts";
 import { authLocationFlags, type CliAuthLocationFlags, resolveCliAuthConfig } from "./config.ts";
 
 /**
@@ -34,21 +33,21 @@ const runWithPeerLinks = Effect.fn("environment.runWithPeerLinks")(function* <A,
   return yield* PeerLinks.PeerLinks.pipe(
     Effect.flatMap(run),
     Effect.provide(
-      PeerLinks.layer.pipe(
+      SelectedPersistence.peers.pipe(
         Layer.provide(
           Layer.mergeAll(
             ServerSecretStore.layer,
-            SqlitePersistence.layerConfig,
+            SelectedPersistence.layerConfig,
             FetchHttpClient.layer,
           ),
         ),
         Layer.provide(ServerEnvironment.layer.pipe(Layer.provide(ServerSecretStore.layer))),
         Layer.provide(
-          ServerSettings.layer.pipe(
+          SelectedPersistence.settings.pipe(
             Layer.provide(
               Layer.mergeAll(
                 ServerSecretStore.layer,
-                SqlitePersistence.layerConfig,
+                SelectedPersistence.layerConfig,
                 ManagedPolicy.layer,
               ),
             ),

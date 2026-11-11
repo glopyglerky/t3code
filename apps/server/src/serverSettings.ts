@@ -29,7 +29,6 @@ import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Equal from "effect/Equal";
 import * as Effect from "effect/Effect";
-import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -42,7 +41,6 @@ import * as SchemaTransformation from "effect/SchemaTransformation";
 import * as Semaphore from "effect/Semaphore";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
-import * as SqlClient from "effect/sql/SqlClient";
 import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
 import { resolveSymlinkTarget } from "@t3tools/shared/symlink";
 import * as ServerConfig from "./config.ts";
@@ -56,6 +54,8 @@ import {
 } from "@t3tools/shared/serverSettings";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
 import * as ManagedPolicy from "./policy/ManagedPolicy.ts";
+import { AuxiliaryPersistenceReads } from "./persistence/AuxiliaryPersistenceReads.ts";
+import * as SqliteAuxiliaryPersistenceReads from "./persistence/SqliteAuxiliaryPersistenceReads.ts";
 import { secretProviderDefinitions } from "./secrets/secretProviderDefinitions.ts";
 import {
   readSecretFieldValues,
@@ -667,12 +667,12 @@ function foldLegacyProjectSettings(
   };
 }
 
-const make = Effect.gen(function* () {
+export const makeWithPersistenceReads = Effect.gen(function* () {
   const { settingsPath } = yield* ServerConfig.ServerConfig;
   const fs = yield* FileSystem.FileSystem;
   const pathService = yield* Path.Path;
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
-  const sql = yield* SqlClient.SqlClient;
+  const persistence = yield* AuxiliaryPersistenceReads;
   const {
     settings: managed,
     providers: managedProviders,
@@ -826,23 +826,7 @@ const make = Effect.gen(function* () {
 
     // A file that failed to decode must stay on disk for the user to repair.
     const settingsFileTrusted = Option.isNone(parseFailure);
-    const providerHistory = yield* sql<{
-      readonly providerName: string;
-      readonly providerInstanceId: string | null;
-    }>`
-      SELECT DISTINCT
-        provider_name AS "providerName",
-        provider_instance_id AS "providerInstanceId"
-      FROM projection_thread_sessions
-      WHERE provider_name IN ('cursor', 'grok', 'opencode')
-      UNION
-      SELECT DISTINCT
-        provider_name AS "providerName",
-        provider_instance_id AS "providerInstanceId"
-      FROM provider_session_runtime
-      WHERE provider_name IN ('cursor', 'grok', 'opencode')
-    `.pipe(
-      NodeSqliteClient.readOnly,
+    const providerHistory = yield* persistence.providerHistory.pipe(
       Effect.mapError(
         (cause) =>
           new ServerSettingsError({
@@ -856,17 +840,7 @@ const make = Effect.gen(function* () {
     const legacyProjectRows =
       settings.projectSettingsFolded || !settingsFileTrusted
         ? []
-        : yield* sql<LegacyProjectSettingsRow>`
-          SELECT
-            project_id AS "projectId",
-            default_model_selection_json AS "defaultModelSelection",
-            default_thread_env_mode AS "defaultThreadEnvMode",
-            auto_pull AS "autoPull",
-            scripts_json AS "scripts"
-          FROM projection_projects
-          WHERE deleted_at IS NULL
-        `.pipe(
-            NodeSqliteClient.readOnly,
+        : yield* persistence.legacyProjectSettings.pipe(
             Effect.mapError(
               (cause) =>
                 new ServerSettingsError({
@@ -1394,4 +1368,10 @@ const make = Effect.gen(function* () {
   } satisfies ServerSettingsService["Service"];
 });
 
-export const layer = Layer.effect(ServerSettingsService, make);
+export const layerWithPersistenceReads = Layer.effect(
+  ServerSettingsService,
+  makeWithPersistenceReads,
+);
+export const layer = layerWithPersistenceReads.pipe(
+  Layer.provide(SqliteAuxiliaryPersistenceReads.layer),
+);

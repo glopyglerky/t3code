@@ -134,6 +134,8 @@ import * as ThreadManagement from "./orchestration-v2/ThreadManagementService.ts
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
 import * as OrchestrationEventStore from "./persistence/OrchestrationEventStore.ts";
 import * as SqlitePersistence from "./persistence/Sqlite.ts";
+import * as PersistenceTransactions from "./persistence/PersistenceTransactions.ts";
+import * as LinkedPullRequestThreads from "./pullRequest/linkedThreads.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import * as ProjectEnrichment from "./project/ProjectEnrichmentService.ts";
 import * as ProjectService from "./project/ProjectService.ts";
@@ -251,9 +253,10 @@ it.effect("runs editor, remote open target and direct endpoint discovery side by
   }),
 );
 
-const ReplayTestLayer = OrchestrationEventStore.layer.pipe(
-  Layer.provideMerge(SqlitePersistence.layerMemory),
-);
+const ReplayTestLayer = Layer.mergeAll(
+  OrchestrationEventStore.layer,
+  PersistenceTransactions.sqliteLayer,
+).pipe(Layer.provideMerge(SqlitePersistence.layerMemory));
 
 it.live.each(["thread", "shell"] as const)(
   "%s resume skips unknown types, synchronizes, and receives the live tail",
@@ -844,6 +847,8 @@ const layerUnusedConfigRpcServices = Layer.mergeAll(
 );
 
 const layerConfigSources = Layer.mergeAll(
+  PersistenceTransactions.sqliteLayer,
+  LinkedPullRequestThreads.layerSqlite,
   Keybindings.layer,
   AssetSigner.layer.pipe(Layer.provide(ServerSecretStore.layer)),
   ServerSettings.layer.pipe(

@@ -13,8 +13,8 @@ use crate::application::{
 };
 use crate::application_json::{field, object_fields, render_fields, set_field};
 use crate::application_rows::{
-    delete_row, int_cell, integer, managed_marker, nullable, nullable_cell, read_row, text,
-    text_cell, validate_table, write_row,
+    delete_row as delete_application_row, int_cell, integer, managed_marker, nullable,
+    nullable_cell, read_row, text, text_cell, validate_table, write_row as write_application_row,
 };
 use crate::backend::Transaction;
 use crate::{Error, Result, Store, request_digest, store_key};
@@ -40,6 +40,122 @@ const METADATA: &str = "orchestration_v2_projection_metadata";
 const OWNER: &str = "projection-commit-v1";
 const PREPARE_ROWS: usize = 32;
 const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
+
+#[path = "redb_projection_lookup.rs"]
+mod lookup;
+pub use lookup::ProjectionLookup;
+#[path = "redb_projection_control.rs"]
+mod control;
+pub use control::ProjectionControlQuery;
+#[path = "redb_projection_shell.rs"]
+mod shell;
+pub use shell::ProjectionShellQuery;
+#[path = "redb_projection_recovery.rs"]
+mod recovery;
+pub use recovery::ProjectionRecoveryQuery;
+#[path = "redb_projection_read_index.rs"]
+pub(crate) mod read_index;
+
+async fn write_row(
+    tx: &mut Transaction,
+    catalog: &ApplicationCatalog,
+    name: &str,
+    row: Map<String, Value>,
+) -> Result<()> {
+    let spec = spec(name);
+    let primary = spec
+        .primary
+        .iter()
+        .map(|column| row.get(*column).cloned().ok_or(Error::IncompatibleStore))
+        .collect::<Result<Vec<_>>>()?;
+    let previous = read_row(tx, catalog, name, &primary).await?;
+    if name == MESSAGES {
+        if let Some(rowid) = crate::application_message_rowids::replace(
+            tx,
+            catalog,
+            previous.as_ref().map(|old| &old.row),
+            Some(&row),
+        )
+        .await?
+        {
+            crate::application_search::replace_message(
+                tx,
+                catalog,
+                previous.as_ref().map(|old| &old.row),
+                Some(&row),
+                rowid,
+            )
+            .await?;
+        }
+    }
+    read_index::replace(
+        tx,
+        catalog,
+        name,
+        previous.as_ref().map(|old| &old.row),
+        Some(&row),
+    )
+    .await?;
+    write_application_row(tx, catalog, name, row).await
+}
+
+async fn delete_row(
+    tx: &mut Transaction,
+    catalog: &ApplicationCatalog,
+    name: &str,
+    primary: &[Value],
+) -> Result<bool> {
+    let previous = read_row(tx, catalog, name, primary).await?;
+    if let Some(previous) = previous {
+        if name == MESSAGES {
+            if let Some(rowid) =
+                crate::application_message_rowids::replace(tx, catalog, Some(&previous.row), None)
+                    .await?
+            {
+                crate::application_search::replace_message(
+                    tx,
+                    catalog,
+                    Some(&previous.row),
+                    None,
+                    rowid,
+                )
+                .await?;
+            }
+        }
+        read_index::replace(tx, catalog, name, Some(&previous.row), None).await?;
+    }
+    delete_application_row(tx, catalog, name, primary).await
+}
+
+/// Retention metadata uses the same row owner while preserving schema_version
+/// on conflict, as the original maintenance SQL does.
+pub(crate) async fn write_maintenance_metadata(
+    tx: &mut Transaction,
+    catalog: &ApplicationCatalog,
+    name: &str,
+    sequence: u64,
+    schema_version: i64,
+    updated_at: &str,
+) -> Result<()> {
+    let existing = read_row(tx, catalog, METADATA, &[text_cell(name)]).await?;
+    let version = existing
+        .as_ref()
+        .map(|r| integer(&r.row, "schema_version"))
+        .transpose()?
+        .unwrap_or(schema_version);
+    write_row(
+        tx,
+        catalog,
+        METADATA,
+        Map::from_iter([
+            ("projection_name".into(), text_cell(name)),
+            ("schema_version".into(), int_cell(version)),
+            ("last_sequence".into(), int_cell(sequence as i64)),
+            ("updated_at".into(), text_cell(updated_at)),
+        ]),
+    )
+    .await
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -657,7 +773,7 @@ fn validate_schema(catalog: &ApplicationCatalog) -> Result<()> {
     }
     Ok(())
 }
-fn validate_stored_row(spec: &TableSpec, row: &Map<String, Value>) -> Result<()> {
+fn validate_stored_cells(spec: &TableSpec, row: &Map<String, Value>) -> Result<()> {
     for (name, kind) in spec.columns {
         match kind {
             T => {
@@ -675,6 +791,10 @@ fn validate_stored_row(spec: &TableSpec, row: &Map<String, Value>) -> Result<()>
             }
         }
     }
+    Ok(())
+}
+fn validate_stored_row(spec: &TableSpec, row: &Map<String, Value>) -> Result<()> {
+    validate_stored_cells(spec, row)?;
     if row.contains_key("payload_json") {
         let payload: Value = serde_json::from_str(&text(row, "payload_json")?)
             .map_err(|_| Error::IncompatibleStore)?;
@@ -751,6 +871,12 @@ struct NativeOwner {
     identity: [String; 3],
     thread_id: Option<String>,
     provider_thread_id: String,
+}
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct UnreadableNativeOwner {
+    provider_thread_id: String,
+    thread_id: Option<String>,
 }
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -882,6 +1008,75 @@ fn owner_key(catalog: &ApplicationCatalog, owner: &NativeOwner) -> Vec<u8> {
     let mut location = owner_prefix(catalog, owner);
     location.extend_from_slice(request_digest(&json!(owner.provider_thread_id)).as_bytes());
     location
+}
+fn unreadable_owner_prefix(catalog: &ApplicationCatalog, driver: &str, instance: &str) -> Vec<u8> {
+    key(
+        catalog,
+        &format!(
+            "native-unreadable/{}/",
+            request_digest(&json!([driver, instance]))
+        ),
+    )
+}
+
+async fn prepare_native_owner(
+    tx: &mut Transaction,
+    catalog: &ApplicationCatalog,
+    row: &Map<String, Value>,
+) -> Result<()> {
+    match native_owner(row) {
+        Ok(_) => index_native_owner(tx, catalog, row).await,
+        Err(Error::IncompatibleStore) => {
+            // Historical malformed payloads remain auditable. Keep a separate
+            // owner witness so their unknown native identity cannot be treated
+            // as permission to claim a potentially conflicting thread.
+            let driver = nullable(row, "driver")?.ok_or(Error::IncompatibleStore)?;
+            let instance =
+                nullable(row, "provider_instance_id")?.ok_or(Error::IncompatibleStore)?;
+            let id = text(row, "provider_thread_id")?;
+            let mut location = unreadable_owner_prefix(catalog, &driver, &instance);
+            location.extend_from_slice(request_digest(&json!(id)).as_bytes());
+            tx.insert(
+                location,
+                encode(&UnreadableNativeOwner {
+                    provider_thread_id: id,
+                    thread_id: nullable(row, "thread_id")?,
+                })?,
+            )
+            .await
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn check_unreadable_owners(
+    tx: &mut Transaction,
+    catalog: &ApplicationCatalog,
+    driver: &str,
+    instance: &str,
+    app_thread_id: &Option<String>,
+) -> Result<()> {
+    let prefix = unreadable_owner_prefix(catalog, driver, instance);
+    let end = prefix_end(&prefix);
+    let mut cursor = prefix;
+    loop {
+        let rows = tx.scan(&cursor, &end, 128).await?;
+        let count = rows.len();
+        for (location, bytes) in rows {
+            let witness: UnreadableNativeOwner = decode(&bytes)?;
+            let id = &witness.provider_thread_id;
+            let mut expected = unreadable_owner_prefix(catalog, driver, instance);
+            expected.extend_from_slice(request_digest(&json!(id)).as_bytes());
+            if expected != location || &witness.thread_id != app_thread_id {
+                return Err(Error::IncompatibleStore);
+            }
+            cursor = location;
+            cursor.push(0);
+        }
+        if count < 128 {
+            return Ok(());
+        }
+    }
 }
 async fn index_native_owner(
     tx: &mut Transaction,
@@ -1038,10 +1233,10 @@ impl Store {
         let count = rows.len();
         for (encoded, bytes) in rows {
             let row = decode_row(&catalog, table(&catalog, spec.name)?, &encoded, &bytes)?.row;
-            validate_stored_row(spec, &row)?;
+            validate_stored_cells(spec, &row)?;
             index_unique(&mut tx, &catalog, spec, &row).await?;
             if spec.name == PROVIDER_THREADS {
-                index_native_owner(&mut tx, &catalog, &row).await?;
+                prepare_native_owner(&mut tx, &catalog, &row).await?;
             }
             state.after = Some(
                 std::str::from_utf8(
@@ -1541,6 +1736,8 @@ async fn guard(session: &mut Session, guard: ProjectionGuard) -> Result<bool> {
             let Some(native_id) = native_id else {
                 return Ok(false);
             };
+            check_unreadable_owners(tx, catalog, &driver, &provider_instance_id, &app_thread_id)
+                .await?;
             let identity = [driver, provider_instance_id, native_id];
             let prefix = native_prefix(catalog, &identity);
             let end = prefix_end(&prefix);
@@ -1778,3 +1975,14 @@ impl ApplicationTransactions {
 #[cfg(test)]
 #[path = "redb_projection_commit_tests.rs"]
 mod tests;
+
+#[path = "redb_projection_records.rs"]
+pub mod records;
+
+#[path = "redb_projection_history.rs"]
+mod history;
+pub use history::ProjectionHistoryQuery;
+
+#[path = "redb_projection_context.rs"]
+mod context;
+pub use context::ProjectionContextQuery;

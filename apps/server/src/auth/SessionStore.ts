@@ -1117,4 +1117,5 @@ const make = Effect.gen(function* () {
   });
 });
 
-export const layer = Layer.effect(SessionStore, make).pipe(Layer.provideMerge(AuthSessions.layer));
+export const layerFromRepository = Layer.effect(SessionStore, make);
+export const layer = layerFromRepository.pipe(Layer.provideMerge(AuthSessions.layer));

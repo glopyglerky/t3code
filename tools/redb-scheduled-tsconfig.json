@@ -1,0 +1,14 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "lib": ["ESNext", "esnext.disposable"]
+  },
+  "files": [
+    "../apps/server/src/scheduledTasks/ScheduledRows.ts",
+    "../apps/server/src/scheduledTasks/SqliteScheduledRows.ts",
+    "../apps/server/src/scheduledTasks/NativeScheduledRows.ts",
+    "../apps/server/src/scheduledTasks/ScheduledTaskService.ts",
+    "../apps/server/src/scheduledTasks/webhookDedupe.ts"
+  ]
+}

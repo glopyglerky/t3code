@@ -1,0 +1,5 @@
+{
+  "extends":"../tsconfig.base.json",
+  "compilerOptions":{"types":["node"],"lib":["ESNext","esnext.disposable"]},
+  "files":["../apps/server/src/persistence/Omdb.ts","../apps/server/src/persistence/migrateSqliteToOmdb.ts"]
+}

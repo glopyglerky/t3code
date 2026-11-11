@@ -1,4 +1,53 @@
 {
+  "tools/check-redb-pull-requests.mjs": {
+    "package": "t3-code-ls-storage",
+    "executable": "t3-code-ls-db",
+    "extra_arguments": [],
+    "proof_argument": true,
+    "typecheck_project": "tools/redb-pull-requests-tsconfig.json"
+  },
+  "tools/check-redb-auth.mjs": {
+    "package": "t3-code-ls-storage",
+    "executable": "t3-code-ls-db",
+    "extra_arguments": [],
+    "proof_argument": true,
+    "typecheck_project": "tools/redb-auth-tsconfig.json"
+  },
+  "tools/check-redb-runtime-state.mjs": {
+    "package": "t3-code-ls-storage",
+    "executable": "t3-code-ls-db",
+    "extra_arguments": [],
+    "proof_argument": true,
+    "typecheck_project": "tools/redb-runtime-state-tsconfig.json"
+  },
+  "tools/check-redb-peers.mjs": {
+    "package": "t3-code-ls-storage",
+    "executable": "t3-code-ls-db",
+    "extra_arguments": [],
+    "proof_argument": true,
+    "typecheck_project": "tools/redb-peers-tsconfig.json"
+  },
+  "tools/check-redb-projection-lookups.mjs": {
+    "package": "t3-code-ls-storage",
+    "executable": "t3-code-ls-db",
+    "extra_arguments": [],
+    "proof_argument": true,
+    "typecheck_project": "tools/redb-projection-lookups-tsconfig.json"
+  },
+  "tools/check-redb-projection-records.mjs": {
+    "package": "t3-code-ls-storage",
+    "executable": "t3-code-ls-db",
+    "extra_arguments": [],
+    "proof_argument": true,
+    "typecheck_project": "tools/redb-projection-records-tsconfig.json"
+  },
+  "tools/check-redb-scheduled.mjs": {
+    "package": "t3-code-ls-storage",
+    "executable": "t3-code-ls-db",
+    "extra_arguments": [],
+    "proof_argument": true,
+    "typecheck_project": "tools/redb-scheduled-tsconfig.json"
+  },
   "tools/check-connection.mjs": {
     "package": "t3-code-ls-core",
     "executable": "examples/connection_matrix",
@@ -99,7 +148,9 @@
   "tools/check-project-persistence.mjs": {
     "package": "t3-code-ls-core",
     "executable": "t3-code-ls-project-store",
-    "extra_arguments": ["--single"],
+    "extra_arguments": [
+      "--single"
+    ],
     "proof_argument": false
   },
   "tools/check-project-runtime.mjs": {
@@ -173,5 +224,117 @@
     "extra_arguments": [],
     "proof_argument": true,
     "typecheck_project": "tools/redb-tsconfig.json"
+  },
+  "tools/check-omdb-startup.mjs": {
+    "package": "t3-code-ls-storage",
+    "executable": "t3-code-ls-db",
+    "extra_arguments": [],
+    "proof_argument": true,
+    "typecheck_project": "tools/omdb-startup-tsconfig.json"
+  },
+  "tools/check-redb-auxiliary-reads.mjs": {
+    "package": "t3-code-ls-storage",
+    "executable": "t3-code-ls-db",
+    "extra_arguments": [],
+    "proof_argument": true,
+    "typecheck_project": "tools/redb-auxiliary-reads-tsconfig.json"
+  },
+  "tools/check-redb-legacy-v1.mjs": {
+    "package": "t3-code-ls-storage",
+    "executable": "t3-code-ls-db",
+    "extra_arguments": [],
+    "proof_argument": true,
+    "typecheck_project": "tools/redb-legacy-v1-tsconfig.json"
+  },
+  "tools/check-redb-maintenance.mjs": {
+    "package": "t3-code-ls-storage",
+    "executable": "t3-code-ls-db",
+    "extra_arguments": [],
+    "proof_argument": true,
+    "typecheck_project": "tools/redb-maintenance-tsconfig.json"
+  },
+  "tools/check-redb-projection-context.mjs": {
+    "package": "t3-code-ls-storage",
+    "executable": "t3-code-ls-db",
+    "extra_arguments": [],
+    "proof_argument": true,
+    "typecheck_project": "tools/redb-projection-context-tsconfig.json"
+  },
+  "tools/check-redb-projection-controls.mjs": {
+    "package": "t3-code-ls-storage",
+    "executable": "t3-code-ls-db",
+    "extra_arguments": [],
+    "proof_argument": true,
+    "typecheck_project": "tools/redb-projection-controls-tsconfig.json"
+  },
+  "tools/check-redb-projection-history.mjs": {
+    "package": "t3-code-ls-storage",
+    "executable": "t3-code-ls-db",
+    "extra_arguments": [],
+    "proof_argument": true,
+    "typecheck_project": "tools/redb-projection-history-tsconfig.json"
+  },
+  "tools/check-redb-projection-recovery.mjs": {
+    "package": "t3-code-ls-storage",
+    "executable": "t3-code-ls-db",
+    "extra_arguments": [],
+    "proof_argument": true,
+    "typecheck_project": "tools/redb-projection-recovery-tsconfig.json"
+  },
+  "tools/check-redb-projection-shells.mjs": {
+    "package": "t3-code-ls-storage",
+    "executable": "t3-code-ls-db",
+    "extra_arguments": [],
+    "proof_argument": true,
+    "typecheck_project": "tools/redb-native-runtime-tsconfig.json"
+  },
+  "tools/check-redb-projection-windows.mjs": {
+    "package": "t3-code-ls-storage",
+    "executable": "t3-code-ls-db",
+    "extra_arguments": [],
+    "proof_argument": true,
+    "typecheck_project": "tools/redb-projection-records-tsconfig.json"
+  },
+  "tools/check-redb-storage-maintenance.mjs": {
+    "package": "t3-code-ls-storage",
+    "executable": "t3-code-ls-db",
+    "extra_arguments": [],
+    "proof_argument": true,
+    "typecheck_project": "tools/redb-storage-maintenance-tsconfig.json"
+  },
+  "tools/check-redb-thread-find.mjs": {
+    "package": "t3-code-ls-storage",
+    "executable": "t3-code-ls-db",
+    "extra_arguments": [],
+    "proof_argument": true,
+    "typecheck_project": "tools/redb-thread-find-tsconfig.json"
+  },
+  "tools/check-redb-thread-search.mjs": {
+    "package": "t3-code-ls-storage",
+    "executable": "t3-code-ls-db",
+    "extra_arguments": [],
+    "proof_argument": true,
+    "typecheck_project": "tools/redb-thread-search-tsconfig.json"
+  },
+  "tools/check-omdb-production.mjs": {
+    "package": "t3-code-ls-storage",
+    "executable": "t3-code-ls-db",
+    "extra_arguments": [],
+    "proof_argument": true,
+    "typecheck_project": "tools/omdb-production-tsconfig.json"
+  },
+  "tools/check-omdb-migration-head.mjs": {
+    "package": "t3-code-ls-storage",
+    "executable": "t3-code-ls-db",
+    "extra_arguments": [],
+    "proof_argument": true,
+    "typecheck_project": "tools/omdb-migration-head-tsconfig.json"
+  },
+  "tools/check-redb-cli.mjs": {
+    "package": "t3-code-ls-storage",
+    "executable": "t3-code-ls-db",
+    "extra_arguments": [],
+    "proof_argument": true,
+    "typecheck_project": "tools/redb-cli-tsconfig.json"
   }
 }

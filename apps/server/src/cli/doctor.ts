@@ -6,6 +6,7 @@ import { Command, Flag, GlobalFlag, Prompt } from "effect/cli";
 
 import * as BootService from "../cloud/bootService.ts";
 import * as DatabaseMaintenance from "../persistence/DatabaseMaintenance.ts";
+import * as SelectedPersistence from "../persistence/SelectedPersistence.ts";
 import { projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
 import * as CliService from "./service.ts";
 
@@ -18,12 +19,18 @@ const formatBytes = (bytes: number) =>
 
 export const runDoctor = Effect.fn("runDoctor")(function* (
   databasePath: string,
-  options: { readonly fix: boolean; readonly dryRun: boolean; readonly interactive?: boolean },
+  options: {
+    readonly fix: boolean;
+    readonly dryRun: boolean;
+    readonly interactive?: boolean;
+    readonly engine?: "sqlite" | "omdb";
+  },
 ) {
   const maintenance = yield* DatabaseMaintenance.DatabaseMaintenance;
   const status = yield* maintenance.inspect(databasePath);
+  const native = options.engine === "omdb";
   yield* Console.log(
-    `Database: ${formatBytes(status.databaseBytes)}, ${formatBytes(status.reclaimableBytes)} reclaimable.`,
+    `Database: ${formatBytes(status.databaseBytes)}, ${native ? "at least " : ""}${formatBytes(status.reclaimableBytes)} reclaimable.`,
   );
   if (status.legacyDatabaseBytes !== null) {
     yield* Console.log(
@@ -31,19 +38,19 @@ export const runDoctor = Effect.fn("runDoctor")(function* (
     );
   }
   const repairs = [
-    ...(status.incrementalVacuumEnabled && status.reclaimableBytes === 0
+    ...((native || status.incrementalVacuumEnabled) && status.reclaimableBytes === 0
       ? []
       : [
           {
             id: "database" as const,
             title: "Reclaim database space",
             description: `${
-              status.incrementalVacuumEnabled
+              native || status.incrementalVacuumEnabled
                 ? "Returns unused space to disk."
                 : "Returns unused space to disk and turns on automatic shrinking."
             }\n  Pauses the background service, if installed, while it runs and may need temporary disk space.`,
             recommended:
-              !status.incrementalVacuumEnabled ||
+              (!native && !status.incrementalVacuumEnabled) ||
               status.reclaimableBytes >= DATABASE_COMPACTION_RECOMMENDED_BYTES,
           },
         ]),
@@ -139,8 +146,12 @@ export const doctorCommand = Command.make("doctor", {
     Effect.gen(function* () {
       const logLevel = yield* GlobalFlag.LogLevel;
       const config = yield* resolveCliAuthConfig(flags, logLevel);
-      yield* runDoctor(config.dbPath, { fix: flags.fix, dryRun: flags.dryRun }).pipe(
-        Effect.provide(Layer.merge(DatabaseMaintenance.layer, CliService.layer(config))),
+      yield* runDoctor(config.dbPath, {
+        fix: flags.fix,
+        dryRun: flags.dryRun,
+        engine: SelectedPersistence.selection.kind,
+      }).pipe(
+        Effect.provide(Layer.merge(SelectedPersistence.maintenance, CliService.layer(config))),
       );
     }),
   ),

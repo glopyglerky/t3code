@@ -39,6 +39,8 @@ pub(crate) struct Backend {
 
 struct DatabaseHandles {
     path: PathBuf,
+    exclusive: bool,
+    read_only: bool,
     identity: Option<same_file::Handle>,
     reader: Option<ReadOnlyDatabase>,
     writer: Mutex<Option<Arc<Database>>>,
@@ -69,6 +71,11 @@ impl DatabaseHandles {
     }
 
     fn try_writer(&self) -> Result<Arc<Database>> {
+        if self.read_only {
+            return Err(Error::Invalid(
+                "read-only database handle cannot acquire a writer".into(),
+            ));
+        }
         self.verify_identity()?;
         if let Some(writer) = self.writer.lock().map_err(storage_error)?.clone() {
             return Ok(writer);
@@ -354,6 +361,8 @@ impl Backend {
                             validate_tables(&reader.begin_read().map_err(storage_error)?)?;
                             return Ok(Arc::new(DatabaseHandles {
                                 path,
+                                exclusive: false,
+                                read_only: false,
                                 identity: Some(identity),
                                 reader: Some(reader),
                                 writer: Mutex::new(None),
@@ -417,6 +426,8 @@ impl Backend {
             }
             Ok::<_, Error>(Arc::new(DatabaseHandles {
                 path,
+                exclusive: false,
+                read_only: false,
                 identity: Some(identity),
                 reader: None,
                 writer: Mutex::new(Some(Arc::new(database))),
@@ -426,6 +437,270 @@ impl Backend {
         .await
         .map_err(worker_error)??;
         Ok(Self { handles })
+    }
+
+    /// Inspect an existing store without a writable descriptor, integrity repair,
+    /// schema initialization, or later promotion to a writer.
+    pub(crate) async fn open_read_only(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref().to_owned();
+        if !path.is_absolute() {
+            return Err(Error::Invalid("database path must be absolute".into()));
+        }
+        let handles = tokio::task::spawn_blocking(move || {
+            let file = OpenOptions::new()
+                .read(true)
+                .open(&path)
+                .map_err(storage_error)?;
+            let identity = file_identity(&file)?;
+            let file = redb::backends::FileBackend::new(file).map_err(storage_error)?;
+            let reader = builder()
+                .open_read_only_with_backend(file)
+                .map_err(storage_error)?;
+            if same_file::Handle::from_path(&path).map_err(storage_error)? != identity {
+                return Err(Error::IncompatibleStore);
+            }
+            validate_tables(&reader.begin_read().map_err(storage_error)?)?;
+            Ok::<_, Error>(Arc::new(DatabaseHandles {
+                path,
+                exclusive: false,
+                read_only: true,
+                identity: Some(identity),
+                reader: Some(reader),
+                writer: Mutex::new(None),
+                opening: Mutex::new(()),
+            }))
+        })
+        .await
+        .map_err(worker_error)??;
+        Ok(Self { handles })
+    }
+
+    /// An offline owner excludes every open omdb handle, including idle readers.
+    pub(crate) async fn open_exclusive(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref().to_owned();
+        if !path.is_absolute() {
+            return Err(Error::Invalid("database path must be absolute".into()));
+        }
+        let handles = tokio::task::spawn_blocking(move || {
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .map_err(storage_error)?;
+            if file.metadata().map_err(storage_error)?.len() == 0 {
+                return Err(Error::IncompatibleStore);
+            }
+            let identity = file_identity(&file)?;
+            let file = redb::backends::FileBackend::new(file).map_err(storage_error)?;
+            let mut options = builder();
+            options.set_concurrency_mode(ConcurrencyMode::ExclusiveWriter);
+            let database = options
+                .create_with_backend(file)
+                .map_err(|error| match error {
+                    redb::DatabaseError::DatabaseAlreadyOpen => Error::WriterBusy,
+                    other => storage_error(other),
+                })?;
+            if same_file::Handle::from_path(&path).map_err(storage_error)? != identity {
+                return Err(Error::IncompatibleStore);
+            }
+            validate_tables(&database.begin_read().map_err(storage_error)?)?;
+            Ok::<_, Error>(Arc::new(DatabaseHandles {
+                path,
+                exclusive: true,
+                read_only: false,
+                identity: Some(identity),
+                reader: None,
+                writer: Mutex::new(Some(Arc::new(database))),
+                opening: Mutex::new(()),
+            }))
+        })
+        .await
+        .map_err(worker_error)??;
+        Ok(Self { handles })
+    }
+
+    pub(crate) async fn storage_statistics(
+        &self,
+    ) -> Result<crate::application_storage::StorageStatistics> {
+        let handles = self.handles.clone();
+        tokio::task::spawn_blocking(move || {
+            let writer = handles.try_writer()?;
+            let transaction = writer.try_begin_write().map_err(|error| match error {
+                redb::TransactionError::WouldBlock => Error::WriterBusy,
+                other => storage_error(other),
+            })?;
+            let stats = transaction.stats().map_err(storage_error)?;
+            let database_bytes = std::fs::metadata(&handles.path)
+                .map_err(storage_error)?
+                .len();
+            let allocated_bytes = stats
+                .allocated_pages()
+                .checked_mul(stats.page_size() as u64)
+                .ok_or(Error::IncompatibleStore)?;
+            let accounted_bytes = stats
+                .stored_bytes()
+                .checked_add(stats.metadata_bytes())
+                .ok_or(Error::IncompatibleStore)?;
+            // The engine includes both free pages and within-page slack in fragmentation.
+            // Subtract all unaccounted allocated capacity, a conservative upper bound on
+            // within-page slack. This is reusable capacity, not removable file bytes:
+            // the allocator may retain empty regions even after offline compaction.
+            let reusable_bytes = stats
+                .fragmented_bytes()
+                .saturating_sub(allocated_bytes.saturating_sub(accounted_bytes))
+                .min(database_bytes);
+            let result = crate::application_storage::StorageStatistics {
+                database_bytes,
+                // Pinned omdb has no guaranteed physical-shrink prediction API.
+                reclaimable_bytes: 0,
+                reusable_bytes,
+                fragmented_bytes: stats.fragmented_bytes(),
+                allocated_bytes,
+            };
+            handles.verify_identity()?;
+            transaction.abort().map_err(storage_error)?;
+            Ok(result)
+        })
+        .await
+        .map_err(worker_error)?
+    }
+
+    /// A verified logical snapshot, never a copy of a live, mutating file.
+    pub(crate) async fn storage_backup(
+        &self,
+        destination: PathBuf,
+    ) -> Result<crate::application_storage::StorageBackup> {
+        if !destination.is_absolute() {
+            return Err(Error::Invalid("backup path must be absolute".into()));
+        }
+        let handles = self.handles.clone();
+        tokio::task::spawn_blocking(move || {
+            let source = handles.begin_read()?;
+            validate_tables(&source)?;
+            let mut options = OpenOptions::new();
+            options.read(true).write(true).create_new(true);
+            #[cfg(unix)]
+            options.mode(0o600);
+            let file = options.open(&destination).map_err(storage_error)?;
+            let backup_identity = file_identity(&file)?;
+            let file = redb::backends::FileBackend::new(file).map_err(storage_error)?;
+            let mut builder = redb::Database::builder();
+            builder
+                .set_cache_size(32 * 1024 * 1024)
+                .set_check_integrity_on_open(true);
+            let backup = builder.create_with_backend(file).map_err(storage_error)?;
+            let mut write = backup.begin_write().map_err(storage_error)?;
+            write
+                .set_durability(Durability::Immediate)
+                .map_err(storage_error)?;
+            let mut count = 0u64;
+            let mut digest = Sha256::new();
+            {
+                let input = source.open_table(TABLE).map_err(storage_error)?;
+                let mut output = write.open_table(TABLE).map_err(storage_error)?;
+                for entry in input.iter().map_err(storage_error)? {
+                    let (key, value) = entry.map_err(storage_error)?;
+                    output
+                        .insert(key.value(), value.value())
+                        .map_err(storage_error)?;
+                    digest.update((key.value().len() as u64).to_le_bytes());
+                    digest.update(key.value());
+                    digest.update((value.value().len() as u64).to_le_bytes());
+                    digest.update(value.value());
+                    count = count.checked_add(1).ok_or(Error::IncompatibleStore)?;
+                }
+            }
+            write.commit().map_err(commit_error)?;
+            drop(backup);
+            let verified_file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&destination)
+                .map_err(storage_error)?;
+            if file_identity(&verified_file)? != backup_identity {
+                return Err(Error::IncompatibleStore);
+            }
+            let backup = builder
+                .create_with_backend(
+                    redb::backends::FileBackend::new(verified_file).map_err(storage_error)?,
+                )
+                .map_err(storage_error)?;
+            let verify = backup.begin_read().map_err(storage_error)?;
+            validate_tables(&verify)?;
+            let mut verified_count = 0u64;
+            let mut verified_digest = Sha256::new();
+            for entry in verify
+                .open_table(TABLE)
+                .map_err(storage_error)?
+                .iter()
+                .map_err(storage_error)?
+            {
+                let (key, value) = entry.map_err(storage_error)?;
+                verified_digest.update((key.value().len() as u64).to_le_bytes());
+                verified_digest.update(key.value());
+                verified_digest.update((value.value().len() as u64).to_le_bytes());
+                verified_digest.update(value.value());
+                verified_count = verified_count
+                    .checked_add(1)
+                    .ok_or(Error::IncompatibleStore)?;
+            }
+            let digest = digest.finalize();
+            if count != verified_count || digest != verified_digest.finalize() {
+                return Err(Error::IncompatibleStore);
+            }
+            drop(verify);
+            drop(backup);
+            handles.verify_identity()?;
+            if same_file::Handle::from_path(&destination).map_err(storage_error)? != backup_identity
+            {
+                return Err(Error::IncompatibleStore);
+            }
+            #[cfg(unix)]
+            {
+                std::fs::File::open(destination.parent().ok_or(Error::IncompatibleStore)?)
+                    .and_then(|directory| directory.sync_all())
+                    .map_err(storage_error)?;
+            }
+            Ok(crate::application_storage::StorageBackup {
+                rows: count,
+                bytes: std::fs::metadata(&destination)
+                    .map_err(storage_error)?
+                    .len(),
+                checksum: digest.iter().map(|byte| format!("{byte:02x}")).collect(),
+            })
+        })
+        .await
+        .map_err(worker_error)?
+    }
+
+    pub(crate) async fn storage_compact(
+        &self,
+    ) -> Result<crate::application_storage::StorageCompaction> {
+        let handles = self.handles.clone();
+        tokio::task::spawn_blocking(move || {
+            handles.verify_identity()?;
+            if !handles.exclusive {
+                return Err(Error::Invalid(
+                    "physical compaction requires an exclusive offline handle".into(),
+                ));
+            }
+            let mut writer = handles.writer.lock().map_err(storage_error)?;
+            let database = Arc::get_mut(writer.as_mut().ok_or(Error::IncompatibleStore)?)
+                .ok_or(Error::WriterBusy)?;
+            let before_bytes = std::fs::metadata(&handles.path)
+                .map_err(storage_error)?
+                .len();
+            database.compact().map_err(storage_error)?;
+            handles.verify_identity()?;
+            Ok(crate::application_storage::StorageCompaction {
+                before_bytes,
+                after_bytes: std::fs::metadata(&handles.path)
+                    .map_err(storage_error)?
+                    .len(),
+            })
+        })
+        .await
+        .map_err(worker_error)?
     }
 
     pub(crate) async fn begin(&self) -> Result<Transaction> {
@@ -444,7 +719,7 @@ impl Backend {
             observed_records: 0,
             ranges: Vec::new(),
             reserved: None,
-            read_only: false,
+            read_only: self.handles.read_only,
         })
     }
 
@@ -634,6 +909,13 @@ impl Transaction {
         })
         .await
         .map_err(worker_error)??;
+        // A read-only transaction owns one immutable engine snapshot and cannot
+        // commit mutations. Retaining every read as conflict evidence only
+        // duplicates that snapshot and makes bounded paged queries exhaust a
+        // write-transaction observation budget. Each returned value stays capped.
+        if self.read_only {
+            return Ok(value);
+        }
         self.observe_size(
             key.len().saturating_add(value.as_ref().map_or(0, Vec::len)),
             1,
@@ -722,6 +1004,31 @@ impl Transaction {
     /// Fetch a previously size-checked set of values in one blocking operation.
     pub(crate) async fn get_many(&mut self, keys: &[Vec<u8>]) -> Result<Vec<Option<Vec<u8>>>> {
         self.ensure_active()?;
+        if self.read_only {
+            if keys.len() > MAX_BATCH_RECORDS {
+                return Err(Error::ResourceLimit(ResourceLimit::ReadBytes));
+            }
+            let snapshot = self.snapshot.clone();
+            let keys = keys.to_vec();
+            return tokio::task::spawn_blocking(move || {
+                let table = snapshot.open_table(TABLE).map_err(storage_error)?;
+                let mut total = 0usize;
+                let mut result = Vec::with_capacity(keys.len());
+                for key in keys {
+                    let value = table.get(key.as_slice()).map_err(storage_error)?;
+                    if let Some(value) = &value {
+                        total = total.saturating_add(value.value().len());
+                        if total > MAX_BATCH_BYTES {
+                            return Err(Error::ResourceLimit(ResourceLimit::ReadBytes));
+                        }
+                    }
+                    result.push(value.map(|value| value.value().to_vec()));
+                }
+                Ok(result)
+            })
+            .await
+            .map_err(worker_error)?;
+        }
         let missing: std::collections::BTreeSet<_> = keys
             .iter()
             .filter(|key| !self.writes.contains_key(*key) && !self.reads.contains_key(*key))
@@ -795,6 +1102,12 @@ impl Transaction {
         })
         .await
         .map_err(worker_error)??;
+        if self.read_only {
+            // No overlay is possible: require_write rejects every mutation.
+            // scan_table still bounds this page's bytes and requested row count.
+            debug_assert!(self.writes.is_empty());
+            return Ok(rows);
+        }
         let observed_bytes = rows.iter().fold(
             start.len().saturating_add(end.len()),
             |total, (key, value)| total.saturating_add(key.len()).saturating_add(value.len()),
@@ -1290,6 +1603,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn immutable_read_snapshots_page_without_retaining_write_observations() {
+        let fixture = TestFixture::start().await;
+        let store = fixture.initialize().await;
+        let peer = fixture.connect().await;
+        let start = store_key("test/readonly/");
+        let end = store_key("test/readonly0");
+        let keys = (0..1024)
+            .map(|index| store_key(&format!("test/readonly/{index:04}")))
+            .collect::<Vec<_>>();
+        let mut seed = store.db.begin().await.unwrap();
+        for key in &keys {
+            seed.put(key.clone(), b"original".to_vec()).await.unwrap();
+        }
+        seed.commit().await.unwrap();
+
+        let mut snapshot = store.db.begin_read_only().await.unwrap();
+        assert_eq!(
+            snapshot.get(&keys[0]).await.unwrap(),
+            Some(b"original".to_vec())
+        );
+        let mut fresh = peer.db.begin().await.unwrap();
+        fresh
+            .put(keys[0].clone(), b"updated".to_vec())
+            .await
+            .unwrap();
+        fresh.commit().await.unwrap();
+        // Repeated pages cross the writable observation limit without retaining
+        // their keys or bodies, while the actual engine snapshot stays stable.
+        for _ in 0..70 {
+            let page = snapshot.scan(&start, &end, 1024).await.unwrap();
+            assert_eq!(page.len(), 1024);
+            assert_eq!(page[0].1, b"original");
+        }
+        assert_eq!(
+            snapshot.get_many(&keys).await.unwrap(),
+            vec![Some(b"original".to_vec()); 1024]
+        );
+        assert!(snapshot.reads.is_empty());
+        assert!(snapshot.mutation_reads.is_empty());
+        assert!(snapshot.ranges.is_empty());
+        assert_eq!(snapshot.observed_bytes, 0);
+        assert_eq!(snapshot.observed_records, 0);
+        assert!(matches!(
+            snapshot.put(keys[0].clone(), b"forbidden".to_vec()).await,
+            Err(Error::Invalid(_))
+        ));
+        snapshot.rollback().await.unwrap();
+
+        // Writable snapshots retain the original range/conflict resource caps.
+        let mut writable = store.db.begin().await.unwrap();
+        let mut bounded = false;
+        for _ in 0..70 {
+            match writable.scan(&start, &end, 1024).await {
+                Ok(_) => {}
+                Err(Error::ResourceLimit(ResourceLimit::ObservationBudget)) => {
+                    bounded = true;
+                    break;
+                }
+                Err(error) => panic!("unexpected writable scan error: {error:?}"),
+            }
+        }
+        assert!(bounded);
+        writable.rollback().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn opening_and_initializing_preserve_missing_or_incompatible_files() {
         let fixture = TestFixture::start().await;
         assert!(Store::open_local(fixture.path()).await.is_err());
@@ -1477,6 +1856,8 @@ mod tests {
         let backend = Backend {
             handles: Arc::new(DatabaseHandles {
                 path: PathBuf::new(),
+                exclusive: false,
+                read_only: false,
                 identity: None,
                 reader: None,
                 writer: Mutex::new(Some(Arc::new(database))),

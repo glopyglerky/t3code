@@ -1,0 +1,10 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": { "types": ["node"], "lib": ["ESNext", "esnext.disposable"] },
+  "files": [
+    "../apps/server/src/persistence/AuthSessions.ts",
+    "../apps/server/src/persistence/AuthPairingLinks.ts",
+    "../apps/server/src/persistence/NativeAuthSessions.ts",
+    "../apps/server/src/persistence/NativeAuthPairingLinks.ts"
+  ]
+}

@@ -4,14 +4,26 @@ mod backend;
 
 #[path = "../../../apps/server/src/persistence/redb_transactions.rs"]
 pub mod application;
+#[path = "../../../apps/server/src/persistence/redb_auth_rows.rs"]
+pub mod application_auth;
+#[path = "../../../apps/server/src/persistence/redb_auxiliary_reads.rs"]
+pub mod application_auxiliary_reads;
+#[path = "../../../apps/server/src/persistence/redb_bootstrap.rs"]
+pub mod application_bootstrap;
 #[path = "../../../apps/server/src/persistence/redb_event_rows.rs"]
 pub mod application_events;
 #[path = "../../../apps/server/src/persistence/redb_import.rs"]
 pub mod application_import;
 #[path = "../../../apps/server/src/persistence/redb_json.rs"]
 pub(crate) mod application_json;
+#[path = "../../../apps/server/src/orchestration-v2/legacy/redb_legacy_v1.rs"]
+pub mod application_legacy_v1;
+#[path = "../../../apps/server/src/persistence/redb_message_rowids.rs"]
+pub mod application_message_rowids;
 #[path = "../../../apps/server/src/orchestration-v2/redb_effect_outbox.rs"]
 pub mod application_outbox;
+#[path = "../../../apps/server/src/peer/redb_peer_rows.rs"]
+pub mod application_peers;
 #[path = "../../../apps/server/src/orchestration-v2/redb_turn_item_positions.rs"]
 pub mod application_positions;
 #[path = "../../../apps/server/src/persistence/redb_projection_commit.rs"]
@@ -24,6 +36,18 @@ pub mod application_pull_requests;
 pub mod application_receipts;
 #[path = "../../../apps/server/src/persistence/redb_application_rows.rs"]
 pub(crate) mod application_rows;
+#[path = "../../../apps/server/src/persistence/redb_runtime_state.rs"]
+pub mod application_runtime_state;
+#[path = "../../../apps/server/src/scheduledTasks/redb_scheduled_rows.rs"]
+pub mod application_scheduled;
+#[path = "../../../apps/server/src/persistence/redb_thread_search.rs"]
+pub mod application_search;
+#[path = "../../../apps/server/src/persistence/redb_server_ownership.rs"]
+pub mod application_server_ownership;
+#[path = "../../../apps/server/src/persistence/redb_database_storage.rs"]
+pub mod application_storage;
+#[path = "../../../apps/server/src/persistence/redb_thread_find.rs"]
+pub mod application_thread_find;
 
 pub mod outbox;
 pub mod project_service;
@@ -448,6 +472,15 @@ impl Store {
     pub async fn open_local(path: impl AsRef<Path>) -> Result<Self> {
         let store = Self {
             db: Backend::open(path, false).await?,
+        };
+        store.metadata().await?;
+        Ok(store)
+    }
+
+    /// Strict read-only inspection; never creates or repairs a database file.
+    pub async fn open_read_only(path: impl AsRef<Path>) -> Result<Self> {
+        let store = Self {
+            db: Backend::open_read_only(path).await?,
         };
         store.metadata().await?;
         Ok(store)

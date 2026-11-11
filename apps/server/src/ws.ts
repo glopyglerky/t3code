@@ -246,9 +246,9 @@ import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
 import * as TriageService from "./triage/TriageService.ts";
 import * as PullRequestService from "./pullRequest/PullRequestService.ts";
 import * as PullRequestReviewGuideService from "./pullRequest/PullRequestReviewGuideService.ts";
-import { listLinkedPullRequestThreads } from "./pullRequest/linkedThreads.ts";
+import { LinkedPullRequestThreads } from "./pullRequest/linkedThreads.ts";
 import { pullRequestSyncKey } from "./pullRequest/pullRequestSyncKey.ts";
-import * as SqlClient from "effect/sql/SqlClient";
+import { PersistenceTransactions } from "./persistence/PersistenceTransactions.ts";
 import * as PullRequestSyncReactor from "./orchestration-v2/PullRequestSyncReactor.ts";
 import * as SourceControlDiscovery from "./sourceControl/SourceControlDiscovery.ts";
 import * as OtlpEndpointCheck from "./observability/OtlpEndpointCheck.ts";
@@ -1122,7 +1122,7 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
     readonly omitIdleSubagents?: boolean;
     readonly omitOlderSettled?: boolean;
   }) {
-    const sql = yield* SqlClient.SqlClient;
+    const transactions = yield* PersistenceTransactions;
     const threadManagement = yield* ThreadManagementService.ThreadManagementService;
     const applicationEvents = yield* OrchestrationEventStore.OrchestrationEventStore;
     const projects = yield* ProjectStore.ProjectStoreV2;
@@ -1150,7 +1150,7 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
     );
     const loadSnapshot = Effect.fn("ws.orchestrationV2.loadShellSnapshot")(function* () {
       const forSubscriber = yield* loadSubscriberShellSnapshot({
-        sql,
+        withReadTransaction: transactions.withReadTransaction,
         listShellIndex: threadManagement.listActiveShellIndex(),
         readThreads: (threadIds) =>
           threadManagement.readShellSnapshot({
@@ -1404,7 +1404,8 @@ export const layerWsRpc = (
   Layer.effectContext(
     Effect.gen(function* () {
       const currentSessionId = currentSession.sessionId;
-      const sql = yield* SqlClient.SqlClient;
+      const transactions = yield* PersistenceTransactions;
+      const linkedThreads = yield* LinkedPullRequestThreads;
       const threadManagement = yield* ThreadManagementService.ThreadManagementService;
       const intakeContext = yield* Effect.context<
         | ThreadManagementService.ThreadManagementService
@@ -2000,7 +2001,7 @@ export const layerWsRpc = (
 
       const getOrchestrationV2ArchivedShellSnapshot = Effect.gen(function* () {
         const { threads, projects, snapshotSequence } = yield* loadShellSnapshotParts({
-          sql,
+          withReadTransaction: transactions.withReadTransaction,
           readThreads: threadManagement.readShellSnapshot({ location: "archive" }),
           listProjects: projectStore.listShells(),
           latestSequence: applicationEvents.latestApplicationSequence,
@@ -2033,7 +2034,7 @@ export const layerWsRpc = (
           message: string,
         ) {
           const { threads, snapshotSequence } = yield* loadShellSnapshotParts({
-            sql,
+            withReadTransaction: transactions.withReadTransaction,
             readThreads: threadManagement.readShellSnapshot({ location: "active", ...options }),
             listProjects: Effect.succeed([]),
             latestSequence: applicationEvents.latestApplicationSequence,
@@ -2152,7 +2153,7 @@ export const layerWsRpc = (
             request: input,
             search: threadSearch.search,
             searchOlderSettled: threadSearch.searchOlderSettled,
-            sql,
+            withReadTransaction: transactions.withReadTransaction,
             readThreads: (threadIds) =>
               threadManagement.readShellSnapshot({ location: "active", threadIds }),
             latestSequence: applicationEvents.latestApplicationSequence,
@@ -2191,7 +2192,7 @@ export const layerWsRpc = (
           ),
         [ORCHESTRATION_V2_WS_METHODS.getOlderSettledThreads]: (input) =>
           loadOlderSettledThreadsPage({
-            sql,
+            withReadTransaction: transactions.withReadTransaction,
             listThreads: threadManagement.listOlderSettledThreads(input),
             readThreads: (threadIds) =>
               threadManagement.readShellSnapshot({ location: "active", threadIds }),
@@ -2795,11 +2796,7 @@ export const layerWsRpc = (
         [WS_METHODS.pullRequestsLinkedThreads]: (input) =>
           resolvePullRequestSyncKey(input).pipe(
             Effect.flatMap((key) =>
-              key === null
-                ? Effect.succeed({ threads: [] })
-                : listLinkedPullRequestThreads(key).pipe(
-                    Effect.provideService(SqlClient.SqlClient, sql),
-                  ),
+              key === null ? Effect.succeed({ threads: [] }) : linkedThreads.list(key),
             ),
           ),
         [WS_METHODS.pullRequestsDetail]: (input) =>
@@ -3534,7 +3531,8 @@ export const layer = Layer.unwrap(
     const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
     const peerLinks = yield* PeerLinks.PeerLinks;
     const peerLinkRequests = yield* PeerLinkRequests.PeerLinkRequests;
-    const sql = yield* SqlClient.SqlClient;
+    const transactions = yield* PersistenceTransactions;
+    const linkedThreads = yield* LinkedPullRequestThreads;
     return HttpRouter.add(
       "GET",
       "/ws",
@@ -3607,7 +3605,8 @@ export const layer = Layer.unwrap(
               Layer.provideMerge(RpcSerialization.layerJson),
               // Handler-context reporters see only request defects, not server-wide defects.
               Layer.provide(DefectReporter.layer),
-              Layer.provide(Layer.succeed(SqlClient.SqlClient, sql)),
+              Layer.provide(Layer.succeed(PersistenceTransactions, transactions)),
+              Layer.provide(Layer.succeed(LinkedPullRequestThreads, linkedThreads)),
               Layer.provide(AgentSessionScanner.layer),
               Layer.provide(ProviderMaintenanceRunner.layer),
               Layer.provide(Layer.succeed(NpmRelease.NpmRelease, npmRelease)),

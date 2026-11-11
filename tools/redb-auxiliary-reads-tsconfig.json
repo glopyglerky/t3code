@@ -1,0 +1,14 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "lib": ["ESNext", "esnext.disposable"]
+  },
+  "files": [
+    "../apps/server/src/persistence/AuxiliaryPersistenceReads.ts",
+    "../apps/server/src/persistence/SqliteAuxiliaryPersistenceReads.ts",
+    "../apps/server/src/persistence/NativeAuxiliaryPersistenceReads.ts",
+    "../apps/server/src/serverSettings.ts",
+    "../apps/server/src/storageCleanup.ts"
+  ]
+}

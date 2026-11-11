@@ -3,6 +3,7 @@ import * as Layer from "effect/Layer";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as SqlClient from "effect/sql/SqlClient";
+import * as Schema from "effect/Schema";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
 import { runMigrations } from "./Migrations.ts";
@@ -10,6 +11,15 @@ import { initializeV2Database } from "./initializeV2Database.ts";
 import * as ServerConfig from "../config.ts";
 
 const WAL_SIZE_LIMIT_BYTES = 128 * 1024 * 1024;
+
+export class NativeDatabaseAuthoritative extends Schema.TaggedError<NativeDatabaseAuthoritative>()(
+  "NativeDatabaseAuthoritative",
+  { path: Schema.String },
+) {
+  override get message() {
+    return "This data directory uses omdb. SQLite fallback would fork its state and is not permitted.";
+  }
+}
 
 const layerSetup = Layer.effectDiscard(
   Effect.gen(function* () {
@@ -72,6 +82,19 @@ export const layerMemory = Layer.provideMerge(
 export const layerConfig = Layer.unwrap(
   Effect.gen(function* () {
     const { dbPath } = yield* ServerConfig.ServerConfig;
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const marker = yield* fs
+      .readFileString(path.join(path.dirname(dbPath), "server-owner.sqlite"))
+      .pipe(
+        Effect.catchIf(
+          (error) => error.reason._tag === "NotFound",
+          () => Effect.succeed(""),
+        ),
+      );
+    if (dbPath.endsWith(".omdb") || marker === "t3code-omdb-owner-v1\n") {
+      return yield* new NativeDatabaseAuthoritative({ path: dbPath });
+    }
     yield* initializeV2Database(dbPath);
     return layerFromPath(dbPath);
   }),

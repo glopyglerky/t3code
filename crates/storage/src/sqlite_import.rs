@@ -341,6 +341,9 @@ fn validate_cell(value: &Value) -> Result<()> {
 struct Header {
     table_schema: BTreeMap<String, String>,
     migrations: Vec<(String, String)>,
+    version: u64,
+    search_index: bool,
+    search_delete_witness: bool,
 }
 
 fn validate_header(value: &Value, limits: ImportLimits) -> Result<Header> {
@@ -360,14 +363,30 @@ fn validate_header(value: &Value, limits: ImportLimits) -> Result<Header> {
             "migrations",
             "schema",
         ],
-        &[],
+        &["searchIndex", "searchDeleteWitness"],
     )?;
+    let version = number(value, "version")?;
     if string(value, "format")? != FORMAT
-        || number(value, "version")? != 1
+        || ![1, 2].contains(&version)
         || string(value, "sqliteVersion")?.is_empty()
     {
         return invalid("unsupported export format");
     }
+    let search_index = if version == 2 {
+        value["searchIndex"]
+            .as_bool()
+            .ok_or_else(|| Error::Invalid("SQLite export: missing search index metadata".into()))?
+    } else {
+        if value.get("searchIndex").is_some() {
+            return invalid("search index metadata requires export version 2");
+        }
+        false
+    };
+    let search_delete_witness = match value.get("searchDeleteWitness") {
+        None => false,
+        Some(Value::Bool(complete)) if version == 2 => *complete,
+        _ => return invalid("invalid search deletion witness metadata"),
+    };
     for key in ["userVersion", "schemaVersion", "applicationId"] {
         if value
             .get(key)
@@ -391,6 +410,9 @@ fn validate_header(value: &Value, limits: ImportLimits) -> Result<Header> {
             return invalid("excluded table names are not unique and ordered");
         }
         previous = Some(name);
+    }
+    if version == 2 && search_index != excluded.contains("orchestration_v2_message_search") {
+        return invalid("search index presence disagrees with derived tables");
     }
     let mut schema_names = HashSet::new();
     let mut table_schema = BTreeMap::new();
@@ -446,6 +468,9 @@ fn validate_header(value: &Value, limits: ImportLimits) -> Result<Header> {
     Ok(Header {
         table_schema,
         migrations,
+        version,
+        search_index,
+        search_delete_witness,
     })
 }
 
@@ -455,10 +480,16 @@ struct TableState {
     expected_rows: u64,
     observed_rows: u64,
     hash: Sha256,
+    has_rowid: bool,
+    previous_rowid: Option<i64>,
 }
 
 fn start_table(value: &Value, header: &Header, limits: ImportLimits) -> Result<TableState> {
-    fields(value, &["type", "name", "sql", "columns", "rowCount"], &[])?;
+    fields(
+        value,
+        &["type", "name", "sql", "columns", "rowCount"],
+        &["rowidColumn"],
+    )?;
     let name = string(value, "name")?;
     if header.table_schema.get(name).map(String::as_str) != Some(string(value, "sql")?) {
         return invalid("table does not match header schema");
@@ -519,12 +550,24 @@ fn start_table(value: &Value, header: &Header, limits: ImportLimits) -> Result<T
     {
         return invalid("migration table columns are missing");
     }
+    let has_rowid = match (header.version, value.get("rowidColumn")) {
+        (1, None) | (2, Some(Value::Null)) => false,
+        (2, Some(Value::String(alias)))
+            if ["rowid", "_rowid_", "oid"].contains(&alias.as_str())
+                && !unique_names.contains(alias) =>
+        {
+            true
+        }
+        _ => return invalid("invalid hidden rowid metadata"),
+    };
     Ok(TableState {
         name: name.to_owned(),
         columns: names,
         expected_rows,
         observed_rows: 0,
         hash: Sha256::new(),
+        has_rowid,
+        previous_rowid: None,
     })
 }
 
@@ -552,6 +595,17 @@ pub(crate) fn validate_reader<R: BufRead>(
     let mut bytes = 0u64;
     let mut rows = 0u64;
     let mut manifest = None;
+    let mut search_started = false;
+    let mut search_hash = Sha256::new();
+    let mut search_postings = 0u64;
+    let mut previous_posting: Option<(String, i64, u64)> = None;
+    let mut witness_started = false;
+    let mut survivors_started = false;
+    let mut witness_hash = Sha256::new();
+    let mut search_documents = 0u64;
+    let mut search_survivors = 0u64;
+    let mut previous_document: Option<i64> = None;
+    let mut previous_survivor: Option<(String, i64, u64)> = None;
     loop {
         let mut line = Vec::new();
         let count = reader
@@ -587,6 +641,9 @@ pub(crate) fn validate_reader<R: BufRead>(
         if let Some(header) = &header {
             match kind {
                 "table" => {
+                    if search_started {
+                        return invalid("table follows search postings");
+                    }
                     finish_table(&mut current, &mut tables)?;
                     let table = start_table(&value, header, limits)?;
                     if tables.last().is_some_and(|previous| {
@@ -602,7 +659,7 @@ pub(crate) fn validate_reader<R: BufRead>(
                     current = Some(table);
                 }
                 "row" => {
-                    fields(&value, &["type", "table", "ordinal", "values"], &[])?;
+                    fields(&value, &["type", "table", "ordinal", "values"], &["rowid"])?;
                     let Some(table) = current.as_mut() else {
                         return invalid("row has no table");
                     };
@@ -611,6 +668,18 @@ pub(crate) fn validate_reader<R: BufRead>(
                         || table.observed_rows >= table.expected_rows
                     {
                         return invalid("row table or ordinal mismatch");
+                    }
+                    if table.has_rowid {
+                        let rowid = decimal(string(&value, "rowid")?)?;
+                        if table
+                            .previous_rowid
+                            .is_some_and(|previous| previous >= rowid)
+                        {
+                            return invalid("hidden rowids are not unique and ordered");
+                        }
+                        table.previous_rowid = Some(rowid);
+                    } else if value.get("rowid").is_some() {
+                        return invalid("rowid has no table metadata");
                     }
                     let cells = array(&value, "values")?;
                     if cells.len() != table.columns.len() {
@@ -648,15 +717,109 @@ pub(crate) fn validate_reader<R: BufRead>(
                     }
                     table.hash.update(&line);
                 }
+                "search_posting" => {
+                    finish_table(&mut current, &mut tables)?;
+                    search_started = true;
+                    if header.version != 2
+                        || !header.search_index
+                        || witness_started
+                        || tables.len() != header.table_schema.len()
+                    {
+                        return invalid("search posting has no complete source schema");
+                    }
+                    fields(&value, &["type", "term", "rowid", "offset"], &[])?;
+                    let term = string(&value, "term")?;
+                    let rowid = decimal(string(&value, "rowid")?)?;
+                    let offset = number(&value, "offset")?;
+                    if term.is_empty() || offset > i32::MAX as u64 {
+                        return invalid("invalid search posting");
+                    }
+                    let posting = (term.to_owned(), rowid, offset);
+                    if previous_posting
+                        .as_ref()
+                        .is_some_and(|previous| previous >= &posting)
+                    {
+                        return invalid("search postings are not unique and ordered");
+                    }
+                    previous_posting = Some(posting);
+                    search_postings = search_postings.checked_add(1).ok_or_else(|| {
+                        Error::Invalid("SQLite export search count overflow".into())
+                    })?;
+                    if search_postings > limits.max_rows {
+                        return invalid("search posting limit exceeded");
+                    }
+                    search_hash.update(&line);
+                }
+                "search_current_document" => {
+                    finish_table(&mut current, &mut tables)?;
+                    search_started = true;
+                    witness_started = true;
+                    if !header.search_delete_witness
+                        || !header.search_index
+                        || survivors_started
+                        || tables.len() != header.table_schema.len()
+                    {
+                        return invalid("search document has no complete source witness");
+                    }
+                    fields(&value, &["type", "rowid"], &[])?;
+                    let rowid = decimal(string(&value, "rowid")?)?;
+                    if previous_document.is_some_and(|previous| previous >= rowid) {
+                        return invalid("search documents are not unique and ordered");
+                    }
+                    previous_document = Some(rowid);
+                    search_documents += 1;
+                    if search_documents > limits.max_rows {
+                        return invalid("search document limit exceeded");
+                    }
+                    witness_hash.update(&line);
+                }
+                "search_survivor_posting" => {
+                    finish_table(&mut current, &mut tables)?;
+                    search_started = true;
+                    witness_started = true;
+                    survivors_started = true;
+                    if !header.search_delete_witness
+                        || !header.search_index
+                        || tables.len() != header.table_schema.len()
+                    {
+                        return invalid("search survivor has no complete source witness");
+                    }
+                    fields(&value, &["type", "term", "rowid", "offset"], &[])?;
+                    let term = string(&value, "term")?;
+                    let rowid = decimal(string(&value, "rowid")?)?;
+                    let offset = number(&value, "offset")?;
+                    if term.is_empty() || offset > i32::MAX as u64 {
+                        return invalid("invalid search survivor posting");
+                    }
+                    let posting = (term.to_owned(), rowid, offset);
+                    if previous_survivor
+                        .as_ref()
+                        .is_some_and(|previous| previous >= &posting)
+                    {
+                        return invalid("search survivor postings are not unique and ordered");
+                    }
+                    previous_survivor = Some(posting);
+                    search_survivors += 1;
+                    if search_survivors > search_postings || search_survivors > limits.max_rows {
+                        return invalid("search survivor posting limit exceeded");
+                    }
+                    witness_hash.update(&line);
+                }
                 "manifest" => {
                     finish_table(&mut current, &mut tables)?;
                     fields(
                         &value,
                         &["type", "tableCount", "rowCount", "tables", "sha256"],
-                        &[],
+                        &["searchIndex", "searchDeleteWitness"],
                     )?;
                     let digest = hex(&export_hash.clone().finalize());
-                    let expected = json!({"type":"manifest", "tableCount":tables.len(), "rowCount":rows, "tables":tables, "sha256":digest});
+                    let mut expected = json!({"type":"manifest", "tableCount":tables.len(), "rowCount":rows, "tables":tables, "sha256":digest});
+                    if header.version == 2 {
+                        expected["searchIndex"] = json!({"postingCount":search_postings, "sha256":hex(&search_hash.clone().finalize())});
+                    }
+                    if header.search_delete_witness {
+                        expected["searchDeleteWitness"] = json!({"documentCount":search_documents, "survivorPostingCount":search_survivors, "sha256":hex(&witness_hash.clone().finalize())});
+                    }
                     if value != expected || tables.len() != header.table_schema.len() {
                         return invalid("manifest counts or SHA-256 checksums do not match");
                     }
@@ -1166,6 +1329,171 @@ mod tests {
         assert_eq!(summary.row_count, 7);
         assert_eq!(summary.byte_count, bytes.len() as u64);
         assert_eq!(summary.file_sha256, hash(&bytes));
+    }
+
+    fn version_two_fixture(rowids: &[&str], postings: &[Value]) -> Vec<u8> {
+        let original = fixture(rowids.iter().map(|_| json!({"type":"null"})).collect());
+        let mut records: Vec<Value> = String::from_utf8(original)
+            .unwrap()
+            .lines()
+            .map(|text| serde_json::from_str(text).unwrap())
+            .collect();
+        records[0]["version"] = json!(2);
+        records[0]["searchIndex"] = json!(true);
+        records[0]["excludedDerivedTables"] = json!(["orchestration_v2_message_search"]);
+        records[1]["rowidColumn"] = json!("rowid");
+        for (index, rowid) in rowids.iter().enumerate() {
+            records[index + 2]["rowid"] = json!(rowid);
+        }
+        records.pop();
+        let row_bytes: Vec<u8> = records
+            .iter()
+            .filter(|row| row["type"] == "row")
+            .flat_map(line)
+            .collect();
+        records.extend_from_slice(postings);
+        let mut bytes: Vec<u8> = records.iter().flat_map(line).collect();
+        let posting_bytes: Vec<u8> = postings.iter().flat_map(line).collect();
+        let manifest = json!({"type":"manifest", "tableCount":1, "rowCount":rowids.len(),
+            "tables":[{"name":"records","rowCount":rowids.len(),"sha256":hash(&row_bytes)}],
+            "sha256":hash(&bytes),"searchIndex":{"postingCount":postings.len(),"sha256":hash(&posting_bytes)}});
+        bytes.extend(line(&manifest));
+        bytes
+    }
+
+    fn deletion_witness_fixture(witness: &[Value], complete: bool) -> Vec<u8> {
+        let original = version_two_fixture(
+            &["-7", "1"],
+            &[
+                json!({"type":"search_posting","term":"abc","rowid":"-7","offset":0}),
+                json!({"type":"search_posting","term":"xyz","rowid":"1","offset":2}),
+            ],
+        );
+        let mut records: Vec<Value> = String::from_utf8(original)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let mut manifest = records.pop().unwrap();
+        records[0]["searchDeleteWitness"] = json!(complete);
+        records.extend_from_slice(witness);
+        let mut bytes: Vec<u8> = records.iter().flat_map(line).collect();
+        let witness_bytes: Vec<u8> = witness.iter().flat_map(line).collect();
+        manifest["sha256"] = json!(hash(&bytes));
+        manifest["searchDeleteWitness"] = json!({
+            "documentCount":witness.iter().filter(|row|row["type"]=="search_current_document").count(),
+            "survivorPostingCount":witness.iter().filter(|row|row["type"]=="search_survivor_posting").count(),
+            "sha256":hash(&witness_bytes),
+        });
+        bytes.extend(line(&manifest));
+        bytes
+    }
+
+    #[test]
+    fn deletion_witness_is_complete_ordered_bounded_and_hash_checked() {
+        let document = |rowid| json!({"type":"search_current_document","rowid":rowid});
+        let survivor = |term, rowid, offset| json!({"type":"search_survivor_posting","term":term,"rowid":rowid,"offset":offset});
+        for witness in [
+            vec![document("-7"), document("1"), survivor("abc", "-7", 0)],
+            vec![document("1")], // A current generation may have zero tokens.
+            vec![survivor("xyz", "1", 2)], // An orphan has no current generation.
+            Vec::new(),
+        ] {
+            let bytes = deletion_witness_fixture(&witness, true);
+            assert!(
+                validate_reader(Cursor::new(bytes), ImportLimits::default(), |_| Ok(())).is_ok()
+            );
+        }
+        for witness in [
+            vec![document("1"), document("1")],
+            vec![document("1"), document("-7")],
+            vec![document("01")],
+            vec![document("9223372036854775808")],
+            vec![json!({"type":"search_current_document","rowid":"1","extra":true})],
+            vec![survivor("xyz", "1", 2), document("1")],
+            vec![survivor("xyz", "1", 2), survivor("abc", "-7", 0)],
+            vec![survivor("abc", "-7", 0), survivor("abc", "-7", 0)],
+            vec![survivor("", "1", 0)],
+            vec![survivor("abc", "1", 2147483648u64)],
+            vec![
+                document("1"),
+                json!({"type":"search_posting","term":"xyz","rowid":"1","offset":4}),
+            ],
+        ] {
+            let bytes = deletion_witness_fixture(&witness, true);
+            assert!(
+                validate_reader(Cursor::new(bytes), ImportLimits::default(), |_| Ok(())).is_err()
+            );
+        }
+        let unwitnessed = deletion_witness_fixture(&[document("1")], false);
+        assert!(
+            validate_reader(
+                Cursor::new(unwitnessed),
+                ImportLimits::default(),
+                |_| Ok(())
+            )
+            .is_err()
+        );
+        let corrupt = String::from_utf8(deletion_witness_fixture(&[document("1")], true))
+            .unwrap()
+            .replace("\"documentCount\":1", "\"documentCount\":0");
+        assert!(
+            validate_reader(Cursor::new(corrupt), ImportLimits::default(), |_| Ok(())).is_err()
+        );
+    }
+
+    #[test]
+    fn version_two_validates_signed_rowids_and_exact_ordered_search_postings() {
+        let postings = vec![
+            json!({"type":"search_posting","term":"abc","rowid":"-9223372036854775808","offset":0}),
+            json!({"type":"search_posting","term":"abc","rowid":"9999","offset":2}),
+            json!({"type":"search_posting","term":"xyz","rowid":"9223372036854775807","offset":1}),
+        ];
+        let bytes = version_two_fixture(
+            &["-9223372036854775808", "60001", "9223372036854775807"],
+            &postings,
+        );
+        assert_eq!(
+            validate_reader(Cursor::new(&bytes), ImportLimits::default(), |_| Ok(()))
+                .unwrap()
+                .row_count,
+            3
+        );
+        for rowids in [
+            vec!["1", "1"],
+            vec!["7", "-1"],
+            vec!["01"],
+            vec!["9223372036854775808"],
+            vec!["-0"],
+        ] {
+            assert!(
+                validate_reader(
+                    Cursor::new(version_two_fixture(&rowids, &[])),
+                    ImportLimits::default(),
+                    |_| Ok(())
+                )
+                .is_err()
+            );
+        }
+        let mut reversed = postings.clone();
+        reversed.reverse();
+        let invalid_postings = [
+            vec![postings[0].clone(), postings[0].clone()],
+            reversed,
+            vec![json!({"type":"search_posting","term":"abc","rowid":"01","offset":0})],
+            vec![json!({"type":"search_posting","term":"","rowid":"1","offset":0})],
+            vec![json!({"type":"search_posting","term":"abc","rowid":"1","offset":2147483648u64})],
+        ];
+        for postings in invalid_postings {
+            assert!(
+                validate_reader(
+                    Cursor::new(version_two_fixture(&["1"], &postings)),
+                    ImportLimits::default(),
+                    |_| Ok(())
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]

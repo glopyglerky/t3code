@@ -3,8 +3,10 @@ import * as NodeCrypto from "node:crypto";
 import { ScheduledTask, ScheduledTaskError } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import * as SqlClient from "effect/sql/SqlClient";
+import { ScheduledRows, AnyRows, PendingRows } from "./ScheduledRows.ts";
 import { renderWebhookPrompt, type WebhookRequest } from "./webhookTemplate.ts";
+
+const encodeDeliveryIds = Schema.encodeEffect(Schema.fromJsonString(Schema.Array(Schema.String)));
 
 function key(template: string | undefined, request: WebhookRequest): string {
   if (template === undefined) return "";
@@ -16,17 +18,17 @@ function key(template: string | undefined, request: WebhookRequest): string {
 
 export const releaseWebhookReplay = Effect.fn("ScheduledTaskService.releaseWebhookReplay")(
   function* (deliveryId: string) {
-    const sql = yield* SqlClient.SqlClient;
-    yield* sql`DELETE FROM scheduled_task_webhook_replay_keys WHERE delivery_id = ${deliveryId}`;
+    const rows = yield* ScheduledRows;
+    yield* rows.write({ kind: "release_replay", delivery_id: deliveryId }, AnyRows);
   },
 );
 
 const hasReplayKey = Effect.fn(function* (taskId: string, replayKey: string, now: number) {
-  const sql = yield* SqlClient.SqlClient;
+  const rows = yield* ScheduledRows;
   return (
     replayKey !== "" &&
-    (yield* sql`SELECT 1 FROM scheduled_task_webhook_replay_keys
-    WHERE task_id = ${taskId} AND replay_key = ${replayKey} AND expires_at > ${now}`).length > 0
+    (yield* rows.read({ kind: "has_replay", task_id: taskId, replay_key: replayKey, now }, AnyRows))
+      .length > 0
   );
 });
 const claimReplayKey = Effect.fn(function* (
@@ -36,10 +38,18 @@ const claimReplayKey = Effect.fn(function* (
   now: number,
 ) {
   if (replayKey === "") return;
-  const sql = yield* SqlClient.SqlClient;
-  yield* sql`DELETE FROM scheduled_task_webhook_replay_keys WHERE expires_at <= ${now}`;
-  yield* sql`INSERT INTO scheduled_task_webhook_replay_keys (task_id, replay_key, delivery_id, expires_at)
-    VALUES (${taskId}, ${replayKey}, ${deliveryId}, ${now + 7 * 24 * 60 * 60 * 1000})`;
+  const rows = yield* ScheduledRows;
+  yield* rows.write(
+    {
+      kind: "claim_replay",
+      task_id: taskId,
+      replay_key: replayKey,
+      delivery_id: deliveryId,
+      now,
+      expires_at: now + 7 * 24 * 60 * 60 * 1000,
+    },
+    AnyRows,
+  );
 });
 
 export const acceptWebhookDedupe = Effect.fn("ScheduledTaskService.acceptWebhookDedupe")(function* (
@@ -52,17 +62,24 @@ export const acceptWebhookDedupe = Effect.fn("ScheduledTaskService.acceptWebhook
   checkCapacity: Effect.Effect<void, "queue_full" | ScheduledTaskError>,
   replaceDeliveryRequest: (ownerId: string) => Effect.Effect<void, ScheduledTaskError>,
 ) {
-  const sql = yield* SqlClient.SqlClient;
+  const rows = yield* ScheduledRows;
   const dedupe = task.schedule.type === "webhook" ? task.schedule.dedupe : undefined;
   if (dedupe === undefined) return "run" as const;
   const replayKey = key(dedupe.replayKey, request);
   if (yield* hasReplayKey(task.id, replayKey, now)) return "duplicate" as const;
   const coalesceKey = key(dedupe.coalesceKey, request);
   if (coalesceKey === "") return "run" as const;
-  const pending = yield* sql<{
-    delivery_id: string;
-  }>`SELECT delivery_id FROM scheduled_task_webhook_pending
-    WHERE task_id = ${task.id} AND coalesce_key = ${coalesceKey} AND state = 'pending' AND due_at > ${now}`;
+  const pending = yield* rows.read(
+    {
+      kind: "pending",
+      task_id: task.id,
+      coalesce_key: coalesceKey,
+      states: ["pending"],
+      due_after: now,
+      first: false,
+    },
+    PendingRows,
+  );
   const logCoalesced = pending.length > 0 ? yield* reserveCoalescedLog : true;
   if (pending.length === 0) {
     yield* checkCapacity;
@@ -78,16 +95,38 @@ export const acceptWebhookDedupe = Effect.fn("ScheduledTaskService.acceptWebhook
     bodyText: request.bodyText,
   });
   if (pending.length > 0) {
-    yield* sql`UPDATE scheduled_task_webhook_pending SET request_json = ${requestJson},
-      delivery_ids_json = json_insert(delivery_ids_json, '$[#]', ${deliveryId}) WHERE delivery_id = ${pending[0]!.delivery_id}`;
+    yield* rows.write(
+      {
+        kind: "patch_pending",
+        delivery_id: pending[0]!.delivery_id,
+        patch: { request_json: requestJson },
+        append_delivery_id: deliveryId,
+      },
+      AnyRows,
+    );
     yield* replaceDeliveryRequest(pending[0]!.delivery_id);
     return logCoalesced ? ("coalesced" as const) : ("coalesced_unlogged" as const);
   }
   // Expired windows are immutable, even if the scheduler has not dispatched them yet.
-  yield* sql`UPDATE scheduled_task_webhook_pending SET state = 'dispatching'
-    WHERE task_id = ${task.id} AND coalesce_key = ${coalesceKey} AND state = 'pending' AND due_at <= ${now}`;
-  yield* sql`INSERT INTO scheduled_task_webhook_pending (delivery_id, task_id, coalesce_key, due_at, task_json, request_json, delivery_ids_json)
-    VALUES (${deliveryId}, ${task.id}, ${coalesceKey}, ${now + (dedupe.coalesceWindowSeconds ?? 120) * 1000}, ${yield* encodePendingTask(task)}, ${requestJson}, json_array(${deliveryId}))`;
+  yield* rows.write(
+    { kind: "expire_pending", task_id: task.id, coalesce_key: coalesceKey, now },
+    AnyRows,
+  );
+  yield* rows.write(
+    {
+      kind: "insert_pending",
+      row: {
+        delivery_id: deliveryId,
+        task_id: task.id,
+        coalesce_key: coalesceKey,
+        due_at: now + (dedupe.coalesceWindowSeconds ?? 120) * 1000,
+        task_json: yield* encodePendingTask(task),
+        request_json: requestJson,
+        delivery_ids_json: yield* encodeDeliveryIds([deliveryId]),
+      },
+    },
+    AnyRows,
+  );
   return "pending" as const;
 });
 

@@ -8,7 +8,7 @@ import * as Result from "effect/Result";
 import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
-import * as SqlClient from "effect/sql/SqlClient";
+import { PersistenceTransactions } from "../persistence/PersistenceTransactions.ts";
 
 import {
   annotateEnvironmentRequest,
@@ -53,7 +53,7 @@ export const layer = HttpApiBuilder.group(
   EnvironmentHttpApi,
   "orchestration",
   Effect.fnUntraced(function* (handlers) {
-    const sql = yield* SqlClient.SqlClient;
+    const transactions = yield* PersistenceTransactions;
     const environment = yield* ServerEnvironment.ServerEnvironmentIdentity;
     const threadManagement = yield* ThreadManagementService.ThreadManagementService;
     const applicationEvents = yield* OrchestrationEventStore.OrchestrationEventStore;
@@ -82,7 +82,7 @@ export const layer = HttpApiBuilder.group(
         readonly omitOlderSettled: boolean;
       }) {
         const { snapshot } = yield* loadSubscriberShellSnapshot({
-          sql,
+          withReadTransaction: transactions.withReadTransaction,
           listShellIndex: threadManagement.listActiveShellIndex(),
           readThreads: (threadIds) =>
             threadManagement.readShellSnapshot({

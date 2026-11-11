@@ -18,7 +18,6 @@ import {
   OrchestrationProjectShell as ProjectShellSchema,
   OrchestrationV2ThreadShell as ThreadShellSchema,
 } from "@t3tools/contracts";
-import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import type * as Arr from "effect/Array";
 import type * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
@@ -28,11 +27,11 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
-import type * as SqlClient from "effect/sql/SqlClient";
 import * as Stream from "effect/Stream";
 
 import { bufferLatestLiveStream } from "./LiveStreamBudget.ts";
 import type { ActiveShellIndexEntry } from "./ProjectionStore.ts";
+import type { PersistenceTransactionsShape } from "../persistence/PersistenceTransactions.ts";
 
 type ShellDelta = Extract<OrchestrationV2ShellStreamItem, { readonly sequence: number }>;
 
@@ -292,7 +291,7 @@ function shellSubscriberThreadIds(
  */
 export const loadSubscriberShellSnapshot = Effect.fn("ShellStream.loadSubscriberShellSnapshot")(
   function* <E1, E2, E3, E4, E5>(input: {
-    readonly sql: SqlClient.SqlClient;
+    readonly withReadTransaction: PersistenceTransactionsShape["withReadTransaction"];
     readonly listShellIndex: Effect.Effect<ReadonlyArray<ActiveShellIndexEntry>, E1>;
     readonly readThreads: (
       threadIds: ReadonlyArray<ThreadId> | undefined,
@@ -302,21 +301,19 @@ export const loadSubscriberShellSnapshot = Effect.fn("ShellStream.loadSubscriber
     readonly options: ShellSubscriberOptions;
   }) {
     const trims = input.options.omitIdleSubagents || input.options.omitOlderSettled;
-    const read = yield* input.sql
-      .withTransaction(
-        Effect.gen(function* () {
-          const index = trims ? yield* input.listShellIndex : null;
-          return {
-            index,
-            decodeThreads: yield* input.readThreads(
-              index === null ? undefined : shellSubscriberThreadIds(index, input.options),
-            ),
-            projects: yield* input.listProjects,
-            snapshotSequence: yield* input.latestSequence,
-          };
-        }),
-      )
-      .pipe(NodeSqliteClient.readOnly);
+    const read = yield* input.withReadTransaction(
+      Effect.gen(function* () {
+        const index = trims ? yield* input.listShellIndex : null;
+        return {
+          index,
+          decodeThreads: yield* input.readThreads(
+            index === null ? undefined : shellSubscriberThreadIds(index, input.options),
+          ),
+          projects: yield* input.listProjects,
+          snapshotSequence: yield* input.latestSequence,
+        };
+      }),
+    );
     const base = buildActiveShellSnapshot({
       projects: read.projects,
       threads: yield* read.decodeThreads,
@@ -332,8 +329,7 @@ export const loadSubscriberShellSnapshot = Effect.fn("ShellStream.loadSubscriber
 
 /**
  * One transaction covers the reads so they agree; the threads are decoded after it commits,
- * because the server shares one SQLite connection and decoding a large shell takes longer than
- * reading it.
+ * so decoding a large shell does not hold the selected store's read transaction open.
  */
 export const loadShellSnapshotParts = Effect.fn("ShellStream.loadShellSnapshotParts")(function* <
   E1,
@@ -341,20 +337,18 @@ export const loadShellSnapshotParts = Effect.fn("ShellStream.loadShellSnapshotPa
   E3,
   E4,
 >(input: {
-  readonly sql: SqlClient.SqlClient;
+  readonly withReadTransaction: PersistenceTransactionsShape["withReadTransaction"];
   readonly readThreads: Effect.Effect<Effect.Effect<OrchestrationV2ThreadShellSnapshot, E2>, E1>;
   readonly listProjects: Effect.Effect<ReadonlyArray<OrchestrationProjectShell>, E3>;
   readonly latestSequence: Effect.Effect<number, E4>;
 }) {
-  const read = yield* input.sql
-    .withTransaction(
-      Effect.all({
-        decodeThreads: input.readThreads,
-        projects: input.listProjects,
-        snapshotSequence: input.latestSequence,
-      }),
-    )
-    .pipe(NodeSqliteClient.readOnly);
+  const read = yield* input.withReadTransaction(
+    Effect.all({
+      decodeThreads: input.readThreads,
+      projects: input.listProjects,
+      snapshotSequence: input.latestSequence,
+    }),
+  );
   return {
     projects: read.projects,
     threads: yield* read.decodeThreads,
@@ -365,7 +359,7 @@ export const loadShellSnapshotParts = Effect.fn("ShellStream.loadShellSnapshotPa
 /** A page of older settled threads, read and decoded like `loadShellSnapshotParts`. */
 export const loadOlderSettledThreadsPage = Effect.fn("ShellStream.loadOlderSettledThreadsPage")(
   function* <E1, E2, E3, E4>(input: {
-    readonly sql: SqlClient.SqlClient;
+    readonly withReadTransaction: PersistenceTransactionsShape["withReadTransaction"];
     readonly listThreads: Effect.Effect<
       {
         readonly threadIds: ReadonlyArray<ThreadId>;
@@ -378,19 +372,17 @@ export const loadOlderSettledThreadsPage = Effect.fn("ShellStream.loadOlderSettl
     ) => Effect.Effect<Effect.Effect<OrchestrationV2ThreadShellSnapshot, E3>, E2>;
     readonly latestSequence: Effect.Effect<number, E4>;
   }) {
-    const read = yield* input.sql
-      .withTransaction(
-        Effect.gen(function* () {
-          const listed = yield* input.listThreads;
-          return {
-            listed,
-            decodeThreads:
-              listed.threadIds.length === 0 ? null : yield* input.readThreads(listed.threadIds),
-            snapshotSequence: yield* input.latestSequence,
-          };
-        }),
-      )
-      .pipe(NodeSqliteClient.readOnly);
+    const read = yield* input.withReadTransaction(
+      Effect.gen(function* () {
+        const listed = yield* input.listThreads;
+        return {
+          listed,
+          decodeThreads:
+            listed.threadIds.length === 0 ? null : yield* input.readThreads(listed.threadIds),
+          snapshotSequence: yield* input.latestSequence,
+        };
+      }),
+    );
     const threads = read.decodeThreads === null ? [] : (yield* read.decodeThreads).threads;
     const order = new Map(read.listed.threadIds.map((threadId, index) => [threadId, index]));
     return {

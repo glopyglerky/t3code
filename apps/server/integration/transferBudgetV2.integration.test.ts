@@ -42,6 +42,7 @@ import { HttpRouter, HttpServer } from "effect/http";
 import { Rpc, RpcGroup, RpcServer, RpcSerialization } from "effect/rpc";
 import * as ServerEnvironment from "../src/environment/ServerEnvironment.ts";
 import * as SqlitePersistence from "../src/persistence/Sqlite.ts";
+import * as PersistenceTransactions from "../src/persistence/PersistenceTransactions.ts";
 import * as OrchestrationEventStore from "../src/persistence/OrchestrationEventStore.ts";
 import * as EventStore from "../src/orchestration-v2/EventStore.ts";
 import * as EventSink from "../src/orchestration-v2/EventSink.ts";
@@ -101,6 +102,7 @@ const layerPersistence = EventSink.layer.pipe(
   Layer.provideMerge(EventStore.layerFromOrchestrationEventStore),
   Layer.provideMerge(ProjectionStore.layer),
   Layer.provideMerge(OrchestrationEventStore.layer),
+  Layer.provideMerge(PersistenceTransactions.sqliteLayer),
   Layer.provideMerge(SqlitePersistence.layerMemory),
 );
 const layerManagement = Layer.unwrap(

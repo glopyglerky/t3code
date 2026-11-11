@@ -277,6 +277,7 @@ impl Store {
         };
         let mut excluded_derived_tables = Vec::new();
         let mut stage = Stage::new();
+        let mut survivor_source_flushed = false;
         let staged = async {
             while let Some(record) = records.recv().await {
                 match record["type"].as_str().ok_or(Error::IncompatibleStore)? {
@@ -317,10 +318,69 @@ impl Store {
                             &generation,
                             &format!("source/{}", request_digest(&json!([table.name, row.key]))),
                         );
-                        stage.push(self, witness, encode(&json!({
+                        let mut source = json!({
                             "table": table.name, "key": row.key, "ordinal": record["ordinal"]
-                        }))?).await?;
+                        });
+                        if let Some(rowid) = record.get("rowid") {
+                            source["rowid"] = rowid.clone();
+                        }
+                        stage.push(self, witness, encode(&source)?).await?;
                         stage.push(self, key, encode_row(&row)?).await?;
+                    }
+                    "search_posting" | "search_survivor_posting" => {
+                        let survivor = record["type"] == "search_survivor_posting";
+                        let term = record["term"].as_str().ok_or(Error::IncompatibleStore)?;
+                        let rowid: i64 = record["rowid"].as_str()
+                            .and_then(|value| value.parse().ok()).ok_or(Error::IncompatibleStore)?;
+                        let offset = record["offset"].as_u64().ok_or(Error::IncompatibleStore)?;
+                        let term_key: String = term.as_bytes().iter()
+                            .map(|byte| format!("{byte:02x}")).collect();
+                        let ordered_rowid = !((rowid as u64) ^ (1 << 63));
+                        let posting = encode(&json!({"term":term,"rowid":rowid.to_string(),"offset":offset}))?;
+                        let original = metadata_key(&generation, &format!("search-posting/{term_key}/{ordered_rowid:016x}/{offset:016x}"));
+                        if survivor {
+                            if !survivor_source_flushed {
+                                // Original postings precede every survivor in the
+                                // validated stream. Prove each survivor is actual
+                                // source evidence before publishing its metadata.
+                                stage.flush(self).await?;
+                                survivor_source_flushed = true;
+                            }
+                            if self.db.read(&original).await?.as_deref() != Some(posting.as_slice()) {
+                                return Err(invalid("search survivor is not an exact original posting"));
+                            }
+                            stage.push(
+                                self,
+                                metadata_key(&generation, &format!("search-survivor-posting/{term_key}/{ordered_rowid:016x}/{offset:016x}")),
+                                posting.clone(),
+                            ).await?;
+                            stage.push(
+                                self,
+                                metadata_key(&generation, &format!("search-survivor-document/{ordered_rowid:016x}/{term_key}/{offset:016x}")),
+                                posting,
+                            ).await?;
+                            continue;
+                        }
+                        stage.push(
+                            self,
+                            original,
+                            posting.clone(),
+                        ).await?;
+                        stage.push(
+                            self,
+                            metadata_key(&generation, &format!("search-document/{ordered_rowid:016x}/{term_key}/{offset:016x}")),
+                            posting,
+                        ).await?;
+                    }
+                    "search_current_document" => {
+                        let rowid: i64 = record["rowid"].as_str()
+                            .and_then(|value| value.parse().ok()).ok_or(Error::IncompatibleStore)?;
+                        let ordered_rowid = !((rowid as u64) ^ (1 << 63));
+                        stage.push(
+                            self,
+                            metadata_key(&generation, &format!("search-current-document/{ordered_rowid:016x}")),
+                            encode(&json!({"rowid":rowid.to_string()}))?,
+                        ).await?;
                     }
                     "manifest" => {
                         stage

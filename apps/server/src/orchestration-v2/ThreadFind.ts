@@ -21,6 +21,7 @@ import {
   ProjectionStoreThreadNotFoundError,
   type ProjectionStoreV2Error,
 } from "./ProjectionStore.ts";
+import type { ThreadFindRows } from "./ThreadFindRows.ts";
 
 interface FindRow {
   readonly position: number;
@@ -164,15 +165,69 @@ function resultForSelection(
   };
 }
 
-export const makeThreadFind = Effect.fn("makeThreadFind")(function* (
-  readIndex: (threadId: ThreadId) => Effect.Effect<
-    readonly (Omit<FindRow, "position"> & {
-      readonly item: Pick<OrchestrationV2TurnItem, "type">;
-    })[],
-    ProjectionStoreV2Error
-  >,
-) {
+export type ReadThreadFindIndex = (threadId: ThreadId) => Effect.Effect<
+  readonly (Omit<FindRow, "position"> & {
+    readonly item: Pick<OrchestrationV2TurnItem, "type">;
+  })[],
+  ProjectionStoreV2Error
+>;
+
+export const makeSqliteThreadFindRows = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
+  const encodeThreadIds = Schema.encodeEffect(Schema.fromJsonString(Schema.Array(ThreadId)));
+  const encodeSources = Schema.encodeEffect(
+    Schema.fromJsonString(Schema.Array(Schema.Struct({ threadId: ThreadId, id: TurnItemId }))),
+  );
+  return {
+    activeThread: (threadId) => sql<{ cwd: string | null }>`
+      SELECT COALESCE(json_extract(t.payload_json, '$.worktreePath'), p.workspace_root) AS cwd
+      FROM orchestration_v2_projection_threads t JOIN projection_projects p ON p.project_id = t.project_id
+      WHERE t.thread_id = ${threadId} AND t.deleted_at IS NULL AND p.deleted_at IS NULL
+    `,
+    payloads: Effect.fn("ThreadFindRows.payloads")(function* (sources) {
+      const encoded = yield* encodeSources(sources);
+      return yield* sql<{
+        thread_id: string;
+        turn_item_id: string;
+        payload_json: string;
+        entry_id: string;
+        item_type: OrchestrationV2TurnItem["type"];
+      }>`
+        SELECT item.thread_id, item.turn_item_id, item.payload_json,
+          COALESCE(json_extract(item.payload_json, '$.messageId'), item.turn_item_id) AS entry_id,
+          json_extract(item.payload_json, '$.type') AS item_type
+        FROM orchestration_v2_projection_turn_items AS item
+        JOIN json_each(${encoded}) AS wanted
+          ON item.thread_id = json_extract(wanted.value, '$.threadId')
+            AND item.turn_item_id = json_extract(wanted.value, '$.id')
+      `;
+    }),
+    revision: Effect.fn("ThreadFindRows.revision")(function* (threadIds) {
+      const sources = yield* encodeThreadIds(threadIds);
+      const revision = yield* sql<{ sequence: number }>`
+        WITH RECURSIVE source_threads(thread_id) AS (
+          SELECT value FROM json_each(${sources})
+          UNION
+          SELECT json_extract(t.payload_json, '$.forkedFrom.threadId')
+          FROM orchestration_v2_projection_threads t
+          JOIN source_threads s ON s.thread_id = t.thread_id
+          WHERE json_extract(t.payload_json, '$.forkedFrom.type') = 'run'
+        )
+        SELECT COALESCE(MAX(sequence), 0) AS sequence FROM orchestration_events
+        INDEXED BY idx_orch_events_stream_sequence
+        WHERE application_event_version = 2 AND aggregate_kind = 'thread'
+          AND stream_id IN (SELECT thread_id FROM source_threads)
+      `;
+      return revision[0]?.sequence ?? 0;
+    }),
+    withReadTransaction: (effect) => sql.withTransaction(effect).pipe(NodeSqliteClient.readOnly),
+  } satisfies ThreadFindRows;
+});
+
+export const makeThreadFindWithRows = Effect.fn("makeThreadFindWithRows")(function* (
+  readIndex: ReadThreadFindIndex,
+  rows: ThreadFindRows,
+) {
   const encodeCacheKey = Schema.encodeEffect(
     Schema.fromJsonString(
       Schema.Struct({
@@ -183,44 +238,25 @@ export const makeThreadFind = Effect.fn("makeThreadFind")(function* (
       }),
     ),
   );
-  const encodeThreadIds = Schema.encodeEffect(Schema.fromJsonString(Schema.Array(ThreadId)));
-  const encodeSources = Schema.encodeEffect(
-    Schema.fromJsonString(Schema.Array(Schema.Struct({ threadId: ThreadId, id: TurnItemId }))),
-  );
   const decodeItem = Schema.decodeUnknownEffect(Schema.fromJsonString(OrchestrationV2TurnItemJson));
   const isSnapshotError = Schema.is(
     Schema.Union([ProjectionStoreReadError, ProjectionStoreThreadNotFoundError]),
   );
   const load = Effect.fn("ThreadFind.load")(function* (
     threadId: ThreadId,
-    rows: readonly FindRow[],
+    wanted: readonly FindRow[],
   ) {
-    if (rows.length === 0) return [];
-    const sources = yield* encodeSources(
-      rows.map((row) => ({ threadId: row.sourceThreadId, id: row.sourceItemId })),
-    ).pipe(Effect.mapError((cause) => new ProjectionStoreReadError({ threadId, cause })));
-    const payloads = yield* sql<{
-      thread_id: string;
-      turn_item_id: string;
-      payload_json: string;
-      entry_id: string;
-      item_type: OrchestrationV2TurnItem["type"];
-    }>`
-      SELECT item.thread_id, item.turn_item_id, item.payload_json,
-        COALESCE(json_extract(item.payload_json, '$.messageId'), item.turn_item_id) AS entry_id,
-        json_extract(item.payload_json, '$.type') AS item_type
-      FROM orchestration_v2_projection_turn_items AS item
-      JOIN json_each(${sources}) AS wanted
-        ON item.thread_id = json_extract(wanted.value, '$.threadId')
-          AND item.turn_item_id = json_extract(wanted.value, '$.id')
-    `.pipe(Effect.mapError((cause) => new ProjectionStoreReadError({ threadId, cause })));
+    if (wanted.length === 0) return [];
+    const payloads = yield* rows
+      .payloads(wanted.map((row) => ({ threadId: row.sourceThreadId, id: row.sourceItemId })))
+      .pipe(Effect.mapError((cause) => new ProjectionStoreReadError({ threadId, cause })));
     const byThread = new Map<string, Map<string, (typeof payloads)[number]>>();
     for (const row of payloads) {
       let items = byThread.get(row.thread_id);
       if (!items) byThread.set(row.thread_id, (items = new Map()));
       items.set(row.turn_item_id, row);
     }
-    return yield* Effect.forEach(rows, (row) => {
+    return yield* Effect.forEach(wanted, (row) => {
       const payload = byThread.get(row.sourceThreadId)?.get(row.sourceItemId);
       return payload === undefined
         ? Effect.fail(new ProjectionStoreReadError({ threadId }))
@@ -252,36 +288,10 @@ export const makeThreadFind = Effect.fn("makeThreadFind")(function* (
       sourceThreadIds: readonly ThreadId[];
     }
   >();
-  const readRevision = Effect.fn("ThreadFind.readRevision")(function* (
-    threadIds: readonly ThreadId[],
-  ) {
-    const sources = yield* encodeThreadIds(threadIds);
-    const revision = yield* sql<{ sequence: number }>`
-      WITH RECURSIVE source_threads(thread_id) AS (
-        SELECT value FROM json_each(${sources})
-        UNION
-        SELECT json_extract(t.payload_json, '$.forkedFrom.threadId')
-        FROM orchestration_v2_projection_threads t
-        JOIN source_threads s ON s.thread_id = t.thread_id
-        WHERE json_extract(t.payload_json, '$.forkedFrom.type') = 'run'
-      )
-      SELECT COALESCE(MAX(sequence), 0) AS sequence FROM orchestration_events
-      -- The planner otherwise walks every V2 event backwards from the newest,
-      -- which takes seconds for a thread that has been idle a long time.
-      INDEXED BY idx_orch_events_stream_sequence
-      WHERE application_event_version = 2 AND aggregate_kind = 'thread'
-        AND stream_id IN (SELECT thread_id FROM source_threads)
-    `;
-    return revision[0]?.sequence ?? 0;
-  });
   const snapshot = Effect.fn("ThreadFind.snapshot")(
     function* (input: OrchestrationV2SearchThreadInput) {
       const { threadId } = input;
-      const active = yield* sql<{ cwd: string | null }>`
-      SELECT COALESCE(json_extract(t.payload_json, '$.worktreePath'), p.workspace_root) AS cwd
-      FROM orchestration_v2_projection_threads t JOIN projection_projects p ON p.project_id = t.project_id
-      WHERE t.thread_id = ${threadId} AND t.deleted_at IS NULL AND p.deleted_at IS NULL
-    `;
+      const active = yield* rows.activeThread(threadId);
       if (!active[0]) return yield* new ProjectionStoreThreadNotFoundError({ threadId });
       const cwd = active[0].cwd ?? undefined;
       const cacheKey = yield* encodeCacheKey({
@@ -291,7 +301,7 @@ export const makeThreadFind = Effect.fn("makeThreadFind")(function* (
         skills: input.skills ?? [],
       });
       const cached = scans.get(cacheKey);
-      if (cached && cached.sequence === (yield* readRevision(cached.sourceThreadIds))) {
+      if (cached && cached.sequence === (yield* rows.revision(cached.sourceThreadIds))) {
         const selected = selectMatch(cached.documents, input);
         scans.delete(cacheKey);
         scans.set(cacheKey, cached);
@@ -299,7 +309,7 @@ export const makeThreadFind = Effect.fn("makeThreadFind")(function* (
       }
       const index = yield* readIndex(threadId);
       const sourceThreadIds = [...new Set([threadId, ...index.map((row) => row.sourceThreadId)])];
-      const sequence = yield* readRevision(sourceThreadIds);
+      const sequence = yield* rows.revision(sourceThreadIds);
       const candidates = index
         .map((row, position) => ({ ...row, position }))
         .filter((row) =>
@@ -313,7 +323,7 @@ export const makeThreadFind = Effect.fn("makeThreadFind")(function* (
       }
       return { payloads, cwd, sequence, cacheKey, sourceThreadIds };
     },
-    (effect) => sql.withTransaction(effect).pipe(NodeSqliteClient.readOnly),
+    (effect) => rows.withReadTransaction(effect),
     (effect, input) =>
       effect.pipe(
         Effect.mapError((cause) =>
@@ -326,7 +336,7 @@ export const makeThreadFind = Effect.fn("makeThreadFind")(function* (
   const searchThreadStream = (input: OrchestrationV2SearchThreadInput) =>
     Stream.unwrap(
       Effect.gen(function* () {
-        // Release SQLite before decoding and parsing. Both frames describe one snapshot.
+        // Release the read transaction before decoding and parsing. Both frames describe one snapshot.
         const data = yield* snapshot(input);
         if (data.result) return Stream.succeed(data.result);
         const { payloads, cwd, sequence, cacheKey, sourceThreadIds } = data;
@@ -412,4 +422,10 @@ export const makeThreadFind = Effect.fn("makeThreadFind")(function* (
         Effect.map((results) => results[results.length - 1]!),
       ),
   };
+});
+
+export const makeThreadFind = Effect.fn("makeThreadFind")(function* (
+  readIndex: ReadThreadFindIndex,
+) {
+  return yield* makeThreadFindWithRows(readIndex, yield* makeSqliteThreadFindRows);
 });

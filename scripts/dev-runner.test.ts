@@ -762,8 +762,14 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           const [seedArgs] = yield* spawnedArgs(undefined);
           assert.includeMembers([...(seedArgs ?? [])], ["--base-dir", path.join(root, ".t3")]);
 
-          // Either database means the worktree already has data.
-          for (const name of ["state.sqlite", "statev2.sqlite"]) {
+          // Native state, including an activated home missing its database,
+          // must never be mistaken for an empty worktree.
+          for (const name of [
+            "state.sqlite",
+            "statev2.sqlite",
+            "statev2.omdb",
+            "server-owner.sqlite",
+          ]) {
             const file = path.join(root, ".t3", "userdata", name);
             NodeFS.mkdirSync(path.dirname(file), { recursive: true });
             NodeFS.writeFileSync(file, "");

@@ -4,7 +4,6 @@ import {
   OrchestrationV2ProviderSessionJson,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
-import * as SqlClient from "effect/sql/SqlClient";
 import type {
   OrchestrationV2ThreadShell,
   ProjectId,
@@ -44,13 +43,14 @@ import * as ProviderSessionManager from "./orchestration-v2/ProviderSessionManag
 import { threadHasQueuedTurnStart } from "./orchestration-v2/ThreadSettlementService.ts";
 import { forkParked } from "./serverActivation.ts";
 import * as Settings from "./serverSettings.ts";
+import { AuxiliaryPersistenceReads } from "./persistence/AuxiliaryPersistenceReads.ts";
+import * as SqliteAuxiliaryPersistenceReads from "./persistence/SqliteAuxiliaryPersistenceReads.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import { isFilesystemRoot, managedWorktreesDirectories } from "./worktreesDirectory.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import { removeLinkedWorktree } from "./vcs/worktreeRemoval.ts";
 import { withWorkspaceLease } from "./workspace/workspaceLease.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
-import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { isNetworkPath } from "@t3tools/shared/path";
 
 const decodeCleanupThread = Schema.decodeUnknownEffect(
@@ -292,14 +292,14 @@ export class StorageCleanup extends Context.Service<
   }
 >()("t3/storageCleanup") {}
 
-const make = Effect.gen(function* () {
+export const makeWithPersistenceReads = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
   const settingsService = yield* Settings.ServerSettingsService;
   const projectStore = yield* ProjectStore.ProjectStoreV2;
   const engine = yield* Orchestrator.OrchestratorV2;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
-  const sql = yield* SqlClient.SqlClient;
+  const persistence = yield* AuxiliaryPersistenceReads;
   const git = yield* GitVcsDriver.GitVcsDriver;
   const gitManager = yield* GitManager.GitManager;
   const terminals = yield* TerminalManager.TerminalManager;
@@ -420,9 +420,9 @@ const make = Effect.gen(function* () {
     Effect.orElseSucceed(() => null),
   );
 
-  // Large snapshots take seconds; use the reader worker instead of blocking the event loop.
+  // ProjectionStore owns its backend-specific read transaction and reader selection.
   const readThreads = Effect.fn("StorageCleanup.readThreads")(function* () {
-    const snapshot = yield* projections.getShellSnapshot().pipe(NodeSqliteClient.readOnly);
+    const snapshot = yield* projections.getShellSnapshot();
     const projects = yield* projectStore.listShells();
     return { projects, threads: [...snapshot.threads, ...snapshot.archivedThreads] };
   });
@@ -449,11 +449,7 @@ const make = Effect.gen(function* () {
     projects: ReadonlyArray<{ readonly workspaceRoot: string }>,
     entries: StorageCleanupReportEntry[],
   ) {
-    const rows = yield* sql<{ worktreePath: string }>`
-      SELECT DISTINCT json_extract(payload_json, '$.worktreePath') AS "worktreePath"
-      FROM orchestration_v2_projection_threads
-      WHERE json_extract(payload_json, '$.worktreePath') IS NOT NULL
-    `.pipe(NodeSqliteClient.readOnly);
+    const rows = yield* persistence.allThreadWorktrees;
     const referenced = new Set<string>();
     for (const row of rows) {
       const resolved = path.resolve(row.worktreePath);
@@ -850,12 +846,7 @@ const make = Effect.gen(function* () {
         return "not a linked worktree";
       return null;
     });
-    const deletedRows = yield* sql<{ payload_json: string; workspaceRoot: string }>`
-          SELECT t.payload_json, p.workspace_root AS "workspaceRoot"
-          FROM orchestration_v2_projection_threads t
-          JOIN projection_projects p ON p.project_id = t.project_id
-          WHERE t.deleted_at IS NOT NULL
-        `.pipe(NodeSqliteClient.readOnly);
+    const deletedRows = yield* persistence.deletedThreadWorktrees;
     const deletedThreads = (yield* Effect.forEach(deletedRows, (row) =>
       decodeCleanupThread(row.payload_json).pipe(
         Effect.map((thread) => ({ ...thread, workspaceRoot: row.workspaceRoot })),
@@ -1102,10 +1093,7 @@ const make = Effect.gen(function* () {
             )
               return "thread or cleanup settings changed since check";
             // Durable deletion cleanup must succeed or be explicitly cancelled before removing its checkout.
-            const pendingCleanup = yield* sql<{ status: string }>`
-              SELECT status FROM orchestration_v2_effect_outbox
-              WHERE thread_id = ${thread.id} AND status NOT IN ('succeeded', 'cancelled')
-            `.pipe(NodeSqliteClient.readOnly);
+            const pendingCleanup = yield* persistence.pendingThreadCleanup(thread.id);
             // Failed effects never retry, so only running work can finish and free the path.
             if (pendingCleanup.some((row) => row.status !== "failed"))
               return waitForStop("thread deletion is still pending");
@@ -1156,10 +1144,7 @@ const make = Effect.gen(function* () {
               return "parent settlement changed since check";
           }
           // Sessions can outlive their run and can be shared across app threads.
-          const sessionRows = yield* sql<{ payload_json: string }>`
-            SELECT payload_json FROM orchestration_v2_projection_provider_sessions
-            WHERE status != 'stopped'
-          `.pipe(NodeSqliteClient.readOnly);
+          const sessionRows = yield* persistence.nonStoppedProviderSessions;
           const sessions = yield* Effect.forEach(sessionRows, (row) =>
             decodeCleanupSession(row.payload_json),
           );
@@ -1508,4 +1493,7 @@ const make = Effect.gen(function* () {
   });
 });
 
-export const layer = Layer.effect(StorageCleanup, make);
+export const layerWithPersistenceReads = Layer.effect(StorageCleanup, makeWithPersistenceReads);
+export const layer = layerWithPersistenceReads.pipe(
+  Layer.provide(SqliteAuxiliaryPersistenceReads.layer),
+);
