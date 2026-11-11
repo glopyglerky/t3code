@@ -1,6 +1,7 @@
 //! SQLite's public-domain FTS5 trigram case and diacritic folding, in safe Rust.
 //! Translated from sqlite/sqlite ext/fts5/fts5_unicode2.c, blob 2133d5d5b894c35fbbe642a32ee027ca15ddab33.
-//! UTF-8 input handling follows ext/fts5/fts5_tokenize.c, blob 94132272fb6e3a7a04c4108f7cd4ddd2a1e4c42d.
+//! Scalar decoding follows SQLite 3.54's src/utf.c READ_UTF8 macro, blob
+//! e8bb63979703241b038cac37a686de2fbe9616b2, used by the pinned Node 26 amalgamation.
 //! Trigram remove_diacritics=1 uses UnicodeFold(..., 2), including complex
 //! Latin diacritics. This is deliberately not Rust's evolving Unicode lowercase
 //! or general NFD normalization. The source blessing applies:
@@ -236,14 +237,9 @@ pub(super) fn fold(mut code: u32) -> u32 {
 pub(super) fn trigram_iter(text: &str) -> impl Iterator<Item = String> + '_ {
     text.chars()
         .filter_map(|point| {
-            // Rust strings already exclude malformed UTF-8 and surrogates.
-            // SQLite's FTS5_READ_UTF8 additionally replaces these two otherwise
-            // valid scalar noncharacters; other planes' noncharacters survive.
-            let code = match point {
-                '\u{fffe}' | '\u{ffff}' => 0xfffd,
-                _ => point as u32,
-            };
-            char::from_u32(fold(code)).filter(|&point| point != '\0')
+            // Rust strings exclude malformed UTF-8 and surrogates. SQLite 3.54's
+            // amalgamation preserves other scalars, including noncharacters.
+            char::from_u32(fold(point as u32)).filter(|&point| point != '\0')
         })
         .scan(
             std::collections::VecDeque::with_capacity(3),
@@ -270,8 +266,8 @@ mod tests {
         assert_eq!(trigrams("ÀḈộ"), vec!["aco"]);
         assert_eq!(trigrams("A\u{301}BC"), vec!["abc"]);
         assert_eq!(trigrams("AB\0CD"), vec!["abc", "bcd"]);
-        assert_eq!(trigrams("A\u{ffff}B"), vec!["a\u{fffd}b"]);
-        assert_eq!(trigrams("A\u{fffe}B"), vec!["a\u{fffd}b"]);
+        assert_eq!(trigrams("A\u{ffff}B"), vec!["a\u{ffff}b"]);
+        assert_eq!(trigrams("A\u{fffe}B"), vec!["a\u{fffe}b"]);
         assert_eq!(trigrams("A\u{10ffff}B"), vec!["a\u{10ffff}b"]);
         assert_eq!(fold('ẞ' as u32), 'ß' as u32);
         assert_eq!(fold('İ' as u32), 'i' as u32);
