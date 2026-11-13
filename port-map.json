@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "recovery_commit": "d29a94f3a175eac1f26c548023fedd8695cedfaf",
-  "integrated_upstream_commit": "4aec277f79b2d4dabd88f13cfab264d9f80cbcef",
+  "integrated_upstream_commit": "2d8a843e6be9ca170f3bce98cc92ad76617b00c4",
   "source_history": [
     "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
     "822671581383a357c5dc8d3ea9984b408c3e03c6",
@@ -11,7 +11,8 @@
     "7171fdd7716b05dc1b4be40c26ac78e8bb35f80c",
     "10fbff5ab6d31c494b5c6cfd759d78c12aa731f6",
     "ed7e5010baafd73d0164ee1d5adbd21e26f8f9cb",
-    "4aec277f79b2d4dabd88f13cfab264d9f80cbcef"
+    "4aec277f79b2d4dabd88f13cfab264d9f80cbcef",
+    "2d8a843e6be9ca170f3bce98cc92ad76617b00c4"
   ],
   "upstream_removals": [
     {
@@ -722,11 +723,11 @@
     "ios",
     "android"
   ],
-  "qualification": "Upstream 4aec277f is integrated with retained production Rust adapters. Native storage, orchestration and API behavior requires exact-commit qualification; this integration does not retire implementations for unqualified platforms.",
+  "qualification": "Upstream 2d8a843e is integrated with retained production Rust adapters. Native storage, orchestration and API behavior requires exact-commit qualification; this integration does not retire implementations for unqualified platforms.",
   "compiler_policy": "The current full-Rust route is the pinned Lustr coordinator with rustc-derived BlueFe. Direct native Lust coverage requires its own exact compiler identity and behavior receipts. Application CI consumes qualified compiler artifacts.",
   "layout_policy": "Retain upstream paths. Current crates are preserved during recovery; domain_owner records where their responsibilities belong. Move source separately from behavior changes.",
   "intentional_divergences": [
-    "redb remains the persistence destination; SQLite stays authoritative until the complete transaction boundary is qualified.",
+    "The selected native server and CLI use omdb on the qualified host route; SQLite remains the migration source, independent behavior oracle and implementation for unqualified hosts.",
     "Iroh remains the transport destination; existing Connect identity, account and lifecycle behavior stays required."
   ],
   "ports": [
@@ -734,7 +735,7 @@
       "id": "command-and-dispatch-policy",
       "state": "integrated",
       "domain_owner": "apps/server/src/orchestration-v2",
-      "reviewed_upstream_commit": "4aec277f79b2d4dabd88f13cfab264d9f80cbcef",
+      "reviewed_upstream_commit": "2d8a843e6be9ca170f3bce98cc92ad76617b00c4",
       "upstream_sources": [
         {
           "path": "apps/server/src/orchestration-v2/CommandPolicy.ts",
@@ -783,7 +784,7 @@
       "id": "project-commands",
       "state": "integrated",
       "domain_owner": "apps/server/src/project",
-      "reviewed_upstream_commit": "4aec277f79b2d4dabd88f13cfab264d9f80cbcef",
+      "reviewed_upstream_commit": "2d8a843e6be9ca170f3bce98cc92ad76617b00c4",
       "upstream_sources": [
         {
           "path": "apps/server/src/orchestration-v2/ProjectCommands.ts",
@@ -835,7 +836,7 @@
       "id": "guest-share-decisions",
       "state": "integrated",
       "domain_owner": "apps/server/src/guest",
-      "reviewed_upstream_commit": "4aec277f79b2d4dabd88f13cfab264d9f80cbcef",
+      "reviewed_upstream_commit": "2d8a843e6be9ca170f3bce98cc92ad76617b00c4",
       "upstream_sources": [
         {
           "path": "apps/server/src/orchestration-v2/GuestShareDecider.ts",
@@ -892,7 +893,7 @@
       "id": "provider-recovery",
       "state": "integrated",
       "domain_owner": "apps/server/src/orchestration-v2",
-      "reviewed_upstream_commit": "4aec277f79b2d4dabd88f13cfab264d9f80cbcef",
+      "reviewed_upstream_commit": "2d8a843e6be9ca170f3bce98cc92ad76617b00c4",
       "upstream_sources": [
         {
           "path": "packages/provider-core/src/server/subagentProjection.ts",
@@ -944,7 +945,7 @@
       "id": "provider-maintenance",
       "state": "integrated",
       "domain_owner": "packages/provider-core/src/server",
-      "reviewed_upstream_commit": "4aec277f79b2d4dabd88f13cfab264d9f80cbcef",
+      "reviewed_upstream_commit": "2d8a843e6be9ca170f3bce98cc92ad76617b00c4",
       "upstream_sources": [
         {
           "path": "packages/provider-core/src/server/maintenanceResolver.ts",
@@ -997,7 +998,7 @@
       "id": "codex-structured-generation",
       "state": "integrated",
       "domain_owner": "apps/server/src/textGeneration",
-      "reviewed_upstream_commit": "4aec277f79b2d4dabd88f13cfab264d9f80cbcef",
+      "reviewed_upstream_commit": "2d8a843e6be9ca170f3bce98cc92ad76617b00c4",
       "upstream_sources": [
         {
           "path": "apps/server/src/textGeneration/CodexTextGeneration.ts",
@@ -1052,7 +1053,7 @@
       "id": "codex-process-runtime",
       "state": "integrated",
       "domain_owner": "apps/server/src/provider",
-      "reviewed_upstream_commit": "4aec277f79b2d4dabd88f13cfab264d9f80cbcef",
+      "reviewed_upstream_commit": "2d8a843e6be9ca170f3bce98cc92ad76617b00c4",
       "upstream_sources": [
         {
           "path": "apps/server/src/provider/CodexProvider.ts",
@@ -1106,7 +1107,7 @@
       "id": "redb-persistence",
       "state": "integrated",
       "domain_owner": "apps/server/src/persistence",
-      "reviewed_upstream_commit": "4aec277f79b2d4dabd88f13cfab264d9f80cbcef",
+      "reviewed_upstream_commit": "2d8a843e6be9ca170f3bce98cc92ad76617b00c4",
       "upstream_sources": [
         {
           "path": "apps/server/integration/transferBudgetV2.integration.test.ts",
@@ -1182,7 +1183,7 @@
         },
         {
           "path": "apps/server/src/orchestration-v2/ProjectionStore.ts",
-          "blob": "841cd0a0b5b7dfe6b663e978c9f2637adc79968c"
+          "blob": "721006481e83e828588dfd9039f598114ae2d24a"
         },
         {
           "path": "apps/server/src/orchestration-v2/ProviderCommitBatch.ts",
@@ -1243,6 +1244,14 @@
         {
           "path": "apps/server/src/persistence/DatabaseStorage.ts",
           "blob": "9df5bf7ede03b4fae68601644109dff682e14eec"
+        },
+        {
+          "path": "apps/server/src/persistence/Migrations.ts",
+          "blob": "c076c0119d2f9dc7289d175c48238a8d6d6dbe6a"
+        },
+        {
+          "path": "apps/server/src/persistence/Migrations/089_ShellThreadReadIndexes.ts",
+          "blob": "25133aa84be654ead725462adc20a31e70491b8c"
         },
         {
           "path": "apps/server/src/persistence/OrchestrationCommandReceipts.ts",
@@ -1541,6 +1550,7 @@
         "apps/server/src/persistence/fixtures/message-search-text.json",
         "apps/server/src/persistence/migrateSqliteToOmdb.ts",
         "apps/server/src/persistence/omdb-schema-80.json",
+        "apps/server/src/persistence/omdb-schema-88.json",
         "apps/server/src/persistence/omdb-schema.json",
         "apps/server/src/persistence/sqliteExport.d.mts",
         "apps/server/src/persistence/sqliteExport.mjs",
@@ -1689,14 +1699,14 @@
         "tools/check-redb-cli.mjs"
       ],
       "retired_paths": [],
-      "notes": "The selected production server and CLI use the complete omdb application boundary through one transaction owner. Native schema80 to88 upgrade preserves activated data and updates citation-aware message search, turn item counts and custom project titles. Typed native APIs cover atomic event guards, outbox claims, compaction filters, fork visibility, shell and recovery state, attachment retention, scheduler compare-and-set, KeepAwake active-run existence and legacy subagent identifier retention. The active-run query stops at the first indexed match. Queue-only run filters use the existing global queued-run index and recheck thread ownership, avoiding completed history. Explicit run-ID filters read compact keys directly; includeLatestRun preserves full-thread candidates and original filtering/order semantics. Bootstrap and CLI preserve upgrade ownership and never reopen SQLite after native activation. SQLite remains the migration source, immutable behavior comparison and unqualified-platform implementation. Fresh exact-commit platform receipts remain required. The retained native project API and standalone plan-and-project executable share the core project projection reducer and remain independently compared with immutable ProjectStore behavior; the selected application graph uses shared ProjectStore semantics over native project rows.",
+      "notes": "The selected production server and CLI use the complete omdb application boundary through one transaction owner. Native upgrades from the exact schema80 and schema88 histories to89 preserve activated data and import lineage. Schema80 backfills citation-aware message search, turn item counts and custom project titles; schema89 adds indexed worktree and family shell selection before payload decoding. Typed native APIs cover atomic event guards, outbox claims, compaction filters, fork visibility, shell and recovery state, attachment retention, scheduler compare-and-set, KeepAwake active-run existence and legacy subagent identifier retention. The active-run query stops at the first indexed match. Queue-only run filters use the existing global queued-run index and recheck thread ownership, avoiding completed history. Explicit run-ID filters read compact keys directly; includeLatestRun preserves full-thread candidates and original filtering/order semantics. Bootstrap and CLI preserve upgrade ownership and never reopen SQLite after native activation. SQLite remains the migration source, immutable behavior comparison and unqualified-platform implementation. Fresh exact-commit platform receipts remain required. The retained native project API and standalone plan-and-project executable share the core project projection reducer and remain independently compared with immutable ProjectStore behavior; the selected application graph uses shared ProjectStore semantics over native project rows.",
       "rust_crates": ["crates/core", "crates/storage"]
     },
     {
       "id": "iroh-transport",
       "state": "candidate",
       "domain_owner": "infra/relay",
-      "reviewed_upstream_commit": "4aec277f79b2d4dabd88f13cfab264d9f80cbcef",
+      "reviewed_upstream_commit": "2d8a843e6be9ca170f3bce98cc92ad76617b00c4",
       "upstream_sources": [
         {
           "path": "apps/server/src/ws.ts",
@@ -1731,7 +1741,7 @@
       "id": "native-api-component",
       "state": "candidate",
       "domain_owner": "apps/server",
-      "reviewed_upstream_commit": "4aec277f79b2d4dabd88f13cfab264d9f80cbcef",
+      "reviewed_upstream_commit": "2d8a843e6be9ca170f3bce98cc92ad76617b00c4",
       "upstream_sources": [
         {
           "path": "packages/contracts/src/orchestrationV2.ts",

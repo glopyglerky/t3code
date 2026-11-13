@@ -1,4 +1,5 @@
-//! Exclusive, bounded schema-80 upgrade. Staging never changes the source
+//! Exclusive, bounded upgrades from the exact schema-80 and schema-88 histories.
+//! Staging never changes the source
 //! generation. Retry clears the candidate and copies the current source again,
 //! including writes an older executable may have made after an interrupted run.
 use super::*;
@@ -39,6 +40,42 @@ fn lineage_key(target: &ApplicationCatalog) -> Vec<u8> {
     ))
 }
 
+fn lineage_89_key(target: &ApplicationCatalog) -> Vec<u8> {
+    store_key(&format!(
+        "application/generation/{}/metadata/native-schema-upgrade-88-89",
+        target.generation
+    ))
+}
+
+fn target_89(source: &ApplicationCatalog, current: &Definition) -> ApplicationCatalog {
+    ApplicationCatalog {
+        generation: request_digest(&json!([
+            "native-schema-upgrade-88-89",
+            source.generation,
+            current.schema
+        ])),
+        schema: current.schema.clone(),
+    }
+}
+
+fn definition_88() -> Result<Definition> {
+    let previous: Definition = serde_json::from_str(include_str!("omdb-schema-88.json"))
+        .map_err(|_| Error::IncompatibleStore)?;
+    let current = definition()?;
+    if previous.format != 1
+        || previous.migrations.len() != 88
+        || current.migrations.len() != 89
+        || current.migrations[..88] != previous.migrations
+        || current.migrations[88].id != "89"
+        || current.migrations[88].name != "ShellThreadReadIndexes"
+        || previous.schema != current.schema
+    {
+        return Err(Error::IncompatibleStore);
+    }
+    validate_schema(&previous.schema)?;
+    Ok(previous)
+}
+
 fn previous_definition() -> Result<Definition> {
     let previous: Definition = serde_json::from_str(include_str!("omdb-schema-80.json"))
         .map_err(|_| Error::IncompatibleStore)?;
@@ -51,7 +88,7 @@ fn previous_definition() -> Result<Definition> {
 
 /// The archive receipt continues to identify the original, immutable export.
 /// Only this known schema transition may establish its new active catalog.
-pub(crate) async fn validate_import_lineage(
+async fn validate_80_lineage(
     tx: &mut Transaction,
     catalog: &ApplicationCatalog,
     imported_generation: &str,
@@ -64,6 +101,7 @@ pub(crate) async fn validate_import_lineage(
     )
     .map_err(|_| Error::IncompatibleStore)?;
     let previous = previous_definition()?;
+    let intermediate = definition_88()?;
     let current = definition()?;
     if lineage.version != 1
         || lineage.source.generation != imported_generation
@@ -79,31 +117,87 @@ pub(crate) async fn validate_import_lineage(
     {
         return Err(Error::IncompatibleStore);
     }
-    // The retained source and published target must both carry the exact known
-    // histories. An absent or damaged lineage never reinterprets the receipt.
-    for (owner, expected) in [
-        (&lineage.source, &previous.migrations),
-        (catalog, &current.migrations),
-    ] {
-        let prefix = row_prefix(&owner.generation, "effect_sql_migrations")?;
-        let rows = tx.scan(&prefix, &end(&prefix), expected.len() + 1).await?;
-        if rows.len() != expected.len() {
-            return Err(Error::IncompatibleStore);
-        }
-        let mut actual = Vec::new();
-        for (key, bytes) in rows {
-            let row = decode_row(owner, table(owner, "effect_sql_migrations")?, &key, &bytes)?;
-            actual.push(Migration {
-                id: integer(&row.row, "migration_id")?.to_string(),
-                name: text(&row.row, "name")?,
-            });
-        }
-        actual.sort_by_key(|entry| entry.id.parse::<i64>().unwrap_or(i64::MAX));
-        if actual != *expected {
-            return Err(Error::IncompatibleStore);
-        }
+    validate_history(tx, &lineage.source, &previous.migrations).await?;
+    let actual = history(tx, catalog, current.migrations.len()).await?;
+    // Omdb inspects the immutable receipt before taking its exclusive upgrade
+    // handle. Exactly the retained 88 target and the current 89 target are valid.
+    if actual != intermediate.migrations && actual != current.migrations {
+        return Err(Error::IncompatibleStore);
     }
     Ok(())
+}
+
+async fn history(
+    tx: &mut Transaction,
+    owner: &ApplicationCatalog,
+    maximum: usize,
+) -> Result<Vec<Migration>> {
+    let prefix = row_prefix(&owner.generation, "effect_sql_migrations")?;
+    let rows = tx.scan(&prefix, &end(&prefix), maximum + 1).await?;
+    if rows.len() > maximum {
+        return Err(Error::IncompatibleStore);
+    }
+    let mut actual = Vec::new();
+    for (key, bytes) in rows {
+        let row = decode_row(owner, table(owner, "effect_sql_migrations")?, &key, &bytes)?;
+        actual.push(Migration {
+            id: integer(&row.row, "migration_id")?.to_string(),
+            name: text(&row.row, "name")?,
+        });
+    }
+    actual.sort_by_key(|entry| entry.id.parse::<i64>().unwrap_or(i64::MAX));
+    Ok(actual)
+}
+
+async fn validate_history(
+    tx: &mut Transaction,
+    owner: &ApplicationCatalog,
+    expected: &[Migration],
+) -> Result<()> {
+    if history(tx, owner, expected.len()).await? != expected {
+        return Err(Error::IncompatibleStore);
+    }
+    Ok(())
+}
+
+pub(crate) async fn validate_import_lineage(
+    tx: &mut Transaction,
+    catalog: &ApplicationCatalog,
+    imported_generation: &str,
+    imported_table_count: u64,
+) -> Result<()> {
+    let Some(bytes) = tx.get(&lineage_89_key(catalog)).await? else {
+        return validate_80_lineage(tx, catalog, imported_generation, imported_table_count).await;
+    };
+    let lineage: ImportLineage =
+        serde_json::from_slice(&bytes).map_err(|_| Error::IncompatibleStore)?;
+    let previous = definition_88()?;
+    let current = definition()?;
+    if lineage.version != 1
+        || lineage.source.schema != previous.schema
+        || *catalog != target_89(&lineage.source, &current)
+        || lineage.source.generation == catalog.generation
+    {
+        return Err(Error::IncompatibleStore);
+    }
+    validate_history(tx, catalog, &current.migrations).await?;
+    validate_history(tx, &lineage.source, &previous.migrations).await?;
+    if lineage.source.generation == imported_generation {
+        if previous.schema.tables.len() as u64 != imported_table_count {
+            return Err(Error::IncompatibleStore);
+        }
+        Ok(())
+    } else {
+        // There is one supported predecessor chain, never an unbounded walk of
+        // caller-provided generation links: original 80 -> retained 88 -> 89.
+        validate_80_lineage(
+            tx,
+            &lineage.source,
+            imported_generation,
+            imported_table_count,
+        )
+        .await
+    }
 }
 #[derive(Clone, Copy)]
 enum Stage {
@@ -284,6 +378,9 @@ impl Store {
         target: &ApplicationCatalog,
         stage: Stage,
     ) -> Result<()> {
+        if source.generation == target.generation {
+            return Err(Error::IncompatibleStore);
+        }
         let mut after = None;
         let mut limit = PAGE;
         loop {
@@ -317,7 +414,7 @@ impl Store {
                 source.generation,
                 current.schema
             ])),
-            schema: current.schema,
+            schema: current.schema.clone(),
         };
         for stage in [
             Stage::Clear,
@@ -329,6 +426,55 @@ impl Store {
         ] {
             self.upgrade_stage(&source, &target, stage).await?;
         }
+        let lineage = lineage_key(&target);
+        self.publish_upgrade(
+            source,
+            target,
+            current.migrations,
+            previous.migrations.len(),
+            lineage,
+        )
+        .await
+    }
+
+    pub(super) async fn upgrade_application_88(
+        &self,
+        source: ApplicationCatalog,
+        current: Definition,
+    ) -> Result<BootstrapResult> {
+        let previous = definition_88()?;
+        if source.schema != previous.schema
+            || self.application_migrations().await? != previous.migrations
+        {
+            return Err(Error::Invalid("Native application schema or migration history is unsupported by this build; the existing generation was retained".into()));
+        }
+        self.db.require_exclusive()?;
+        let target = target_89(&source, &current);
+        // This transition changes indexes only. Copy all canonical rows, search
+        // identities and turn counts unchanged; rebuild read indexes in staging.
+        // An interrupted attempt is discarded before copying any newer 88 writes.
+        for stage in [Stage::Clear, Stage::Copy] {
+            self.upgrade_stage(&source, &target, stage).await?;
+        }
+        let lineage = lineage_89_key(&target);
+        self.publish_upgrade(
+            source,
+            target,
+            current.migrations,
+            previous.migrations.len(),
+            lineage,
+        )
+        .await
+    }
+
+    async fn publish_upgrade(
+        &self,
+        source: ApplicationCatalog,
+        target: ApplicationCatalog,
+        migrations: Vec<Migration>,
+        previous_migrations: usize,
+        lineage: Vec<u8>,
+    ) -> Result<BootstrapResult> {
         while !self
             .prepare_projection_reads_for_catalog(&target)
             .await?
@@ -346,7 +492,7 @@ impl Store {
         {
             return Err(Error::IncompatibleStore);
         }
-        for migration in current.migrations.iter().skip(previous.migrations.len()) {
+        for migration in migrations.iter().skip(previous_migrations) {
             write_row(
                 &mut tx,
                 &target,
@@ -370,7 +516,7 @@ impl Store {
             let mut header: Value =
                 serde_json::from_slice(&bytes).map_err(|_| Error::IncompatibleStore)?;
             header["migrations"] =
-                serde_json::to_value(&current.migrations).map_err(|_| Error::IncompatibleStore)?;
+                serde_json::to_value(&migrations).map_err(|_| Error::IncompatibleStore)?;
             tx.put(header_key, encode(&header)?).await?;
         }
         tx.put(
@@ -378,18 +524,15 @@ impl Store {
             encode(&"projection-commit-v1")?,
         )
         .await?;
-        tx.put(
-            lineage_key(&target),
-            encode(&ImportLineage { version: 1, source })?,
-        )
-        .await?;
+        tx.put(lineage, encode(&ImportLineage { version: 1, source })?)
+            .await?;
         // The sole publish point: canonical rows, index backfills and migration
         // history become visible together. The source generation stays intact.
         tx.put(schema_key(), encode_catalog(&target)?).await?;
         tx.commit().await?;
         Ok(BootstrapResult {
             initialized: false,
-            migrations: current.migrations,
+            migrations,
             schema_version: 1,
         })
     }

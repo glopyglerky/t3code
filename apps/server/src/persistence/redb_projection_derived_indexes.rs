@@ -1,8 +1,8 @@
-//! JSON-derived identities used by native usage history and pull-request lookups.
+//! JSON-derived identities used by native projection and shell lookups.
 
 use super::*;
 
-pub(super) const COLUMNS: [&str; 7] = [
+pub(super) const COLUMNS: [&str; 9] = [
     "codex_native_turn",
     "pull_request_number",
     "_deleted",
@@ -10,7 +10,45 @@ pub(super) const COLUMNS: [&str; 7] = [
     "_unreadable_payload",
     "_invalid_pr_links",
     "_recovery",
+    "_worktree_path",
+    "_root_thread",
 ];
+
+/// SQLite json_extract returns SQL scalars, with booleans represented as
+/// integers and compound values represented by their compact JSON text. Keep
+/// the first duplicate member and compound key order, as SQLite does.
+pub(crate) fn json_identity(source: &str, path: &[&str]) -> Result<Option<Value>> {
+    let mut encoded = source.to_owned();
+    for segment in path {
+        let Some(fields) = crate::application_json::object_fields(&encoded)? else {
+            return Ok(None);
+        };
+        let Some(value) = crate::application_json::field(&fields, segment) else {
+            return Ok(None);
+        };
+        encoded = value.to_owned();
+    }
+    let value: Value = serde_json::from_str(&encoded).map_err(|_| Error::IncompatibleStore)?;
+    Ok(match value {
+        Value::Null => None,
+        Value::String(value) => Some(text_cell(&value)),
+        Value::Bool(value) => Some(int_cell(i64::from(value))),
+        Value::Number(value) => {
+            if let Some(integer) = value.as_i64() {
+                Some(int_cell(integer))
+            } else {
+                let number = value.as_f64().ok_or(Error::IncompatibleStore)?;
+                if number.fract() == 0.0 && number >= i64::MIN as f64 && number < -(i64::MIN as f64)
+                {
+                    Some(int_cell(number as i64))
+                } else {
+                    Some(json!({"type":"real","value":number.to_string()}))
+                }
+            }
+        }
+        Value::Array(_) | Value::Object(_) => Some(text_cell(&encoded)),
+    })
+}
 
 pub(crate) fn pull_request_links(payload: &Value) -> Result<Vec<Value>> {
     let links: Vec<Value> = match payload.get("pullRequests") {
@@ -81,6 +119,15 @@ pub(super) fn values(name: &str, row: &Map<String, Value>) -> Result<Vec<(&'stat
                 result.push(("_deleted", int_cell(1)));
             }
             if payload.is_some() {
+                let raw = text(row, "payload_json")?;
+                for (column, path) in [
+                    ("_worktree_path", &["worktreePath"][..]),
+                    ("_root_thread", &["lineage", "rootThreadId"][..]),
+                ] {
+                    if let Some(value) = json_identity(&raw, path)? {
+                        result.push((column, value));
+                    }
+                }
                 let mut numbers = std::collections::BTreeSet::new();
                 match pull_request_links(p) {
                     Ok(links) => {

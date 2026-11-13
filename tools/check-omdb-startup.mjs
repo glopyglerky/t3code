@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-import * as Assert from "node:assert/strict";
-import * as FS from "node:fs/promises";
-import * as Path from "node:path";
+import * as NodeAssert from "node:assert/strict";
+import * as NodeFSP from "node:fs/promises";
+import * as NodePath from "node:path";
 import * as Effect from "effect/Effect";
 import * as Logger from "effect/Logger";
 import * as Schema from "effect/Schema";
@@ -13,8 +13,9 @@ import { persistServerRuntimeState } from "../apps/server/src/serverRuntimeState
 import * as Omdb from "../apps/server/src/persistence/Omdb.ts";
 import { createFixture } from "./database-fixture.mjs";
 import { createMigratedSqlite, hash, nativeRequest, withSqlite } from "./redb-domain-fixture.mjs";
+import { verifyNativeSchema88Upgrade } from "./omdb-schema-upgrade-fixture.mjs";
 const [executable, proofPath] = process.argv.slice(2);
-Assert.ok(executable && Path.isAbsolute(executable));
+NodeAssert.ok(executable && NodePath.isAbsolute(executable));
 const checks = [];
 const fixture = await createFixture();
 const isolated = (fixture, effect) =>
@@ -33,21 +34,20 @@ const run = (use) =>
       return yield* use(runtime);
     }).pipe((effect) => isolated(fixture, effect)),
   );
-const failedActivation = (fixture) =>
-  Effect.gen(function* () {
-    const locks = yield* NativeOwnership.make(executable);
-    yield* locks.acquire(Path.join(fixture.root, "server-owner.sqlite"));
-    return yield* Omdb.make({ executable, databasePath: fixture.databasePath }).pipe(
-      Effect.provideService(Omdb.BootstrapOwnership, {
-        activate: Effect.fail(
-          new Omdb.OmdbStartupError({
-            path: fixture.databasePath,
-            cause: new Error("injected activation failure"),
-          }),
-        ),
-      }),
-    );
-  });
+const failedActivation = Effect.fn("OmdbStartupFixture.failedActivation")(function* (fixture) {
+  const locks = yield* NativeOwnership.make(executable);
+  yield* locks.acquire(NodePath.join(fixture.root, "server-owner.sqlite"));
+  return yield* Omdb.make({ executable, databasePath: fixture.databasePath }).pipe(
+    Effect.provideService(Omdb.BootstrapOwnership, {
+      activate: Effect.fail(
+        new Omdb.OmdbStartupError({
+          path: fixture.databasePath,
+          cause: new Error("injected activation failure"),
+        }),
+      ),
+    }),
+  );
+});
 const hasCauseMessage = (error, expected) => {
   for (let cause = error; cause; cause = cause.cause) {
     if (cause instanceof Error && cause.message.includes(expected)) return true;
@@ -61,18 +61,20 @@ try {
         { operation: "application_migrations" },
         Schema.Array(Schema.Struct({ id: Schema.String, name: Schema.String })),
       );
-      Assert.equal(migrations.length, 88);
-      Assert.equal(migrations.at(-1).id, "88");
+      NodeAssert.equal(migrations.length, 89);
+      NodeAssert.equal(migrations.at(-1).id, "89");
       const locks = yield* NativeOwnership.make(executable);
-      yield* locks.acquire(Path.join(fixture.root, "server-owner.sqlite"));
+      yield* locks.acquire(NodePath.join(fixture.root, "server-owner.sqlite"));
     }),
   );
-  Assert.equal(
-    await FS.readFile(Path.join(fixture.root, "server-owner.sqlite"), "utf8"),
+  NodeAssert.equal(
+    await NodeFSP.readFile(NodePath.join(fixture.root, "server-owner.sqlite"), "utf8"),
     "t3code-omdb-owner-v1\n",
   );
-  Assert.deepEqual(
-    (await FS.readdir(fixture.root)).filter((path) => /state.*\.sqlite(?:-wal|-shm)?$/.test(path)),
+  NodeAssert.deepEqual(
+    (await NodeFSP.readdir(fixture.root)).filter((path) =>
+      /state.*\.sqlite(?:-wal|-shm)?$/.test(path),
+    ),
     [],
   );
   checks.push(
@@ -81,7 +83,7 @@ try {
   await run(({ database }) =>
     database
       .request({ operation: "application_bootstrap" }, Omdb.Bootstrap)
-      .pipe(Effect.tap((value) => Effect.sync(() => Assert.equal(value.initialized, false)))),
+      .pipe(Effect.tap((value) => Effect.sync(() => NodeAssert.equal(value.initialized, false)))),
   );
   checks.push("reopen verifies schema and migration identity without reinitializing state");
 } finally {
@@ -89,23 +91,24 @@ try {
 }
 const migrated = await createFixture();
 try {
-  const source = Path.join(migrated.root, "statev2.sqlite");
+  const source = NodePath.join(migrated.root, "statev2.sqlite");
   await createMigratedSqlite(source, (sql) =>
     sql`INSERT INTO auth_sessions (session_id,subject,scopes,method,issued_at,expires_at) VALUES ('kept','kept-subject','[]','token','2026-01-01','2099-01-01')`.pipe(
       Effect.asVoid,
     ),
   );
-  const before = hash(await FS.readFile(source));
+  const before = hash(await NodeFSP.readFile(source));
   await Effect.runPromise(
     Effect.gen(function* () {
       const { client } = yield* Omdb.make({ executable, databasePath: migrated.databasePath });
       const row = yield* client.get("auth_sessions", [{ type: "text", value: "kept" }]);
-      Assert.equal(row.subject.value, "kept-subject");
+      NodeAssert.equal(row.subject.value, "kept-subject");
     }).pipe((effect) => isolated(migrated, effect)),
   );
-  Assert.equal(hash(await FS.readFile(source)), before);
-  Assert.equal(
-    (await FS.readdir(migrated.root)).filter((path) => path.startsWith(".omdb-import-")).length,
+  NodeAssert.equal(hash(await NodeFSP.readFile(source)), before);
+  NodeAssert.equal(
+    (await NodeFSP.readdir(migrated.root)).filter((path) => path.startsWith(".omdb-import-"))
+      .length,
     0,
   );
   checks.push(
@@ -116,10 +119,10 @@ try {
 }
 const liveLegacy = await createFixture();
 try {
-  const source = Path.join(liveLegacy.root, "statev2.sqlite");
+  const source = NodePath.join(liveLegacy.root, "statev2.sqlite");
   await createMigratedSqlite(source);
-  const before = hash(await FS.readFile(source));
-  const runtimePath = Path.join(liveLegacy.root, "server-runtime.json");
+  const before = hash(await NodeFSP.readFile(source));
+  const runtimePath = NodePath.join(liveLegacy.root, "server-runtime.json");
   await Effect.runPromise(
     isolated(
       liveLegacy,
@@ -135,26 +138,29 @@ try {
       }),
     ),
   );
-  const originalRuntime = await FS.readFile(runtimePath, "utf8");
-  await Assert.rejects(
+  const originalRuntime = await NodeFSP.readFile(runtimePath, "utf8");
+  await NodeAssert.rejects(
     Effect.runPromise(
       isolated(liveLegacy, Omdb.make({ executable, databasePath: liveLegacy.databasePath })),
     ),
     (error) =>
       error._tag === "OmdbStartupError" && error.cause?._tag === "ServerAlreadyRunningError",
   );
-  Assert.equal(
-    hash(await FS.readFile(source)),
+  NodeAssert.equal(
+    hash(await NodeFSP.readFile(source)),
     before,
     "Rejected migration cannot alter the source",
   );
-  Assert.equal(
-    await FS.readFile(runtimePath, "utf8"),
+  NodeAssert.equal(
+    await NodeFSP.readFile(runtimePath, "utf8"),
     originalRuntime,
     "Cannot clear another owner's runtime record",
   );
-  await Assert.rejects(FS.access(liveLegacy.databasePath), { code: "ENOENT" });
-  Assert.equal(await FS.readFile(Path.join(liveLegacy.root, "server-owner.sqlite"), "utf8"), "");
+  await NodeAssert.rejects(NodeFSP.access(liveLegacy.databasePath), { code: "ENOENT" });
+  NodeAssert.equal(
+    await NodeFSP.readFile(NodePath.join(liveLegacy.root, "server-owner.sqlite"), "utf8"),
+    "",
+  );
   // Failed bootstrap must release its own native lease, without terminating the
   // live PID used as this controlled pre-lock-server fixture.
   await Effect.runPromise(
@@ -162,7 +168,7 @@ try {
       liveLegacy,
       Effect.gen(function* () {
         const locks = yield* NativeOwnership.make(executable);
-        yield* locks.acquire(Path.join(liveLegacy.root, "server-owner.sqlite"));
+        yield* locks.acquire(NodePath.join(liveLegacy.root, "server-owner.sqlite"));
       }),
     ),
   );
@@ -175,37 +181,43 @@ try {
 for (const changed of [false, true]) {
   const retry = await createFixture();
   try {
-    const source = Path.join(retry.root, "statev2.sqlite");
+    const source = NodePath.join(retry.root, "statev2.sqlite");
     await createMigratedSqlite(source, (sql) =>
       sql`
       INSERT INTO auth_sessions (session_id,subject,scopes,method,issued_at,expires_at)
       VALUES ('retry-row','original','[]','token','2026-01-01','2099-01-01')
     `.pipe(Effect.asVoid),
     );
-    await Assert.rejects(Effect.runPromise(isolated(retry, failedActivation(retry))), (error) =>
+    await NodeAssert.rejects(Effect.runPromise(isolated(retry, failedActivation(retry))), (error) =>
       hasCauseMessage(error, "injected activation failure"),
     );
-    Assert.equal(await FS.readFile(Path.join(retry.root, "server-owner.sqlite"), "utf8"), "");
+    NodeAssert.equal(
+      await NodeFSP.readFile(NodePath.join(retry.root, "server-owner.sqlite"), "utf8"),
+      "",
+    );
     if (changed) {
       await withSqlite(
         source,
         (sql) => sql`UPDATE auth_sessions SET subject='newer-source' WHERE session_id='retry-row'`,
       );
-      const sourceBefore = hash(await FS.readFile(source));
-      const nativeBefore = hash(await FS.readFile(retry.databasePath));
-      await Assert.rejects(
+      const sourceBefore = hash(await NodeFSP.readFile(source));
+      const nativeBefore = hash(await NodeFSP.readFile(retry.databasePath));
+      await NodeAssert.rejects(
         Effect.runPromise(
           isolated(retry, Omdb.make({ executable, databasePath: retry.databasePath })),
         ),
         (error) => hasCauseMessage(error, "SQLite no longer matches"),
       );
-      Assert.equal(hash(await FS.readFile(source)), sourceBefore);
-      Assert.equal(
-        hash(await FS.readFile(retry.databasePath)),
+      NodeAssert.equal(hash(await NodeFSP.readFile(source)), sourceBefore);
+      NodeAssert.equal(
+        hash(await NodeFSP.readFile(retry.databasePath)),
         nativeBefore,
         "Stale-candidate rejection is strictly read-only",
       );
-      Assert.equal(await FS.readFile(Path.join(retry.root, "server-owner.sqlite"), "utf8"), "");
+      NodeAssert.equal(
+        await NodeFSP.readFile(NodePath.join(retry.root, "server-owner.sqlite"), "utf8"),
+        "",
+      );
       checks.push(
         "Retry rejects an unactivated import after new SQLite writes, retaining both files byte-for-byte without activating the fence",
       );
@@ -216,20 +228,20 @@ for (const changed of [false, true]) {
           Effect.gen(function* () {
             const { client } = yield* Omdb.make({ executable, databasePath: retry.databasePath });
             const row = yield* client.get("auth_sessions", [{ type: "text", value: "retry-row" }]);
-            Assert.equal(row.subject.value, "original");
+            NodeAssert.equal(row.subject.value, "original");
           }),
         ),
       );
-      Assert.equal(
-        await FS.readFile(Path.join(retry.root, "server-owner.sqlite"), "utf8"),
+      NodeAssert.equal(
+        await NodeFSP.readFile(NodePath.join(retry.root, "server-owner.sqlite"), "utf8"),
         "t3code-omdb-owner-v1\n",
       );
       checks.push(
         "Gracefully interrupted current-schema imports resume only after the fresh canonical export exactly matches the durable receipt",
       );
     }
-    Assert.equal(
-      (await FS.readdir(retry.root)).filter((path) => path.startsWith(".omdb-import-")).length,
+    NodeAssert.equal(
+      (await NodeFSP.readdir(retry.root)).filter((path) => path.startsWith(".omdb-import-")).length,
       0,
     );
   } finally {
@@ -238,32 +250,36 @@ for (const changed of [false, true]) {
 }
 const unwitnessed = await createFixture();
 try {
-  const source = Path.join(unwitnessed.root, "statev2.sqlite");
+  const source = NodePath.join(unwitnessed.root, "statev2.sqlite");
   await createMigratedSqlite(source);
   nativeRequest(executable, unwitnessed, "initialize", { operation: "application_bootstrap" });
-  const sourceBefore = hash(await FS.readFile(source));
-  const nativeBefore = hash(await FS.readFile(unwitnessed.databasePath));
-  await Assert.rejects(
+  const sourceBefore = hash(await NodeFSP.readFile(source));
+  const nativeBefore = hash(await NodeFSP.readFile(unwitnessed.databasePath));
+  await NodeAssert.rejects(
     Effect.runPromise(
       isolated(unwitnessed, Omdb.make({ executable, databasePath: unwitnessed.databasePath })),
     ),
     (error) => hasCauseMessage(error, "no verifiable SQLite import source"),
   );
-  Assert.equal(hash(await FS.readFile(source)), sourceBefore);
-  Assert.equal(hash(await FS.readFile(unwitnessed.databasePath)), nativeBefore);
-  Assert.equal(await FS.readFile(Path.join(unwitnessed.root, "server-owner.sqlite"), "utf8"), "");
+  NodeAssert.equal(hash(await NodeFSP.readFile(source)), sourceBefore);
+  NodeAssert.equal(hash(await NodeFSP.readFile(unwitnessed.databasePath)), nativeBefore);
+  NodeAssert.equal(
+    await NodeFSP.readFile(NodePath.join(unwitnessed.root, "server-owner.sqlite"), "utf8"),
+    "",
+  );
   checks.push(
     "An unactivated catalog without an import receipt cannot displace an existing SQLite source",
   );
 } finally {
   await unwitnessed.close();
 }
+checks.push(await verifyNativeSchema88Upgrade(executable));
 console.log(JSON.stringify({ checks }, null, 2));
 if (proofPath)
-  await FS.writeFile(
+  await NodeFSP.writeFile(
     proofPath,
     JSON.stringify(
-      { schema: 1, checks, executable_sha256: hash(await FS.readFile(executable)) },
+      { schema: 1, checks, executable_sha256: hash(await NodeFSP.readFile(executable)) },
       null,
       2,
     ) + "\n",

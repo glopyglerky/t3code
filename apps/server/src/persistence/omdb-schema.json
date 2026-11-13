@@ -352,6 +352,10 @@
     {
       "id": "88",
       "name": "TurnItemTypeStatusIndex"
+    },
+    {
+      "id": "89",
+      "name": "ShellThreadReadIndexes"
     }
   ],
   "schema": {
@@ -372,9 +376,7 @@
           "revoked_at",
           "proof_key_thumbprint"
         ],
-        "primary_key": [
-          "id"
-        ]
+        "primary_key": ["id"]
       },
       {
         "name": "auth_sessions",
@@ -396,35 +398,17 @@
           "client_surface",
           "client_app_version"
         ],
-        "primary_key": [
-          "session_id"
-        ]
+        "primary_key": ["session_id"]
       },
       {
         "name": "effect_sql_migrations",
-        "columns": [
-          "migration_id",
-          "created_at",
-          "name"
-        ],
-        "primary_key": [
-          "migration_id"
-        ]
+        "columns": ["migration_id", "created_at", "name"],
+        "primary_key": ["migration_id"]
       },
       {
         "name": "mcp_app_model_context",
-        "columns": [
-          "thread_id",
-          "item_id",
-          "server",
-          "tool",
-          "text",
-          "updated_at"
-        ],
-        "primary_key": [
-          "thread_id",
-          "item_id"
-        ]
+        "columns": ["thread_id", "item_id", "server", "tool", "text", "updated_at"],
+        "primary_key": ["thread_id", "item_id"]
       },
       {
         "name": "orchestration_command_receipts",
@@ -438,9 +422,7 @@
           "error",
           "command_type"
         ],
-        "primary_key": [
-          "command_id"
-        ]
+        "primary_key": ["command_id"]
       },
       {
         "name": "orchestration_events",
@@ -460,9 +442,7 @@
           "metadata_json",
           "application_event_version"
         ],
-        "primary_key": [
-          "sequence"
-        ]
+        "primary_key": ["sequence"]
       },
       {
         "name": "orchestration_v2_command_receipts",
@@ -475,9 +455,7 @@
           "status",
           "error"
         ],
-        "primary_key": [
-          "command_id"
-        ]
+        "primary_key": ["command_id"]
       },
       {
         "name": "orchestration_v2_effect_outbox",
@@ -497,9 +475,7 @@
           "completed_at",
           "last_error"
         ],
-        "primary_key": [
-          "effect_id"
-        ]
+        "primary_key": ["effect_id"]
       },
       {
         "name": "orchestration_v2_events",
@@ -518,9 +494,7 @@
           "driver",
           "provider_instance_id"
         ],
-        "primary_key": [
-          "sequence"
-        ]
+        "primary_key": ["sequence"]
       },
       {
         "name": "orchestration_v2_legacy_imports",
@@ -532,9 +506,7 @@
           "imported_message_count",
           "last_error"
         ],
-        "primary_key": [
-          "thread_id"
-        ]
+        "primary_key": ["thread_id"]
       },
       {
         "name": "orchestration_v2_projection_checkpoint_scopes",
@@ -551,9 +523,7 @@
           "created_at",
           "payload_json"
         ],
-        "primary_key": [
-          "scope_id"
-        ]
+        "primary_key": ["scope_id"]
       },
       {
         "name": "orchestration_v2_projection_checkpoints",
@@ -570,9 +540,7 @@
           "captured_at",
           "payload_json"
         ],
-        "primary_key": [
-          "checkpoint_id"
-        ]
+        "primary_key": ["checkpoint_id"]
       },
       {
         "name": "orchestration_v2_projection_context_handoffs",
@@ -586,9 +554,7 @@
           "updated_at",
           "payload_json"
         ],
-        "primary_key": [
-          "context_handoff_id"
-        ]
+        "primary_key": ["context_handoff_id"]
       },
       {
         "name": "orchestration_v2_projection_context_transfers",
@@ -606,9 +572,7 @@
           "source_provider_instance_id",
           "target_provider_instance_id"
         ],
-        "primary_key": [
-          "context_transfer_id"
-        ]
+        "primary_key": ["context_transfer_id"]
       },
       {
         "name": "orchestration_v2_projection_messages",
@@ -624,21 +588,12 @@
           "payload_json",
           "search_text"
         ],
-        "primary_key": [
-          "message_id"
-        ]
+        "primary_key": ["message_id"]
       },
       {
         "name": "orchestration_v2_projection_metadata",
-        "columns": [
-          "projection_name",
-          "schema_version",
-          "last_sequence",
-          "updated_at"
-        ],
-        "primary_key": [
-          "projection_name"
-        ]
+        "columns": ["projection_name", "schema_version", "last_sequence", "updated_at"],
+        "primary_key": ["projection_name"]
       },
       {
         "name": "orchestration_v2_projection_nodes",
@@ -658,35 +613,17 @@
           "completed_at",
           "payload_json"
         ],
-        "primary_key": [
-          "node_id"
-        ]
+        "primary_key": ["node_id"]
       },
       {
         "name": "orchestration_v2_projection_plans",
-        "columns": [
-          "plan_id",
-          "thread_id",
-          "run_id",
-          "node_id",
-          "kind",
-          "status",
-          "payload_json"
-        ],
-        "primary_key": [
-          "plan_id"
-        ]
+        "columns": ["plan_id", "thread_id", "run_id", "node_id", "kind", "status", "payload_json"],
+        "primary_key": ["plan_id"]
       },
       {
         "name": "orchestration_v2_projection_provider_session_bindings",
-        "columns": [
-          "provider_session_id",
-          "thread_id"
-        ],
-        "primary_key": [
-          "provider_session_id",
-          "thread_id"
-        ]
+        "columns": ["provider_session_id", "thread_id"],
+        "primary_key": ["provider_session_id", "thread_id"]
       },
       {
         "name": "orchestration_v2_projection_provider_sessions",
@@ -701,9 +638,7 @@
           "driver",
           "provider_instance_id"
         ],
-        "primary_key": [
-          "provider_session_id"
-        ]
+        "primary_key": ["provider_session_id"]
       },
       {
         "name": "orchestration_v2_projection_provider_threads",
@@ -721,9 +656,7 @@
           "driver",
           "provider_instance_id"
         ],
-        "primary_key": [
-          "provider_thread_id"
-        ]
+        "primary_key": ["provider_thread_id"]
       },
       {
         "name": "orchestration_v2_projection_provider_turns",
@@ -739,9 +672,7 @@
           "completed_at",
           "payload_json"
         ],
-        "primary_key": [
-          "provider_turn_id"
-        ]
+        "primary_key": ["provider_turn_id"]
       },
       {
         "name": "orchestration_v2_projection_run_attempts",
@@ -758,9 +689,7 @@
           "payload_json",
           "provider_instance_id"
         ],
-        "primary_key": [
-          "attempt_id"
-        ]
+        "primary_key": ["attempt_id"]
       },
       {
         "name": "orchestration_v2_projection_runs",
@@ -776,9 +705,7 @@
           "payload_json",
           "provider_instance_id"
         ],
-        "primary_key": [
-          "run_id"
-        ]
+        "primary_key": ["run_id"]
       },
       {
         "name": "orchestration_v2_projection_runtime_requests",
@@ -793,9 +720,7 @@
           "resolved_at",
           "payload_json"
         ],
-        "primary_key": [
-          "runtime_request_id"
-        ]
+        "primary_key": ["runtime_request_id"]
       },
       {
         "name": "orchestration_v2_projection_subagents",
@@ -817,9 +742,7 @@
           "provider_instance_id",
           "completion_delivery_state"
         ],
-        "primary_key": [
-          "subagent_id"
-        ]
+        "primary_key": ["subagent_id"]
       },
       {
         "name": "orchestration_v2_projection_threads",
@@ -838,21 +761,12 @@
           "payload_json",
           "provider_instance_id"
         ],
-        "primary_key": [
-          "thread_id"
-        ]
+        "primary_key": ["thread_id"]
       },
       {
         "name": "orchestration_v2_projection_turn_item_counts",
-        "columns": [
-          "thread_id",
-          "run_key",
-          "item_count"
-        ],
-        "primary_key": [
-          "thread_id",
-          "run_key"
-        ]
+        "columns": ["thread_id", "run_key", "item_count"],
+        "primary_key": ["thread_id", "run_key"]
       },
       {
         "name": "orchestration_v2_projection_turn_items",
@@ -870,9 +784,7 @@
           "updated_at",
           "payload_json"
         ],
-        "primary_key": [
-          "turn_item_id"
-        ]
+        "primary_key": ["turn_item_id"]
       },
       {
         "name": "orchestration_v2_thread_launch_workflows",
@@ -891,21 +803,12 @@
           "created_at",
           "updated_at"
         ],
-        "primary_key": [
-          "command_id"
-        ]
+        "primary_key": ["command_id"]
       },
       {
         "name": "orchestration_v2_turn_item_positions",
-        "columns": [
-          "thread_id",
-          "turn_item_id",
-          "ordinal"
-        ],
-        "primary_key": [
-          "thread_id",
-          "turn_item_id"
-        ]
+        "columns": ["thread_id", "turn_item_id", "ordinal"],
+        "primary_key": ["thread_id", "turn_item_id"]
       },
       {
         "name": "peer_environment_links",
@@ -921,9 +824,7 @@
           "last_error",
           "fenced"
         ],
-        "primary_key": [
-          "environment_id"
-        ]
+        "primary_key": ["environment_id"]
       },
       {
         "name": "projection_projects",
@@ -944,9 +845,7 @@
           "archived_at",
           "has_custom_title"
         ],
-        "primary_key": [
-          "project_id"
-        ]
+        "primary_key": ["project_id"]
       },
       {
         "name": "projection_thread_messages",
@@ -962,9 +861,7 @@
           "attachments_json",
           "context_json"
         ],
-        "primary_key": [
-          "message_id"
-        ]
+        "primary_key": ["message_id"]
       },
       {
         "name": "projection_thread_pull_requests",
@@ -979,12 +876,7 @@
           "snapshot_json",
           "stack_json"
         ],
-        "primary_key": [
-          "thread_id",
-          "host",
-          "repository",
-          "number"
-        ]
+        "primary_key": ["thread_id", "host", "repository", "number"]
       },
       {
         "name": "projection_thread_sessions",
@@ -1000,9 +892,7 @@
           "runtime_mode",
           "provider_instance_id"
         ],
-        "primary_key": [
-          "thread_id"
-        ]
+        "primary_key": ["thread_id"]
       },
       {
         "name": "projection_threads",
@@ -1039,9 +929,7 @@
           "title_state_json",
           "auto_settle_disabled_at"
         ],
-        "primary_key": [
-          "thread_id"
-        ]
+        "primary_key": ["thread_id"]
       },
       {
         "name": "provider_session_runtime",
@@ -1056,9 +944,7 @@
           "runtime_payload_json",
           "provider_instance_id"
         ],
-        "primary_key": [
-          "thread_id"
-        ]
+        "primary_key": ["thread_id"]
       },
       {
         "name": "pull_request_files_viewed",
@@ -1072,28 +958,12 @@
           "revision",
           "viewed_at"
         ],
-        "primary_key": [
-          "provider",
-          "host",
-          "repository",
-          "number",
-          "viewer",
-          "path"
-        ]
+        "primary_key": ["provider", "host", "repository", "number", "viewer", "path"]
       },
       {
         "name": "pull_request_review_guides",
-        "columns": [
-          "host",
-          "repository",
-          "number",
-          "guide_json"
-        ],
-        "primary_key": [
-          "host",
-          "repository",
-          "number"
-        ]
+        "columns": ["host", "repository", "number", "guide_json"],
+        "primary_key": ["host", "repository", "number"]
       },
       {
         "name": "scheduled_task_webhook_deliveries",
@@ -1113,9 +983,7 @@
           "rendered_prompt",
           "error"
         ],
-        "primary_key": [
-          "delivery_id"
-        ]
+        "primary_key": ["delivery_id"]
       },
       {
         "name": "scheduled_task_webhook_pending",
@@ -1129,33 +997,17 @@
           "request_json",
           "delivery_ids_json"
         ],
-        "primary_key": [
-          "delivery_id"
-        ]
+        "primary_key": ["delivery_id"]
       },
       {
         "name": "scheduled_task_webhook_relay_deliveries",
-        "columns": [
-          "relay_delivery_id",
-          "task_id",
-          "seen_at"
-        ],
-        "primary_key": [
-          "relay_delivery_id"
-        ]
+        "columns": ["relay_delivery_id", "task_id", "seen_at"],
+        "primary_key": ["relay_delivery_id"]
       },
       {
         "name": "scheduled_task_webhook_replay_keys",
-        "columns": [
-          "task_id",
-          "replay_key",
-          "delivery_id",
-          "expires_at"
-        ],
-        "primary_key": [
-          "task_id",
-          "replay_key"
-        ]
+        "columns": ["task_id", "replay_key", "delivery_id", "expires_at"],
+        "primary_key": ["task_id", "replay_key"]
       },
       {
         "name": "scheduled_tasks",
@@ -1185,14 +1037,12 @@
           "last_run_webhook_delivery_id",
           "thread_mode"
         ],
-        "primary_key": [
-          "task_id"
-        ]
+        "primary_key": ["task_id"]
       }
     ]
   },
   "sources": {
-    "apps/server/src/persistence/Migrations.ts": "96a2ecf004177ffee2bceb0c4048d610390322c29fd8fafaa2065a2bf933503e",
+    "apps/server/src/persistence/Migrations.ts": "e21eff3974aba47afa8bd385393ad7f0725e3def3bcdfbfc9e03fcf8851375f1",
     "apps/server/src/persistence/Migrations/001_OrchestrationEvents.ts": "aa225c01eb205ed475b473b04e230da564af8fd32324d9e803f52bb9df26330a",
     "apps/server/src/persistence/Migrations/002_OrchestrationCommandReceipts.ts": "f178d1d325229e8423d416d14ad1bc85766704b539baa30a28f17350dc1f02ee",
     "apps/server/src/persistence/Migrations/003_CheckpointDiffBlobs.ts": "415f5e22bae6eb552edf4454a9fd1ae8be3f8e9ba4fa0305d675d7f925b6591d",
@@ -1281,6 +1131,7 @@
     "apps/server/src/persistence/Migrations/086_QueuedTurnInputIndex.ts": "5f1566e87513041d0c918088c3fa92baf022e146442a72e5c366a6bc05388306",
     "apps/server/src/persistence/Migrations/087_ProjectionProjectsCustomTitle.ts": "2226f386dac9523b3175e4ba1bb4af8b1cc86b8e1b219c71dac400c972a556ef",
     "apps/server/src/persistence/Migrations/088_TurnItemTypeStatusIndex.ts": "328f42dcf473d6ef63d0f8cd51c26e7f00139952bc6dfe7221b4633433675aa1",
+    "apps/server/src/persistence/Migrations/089_ShellThreadReadIndexes.ts": "6b7382a30f8f644f602b3e613ef81511a1c2817092534ec2a219bff199d1bd8e",
     "apps/server/src/persistence/Migrations/OrchestrationV2/ApplicationEventSequenceIndexes.ts": "2a0201e505ad468d0a2cbfc5860725d1b9ded91e1d0f4e275cdb106b26d5dcd9",
     "apps/server/src/persistence/Migrations/OrchestrationV2/ApplicationEventSource.ts": "b0e4ed8c72dd7b9186c822c9c38dc7f191336abcd92cf5f367049574a06dafa1",
     "apps/server/src/persistence/Migrations/OrchestrationV2/EffectCancellation.ts": "d73145d2b0fe4907074cfc13cdfdcc319efd17a4440d2649897fc816d30f8204",

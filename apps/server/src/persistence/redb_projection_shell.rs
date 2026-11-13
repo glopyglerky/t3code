@@ -217,22 +217,107 @@ async fn threads(
     thread_id: Option<&str>,
     options: &ShellOptions,
 ) -> Result<Vec<Meta>> {
+    filtered_threads(session, thread_id, options, false).await
+}
+
+async fn shell_threads(
+    session: &mut Session,
+    thread_id: Option<&str>,
+    options: &ShellOptions,
+) -> Result<Vec<Meta>> {
+    filtered_threads(session, thread_id, options, true).await
+}
+
+async fn filtered_threads(
+    session: &mut Session,
+    thread_id: Option<&str>,
+    options: &ShellOptions,
+    archive_column: bool,
+) -> Result<Vec<Meta>> {
+    if options.thread_ids.as_ref().is_some_and(Vec::is_empty) {
+        return Ok(Vec::new());
+    }
     let family = match options.family_of.as_deref() {
-        Some(id) => point(session, THREADS, id)
-            .await?
-            .and_then(|row| row.p("lineage").get("rootThreadId").cloned()),
+        Some(id) => match read_row(
+            &mut session.transaction,
+            &session.catalog,
+            THREADS,
+            &[text_cell(id)],
+        )
+        .await?
+        {
+            Some(row) => read_index::derived::json_identity(
+                &text(&row.row, "payload_json")?,
+                &["lineage", "rootThreadId"],
+            )?,
+            None => None,
+        },
         None => None,
     };
-    let candidates = match thread_id {
-        Some(id) => window::equal_metadata(session, THREADS, "thread_id", &text_cell(id)).await?,
-        None => window::equal_metadata(session, THREADS, "all", &Value::Null).await?,
+    if options.family_of.is_some() && family.is_none() {
+        return Ok(Vec::new());
+    }
+    // These are the native equivalents of migration 89's guarded JSON indexes.
+    // Select identities before loading metadata, so unrelated unreadable rows
+    // cannot turn a family/worktree query into a whole-table parse failure.
+    let candidates = if let Some(root) = &family {
+        window::equal_metadata(session, THREADS, "_root_thread", root).await?
+    } else if let Some(path) = &options.worktree_path {
+        window::equal_metadata(session, THREADS, "_worktree_path", &text_cell(path)).await?
+    } else if let Some(id) = thread_id {
+        window::read_metadata(session, THREADS, id)
+            .await?
+            .into_iter()
+            .collect()
+    } else if let Some(ids) = &options.thread_ids {
+        let mut rows = Vec::new();
+        for id in ids.iter().collect::<BTreeSet<_>>() {
+            rows.extend(window::read_metadata(session, THREADS, id).await?);
+        }
+        rows
+    } else {
+        window::equal_metadata(session, THREADS, "all", &Value::Null).await?
+    };
+    let worktree_members = match (family.as_ref(), options.worktree_path.as_ref()) {
+        (Some(_), Some(path)) => Some(
+            window::equal_metadata(session, THREADS, "_worktree_path", &text_cell(path))
+                .await?
+                .into_iter()
+                .map(|row| text(&row.row, "thread_id"))
+                .collect::<Result<BTreeSet<_>>>()?,
+        ),
+        _ => None,
     };
     let mut rows = Vec::new();
     for row in candidates {
-        // SQL rejects deleted rows before evaluating their JSON expressions.
-        if nullable(&row.row, "deleted_at")?.is_none() {
-            rows.push(Meta::from_index(row)?);
+        let id = text(&row.row, "thread_id")?;
+        if nullable(&row.row, "deleted_at")?.is_some()
+            || thread_id.is_some_and(|selected| selected != id)
+            || options
+                .project_id
+                .as_ref()
+                .is_some_and(|project| row.row.get("project_id") != Some(&text_cell(project)))
+            || options
+                .thread_ids
+                .as_ref()
+                .is_some_and(|ids| !ids.contains(&id))
+            || worktree_members
+                .as_ref()
+                .is_some_and(|ids| !ids.contains(&id))
+        {
+            continue;
         }
+        // Only the upstream column-based queries use this pre-JSON filter.
+        // Other shell adjuncts still intentionally inspect payload.archivedAt.
+        if archive_column {
+            let archived = nullable(&row.row, "archived_at")?.is_some();
+            if (options.location.as_deref() == Some("active") && archived)
+                || (options.location.as_deref() == Some("archive") && !archived)
+            {
+                continue;
+            }
+        }
+        rows.push(Meta::from_index(row)?);
     }
     rows.retain(|row| {
         let lineage = row.p("lineage");
@@ -249,18 +334,14 @@ async fn threads(
                 || (lineage.get("relationshipToParent").and_then(Value::as_str)
                     != Some("subagent")
                     && !one(lineage.get("sideChat").unwrap_or(&Value::Null))))
-            && (options.location.as_deref() != Some("active") || row.p("archivedAt").is_null())
-            && (options.location.as_deref() != Some("archive") || !row.p("archivedAt").is_null())
+            && (archive_column
+                || options.location.as_deref() != Some("active")
+                || row.p("archivedAt").is_null())
+            && (archive_column
+                || options.location.as_deref() != Some("archive")
+                || !row.p("archivedAt").is_null())
             && (options.unsettled_only != Some(true)
                 || (row.p("settledAt").is_null() && row.pstr("settledOverride") != Some("settled")))
-            && (options.family_of.is_none()
-                || family.as_ref().is_some_and(|root| {
-                    !root.is_null() && lineage.get("rootThreadId") == Some(root)
-                }))
-            && options
-                .worktree_path
-                .as_deref()
-                .is_none_or(|path| row.pstr("worktreePath") == Some(path))
     });
     sort_updated(&mut rows, "thread_id", false);
     Ok(rows)
@@ -760,7 +841,7 @@ async fn pending_items(
 async fn query(session: &mut Session, input: ProjectionShellQuery) -> Result<Value> {
     read_index::ensure_ready(session).await?;
     match input {
-        ProjectionShellQuery::Threads{thread_id,options}=>{let mut result=Vec::new();for thread in threads(session,thread_id.as_deref(),&options.unwrap_or_default()).await?{result.push(shell_thread(session,&thread).await?);}Ok(json!(result))}
+        ProjectionShellQuery::Threads{thread_id,options}=>{let mut result=Vec::new();for thread in shell_threads(session,thread_id.as_deref(),&options.unwrap_or_default()).await?{result.push(shell_thread(session,&thread).await?);}Ok(json!(result))}
         ProjectionShellQuery::Runs{thread_ids}=>{let mut result=Vec::new();for run in selected(session,RUNS,thread_ids.as_deref()).await?{result.push(json!({"thread_id":run.col("thread_id"),"run_id":run.col("run_id"),"ordinal":run.number("ordinal")?,"rolled_back_at":if run.col("status")==Some("rolled_back"){opt_col(Some(&run),"completed_at")}else{Value::Null}}));}Ok(json!(result))}
         ProjectionShellQuery::RunItemCounts{thread_ids}=>item_counts(session,&thread_ids,true).await,
         ProjectionShellQuery::ItemCounts{thread_ids}=>item_counts(session,&thread_ids,false).await,
@@ -770,14 +851,14 @@ async fn query(session: &mut Session, input: ProjectionShellQuery) -> Result<Val
         ProjectionShellQuery::RemoteTasks{}=>{Ok(json!(selected(session,SUBAGENTS,None).await?.into_iter().filter(|row|row.col("origin")==Some("app_owned")&&row.col("child_thread_id").is_none()&&row.flag("nativeOpenRemoteDelegatedTask")).map(|row|json!({"thread_id":row.col("thread_id"),"subagent_id":row.col("subagent_id")})).collect::<Vec<_>>()))}
         ProjectionShellQuery::ThreadsWithPullRequests{thread_id}=>{let mut result=Vec::new();for row in threads(session,thread_id.as_deref(),&ShellOptions{location:Some("active".into()),..Default::default()}).await?{if row.flag("nativeHasPullRequests"){result.push(json!({"payload_json":full(session,THREADS,&row).await?}));}}Ok(json!(result))}
         ProjectionShellQuery::Worktrees{include_archived}=>{let mut rows=threads(session,None,&ShellOptions{location:if include_archived{None}else{Some("active".into())},..Default::default()}).await?;rows.sort_by_key(|row|row.order);Ok(json!(rows.into_iter().filter_map(|row|row.pstr("worktreePath").map(|path|json!({"thread_id":row.col("thread_id"),"worktree_path":path}))).collect::<Vec<_>>()))}
-        ProjectionShellQuery::PullRequestThreads{thread_id,unsettled_only}=>{let options=ShellOptions{location:if thread_id.is_none(){Some("active".into())}else{None},unsettled_only:Some(unsettled_only),..Default::default()};let mut result=Vec::new();for row in threads(session,thread_id.as_deref(),&options).await?{result.push(json!({"payload_json":full(session,THREADS,&row).await?}));}Ok(json!(result))}
+        ProjectionShellQuery::PullRequestThreads{thread_id,unsettled_only}=>{let options=ShellOptions{location:if thread_id.is_none(){Some("active".into())}else{None},unsettled_only:Some(unsettled_only),..Default::default()};let mut result=Vec::new();for row in shell_threads(session,thread_id.as_deref(),&options).await?{result.push(json!({"payload_json":full(session,THREADS,&row).await?}));}Ok(json!(result))}
         ProjectionShellQuery::ActiveSubagents{}=>{let mut rows=threads(session,None,&ShellOptions{location:Some("active".into()),..Default::default()}).await?;rows.sort_by_key(|row|row.order);Ok(json!(rows.into_iter().filter(|row|row.p("lineage").get("relationshipToParent").and_then(Value::as_str)==Some("subagent")).map(|row|json!({"thread_id":row.col("thread_id")})).collect::<Vec<_>>()))}
         ProjectionShellQuery::CountThreads{}=>{
             let all=read_index::count_equal(session,THREADS,"all",&Value::Null).await?;
             let deleted=read_index::count_equal(session,THREADS,"_deleted",&int_cell(1)).await?;
             Ok(json!([{"count":all.checked_sub(deleted).ok_or(Error::IncompatibleStore)?}]))
         },
-        ProjectionShellQuery::ActiveIndex{}=>{let remote = selected(session,SUBAGENTS,None).await?.into_iter().filter(|row|row.col("origin")==Some("app_owned")&&row.col("child_thread_id").is_none()&&row.flag("nativeOpenRemoteDelegatedTask")).filter_map(|row|row.col("thread_id").map(str::to_owned)).collect::<BTreeSet<_>>();let mut result=Vec::new();for row in threads(session,None,&ShellOptions{location:Some("active".into()),..Default::default()}).await?{let data=ThreadData::load(session,&row.id(THREADS)?).await?;let lineage=row.p("lineage");let side=lineage.get("sideChat").map(|value|if let Some(value)=value.as_bool(){json!(u8::from(value))}else{value.clone()}).unwrap_or(Value::Null);result.push(json!({"thread_id":row.col("thread_id"),"project_id":row.col("project_id"),"relationship_to_parent":lineage.get("relationshipToParent"),"parent_thread_id":lineage.get("parentThreadId"),"root_thread_id":lineage.get("rootThreadId"),"side_chat":side,"settled_override":row.p("settledOverride"),"settled_at":row.p("settledAt"),"pinned_at":row.p("pinnedAt"),"snoozed_until":row.p("snoozedUntil"),"may_be_live":u8::from(data.live(&row)),"has_remote_tasks":u8::from(row.col("thread_id").is_some_and(|id|remote.contains(id)))}));}Ok(json!(result))}
+        ProjectionShellQuery::ActiveIndex{}=>{let remote = selected(session,SUBAGENTS,None).await?.into_iter().filter(|row|row.col("origin")==Some("app_owned")&&row.col("child_thread_id").is_none()&&row.flag("nativeOpenRemoteDelegatedTask")).filter_map(|row|row.col("thread_id").map(str::to_owned)).collect::<BTreeSet<_>>();let mut result=Vec::new();for row in shell_threads(session,None,&ShellOptions{location:Some("active".into()),..Default::default()}).await?{let data=ThreadData::load(session,&row.id(THREADS)?).await?;let lineage=row.p("lineage");let side=lineage.get("sideChat").map(|value|if let Some(value)=value.as_bool(){json!(u8::from(value))}else{value.clone()}).unwrap_or(Value::Null);result.push(json!({"thread_id":row.col("thread_id"),"project_id":row.col("project_id"),"relationship_to_parent":lineage.get("relationshipToParent"),"parent_thread_id":lineage.get("parentThreadId"),"root_thread_id":lineage.get("rootThreadId"),"side_chat":side,"settled_override":row.p("settledOverride"),"settled_at":row.p("settledAt"),"pinned_at":row.p("pinnedAt"),"snoozed_until":row.p("snoozedUntil"),"may_be_live":u8::from(data.live(&row)),"has_remote_tasks":u8::from(row.col("thread_id").is_some_and(|id|remote.contains(id)))}));}Ok(json!(result))}
         ProjectionShellQuery::GuestShare{share_id}=>{let rows=selected(session,THREADS,None).await?;Ok(json!(rows.into_iter().find(|row|row.pstr("nativeGuestShareId")==Some(share_id.as_str())).map(|row|json!({"thread_id":row.col("thread_id")})).into_iter().collect::<Vec<_>>()))}
         ProjectionShellQuery::OlderSettled{before,project_ids,limit}=>{let mut rows=threads(session,None,&ShellOptions{location:Some("active".into()),listed_only:Some(true),..Default::default()}).await?;rows.retain(|row|row.pstr("settledOverride")==Some("settled")&&row.pstr("settledAt").is_some_and(|time|time<before.settled_at.as_str()||(time==before.settled_at&&before.thread_id.as_deref().is_some_and(|id|row.col("thread_id").is_some_and(|thread|thread>id))))&&project_ids.as_ref().is_none_or(|ids|row.col("project_id").is_some_and(|project|ids.iter().any(|id|id==project))));rows.sort_by(|a,b|b.pstr("settledAt").cmp(&a.pstr("settledAt")).then_with(||a.col("thread_id").cmp(&b.col("thread_id"))));if limit==0{let mut counts=BTreeMap::<String,u64>::new();for row in rows{*counts.entry(text(&row.row,"project_id")?).or_default()+=1;}Ok(json!({"pageRows":[],"countRows":counts.into_iter().map(|(project,count)|json!({"project_id":project,"count":count})).collect::<Vec<_>>()}))}else{Ok(json!({"pageRows":rows.into_iter().take(if limit<0{usize::MAX}else{limit as usize}).map(|row|json!({"thread_id":row.col("thread_id")})).collect::<Vec<_>>(),"countRows":[]}))}}
     }
@@ -792,5 +873,255 @@ impl ApplicationTransactions {
         let mut session = self.take(id)?;
         let result = query(&mut session, input).await;
         self.finish(id, session, result).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::TestFixture;
+
+    fn payload(id: &str, lineage: &str, worktree: &str) -> String {
+        let base = json!({
+            "id":id,"projectId":"project","title":id,"providerInstanceId":"instance",
+            "runtimeMode":"full-access","interactionMode":"default","activeProviderThreadId":null,
+            "createdAt":"2026-11-13T00:00:00.000Z","updatedAt":"2026-11-13T00:00:00.000Z",
+            "archivedAt":null,"deletedAt":null,"worktreePath":worktree
+        })
+        .to_string();
+        set_payload_field(&base, "lineage", lineage.into()).unwrap()
+    }
+
+    fn row(id: &str, raw: &str, archived: Option<&str>) -> Map<String, Value> {
+        let mut row = spec(THREADS)
+            .columns
+            .iter()
+            .map(|(name, kind)| {
+                let cell = match kind {
+                    T => text_cell("fixture"),
+                    I => int_cell(0),
+                    NT | NI => nullable_cell(None),
+                };
+                ((*name).into(), cell)
+            })
+            .collect::<Map<String, Value>>();
+        row.insert("thread_id".into(), text_cell(id));
+        row.insert("project_id".into(), text_cell("project"));
+        row.insert("updated_at".into(), text_cell("2026-11-13T00:00:00.000Z"));
+        row.insert("archived_at".into(), nullable_cell(archived));
+        row.insert("payload_json".into(), text_cell(raw));
+        row
+    }
+
+    async fn fixture(
+        rows: Vec<Map<String, Value>>,
+    ) -> (TestFixture, Store, ApplicationTransactions) {
+        let fixture = TestFixture::start().await;
+        let store = fixture.initialize().await;
+        store.bootstrap_application().await.unwrap();
+        let mut app = ApplicationTransactions::new(store.clone());
+        app.begin("seed").await.unwrap();
+        for row in rows {
+            let primary = vec![row["thread_id"].clone()];
+            app.put("seed", THREADS, primary, row).await.unwrap();
+        }
+        app.commit("seed").await.unwrap();
+        while !store
+            .prepare_application_projection_reads()
+            .await
+            .unwrap()
+            .prepared
+        {}
+        (fixture, store, app)
+    }
+
+    async fn read(app: &mut ApplicationTransactions, input: Value) -> Result<Value> {
+        app.begin_mode(
+            "read",
+            crate::application::ApplicationTransactionMode::Read,
+            Some(5000),
+        )
+        .await?;
+        let result = app
+            .projections_shell("read", serde_json::from_value(input).unwrap())
+            .await;
+        if result.is_ok() {
+            app.rollback("read").await?;
+        }
+        result
+    }
+
+    fn ids(value: Value) -> Vec<String> {
+        value
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["thread_id"].as_str().unwrap().into())
+            .collect()
+    }
+
+    async fn shell_ids(app: &mut ApplicationTransactions, options: Value) -> Vec<String> {
+        ids(read(app, json!({"kind":"threads","options":options}))
+            .await
+            .unwrap())
+    }
+
+    #[tokio::test]
+    async fn indexed_shell_filters_skip_unrelated_bad_rows_and_follow_sql_json_identity() {
+        let mut rows = Vec::new();
+        for (id, lineage, worktree) in [
+            ("a", r#"{"rootThreadId":"family"}"#, "/target"),
+            ("b", r#"{"rootThreadId":"family"}"#, "/target"),
+            (
+                "duplicate",
+                r#"{"rootThreadId":"family","rootThreadId":"shadow"}"#,
+                "/other",
+            ),
+            ("number-bool", r#"{"rootThreadId":true}"#, "/number"),
+            ("number-int", r#"{"rootThreadId":1}"#, "/number"),
+            ("number-real", r#"{"rootThreadId":1.0}"#, "/number"),
+            ("number-text", r#"{"rootThreadId":"1"}"#, "/number"),
+            ("object", r#"{"rootThreadId":{ "z":1, "a":2 }}"#, "/object"),
+            (
+                "object-reversed",
+                r#"{"rootThreadId":{"a":2,"z":1}}"#,
+                "/object",
+            ),
+            (
+                "object-text",
+                r#"{"rootThreadId":"{\"z\":1,\"a\":2}"}"#,
+                "/object",
+            ),
+        ] {
+            rows.push(row(id, &payload(id, lineage, worktree), None));
+        }
+        rows.push(row("unreadable", "{bad", None));
+        let (_fixture, store, mut app) = fixture(rows).await;
+        assert_eq!(
+            shell_ids(&mut app, json!({"worktreePath":"/target"})).await,
+            ["a", "b"]
+        );
+        assert_eq!(
+            shell_ids(&mut app, json!({"familyOf":"a"})).await,
+            ["a", "b", "duplicate"]
+        );
+        assert_eq!(
+            shell_ids(&mut app, json!({"familyOf":"a","worktreePath":"/target"})).await,
+            ["a", "b"]
+        );
+        assert!(
+            shell_ids(&mut app, json!({"familyOf":"missing"}))
+                .await
+                .is_empty()
+        );
+        assert_eq!(
+            shell_ids(&mut app, json!({"familyOf":"number-bool"})).await,
+            ["number-bool", "number-int", "number-real"]
+        );
+        assert_eq!(
+            shell_ids(&mut app, json!({"familyOf":"number-text"})).await,
+            ["number-text"]
+        );
+        assert_eq!(
+            shell_ids(&mut app, json!({"familyOf":"object"})).await,
+            ["object", "object-text"]
+        );
+        assert!(matches!(
+            read(
+                &mut app,
+                json!({"kind":"threads","options":{"familyOf":"unreadable"}})
+            )
+            .await,
+            Err(Error::IncompatibleStore)
+        ));
+
+        // A missing off-target metadata row makes whole-table enumeration fail.
+        // The indexed reads must still avoid it completely.
+        let mut tx = store.db.begin().await.unwrap();
+        let catalog = decode_catalog(&tx.get(&schema_key()).await.unwrap().unwrap()).unwrap();
+        tx.delete(store_key(&format!(
+            "application/generation/{}/projection-reads/v1/window-meta/{THREADS}/{}",
+            catalog.generation,
+            request_digest(&json!([text_cell("unreadable")]))
+        )))
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        assert_eq!(
+            shell_ids(&mut app, json!({"worktreePath":"/target"})).await,
+            ["a", "b"]
+        );
+        assert_eq!(
+            shell_ids(&mut app, json!({"familyOf":"a"})).await,
+            ["a", "b", "duplicate"]
+        );
+        assert!(matches!(
+            read(&mut app, json!({"kind":"threads"})).await,
+            Err(Error::IncompatibleStore)
+        ));
+        drop(app);
+        store.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn archive_column_filters_do_not_change_json_based_worktree_queries() {
+        let time = "2026-11-13T00:00:00.000Z";
+        let raw = payload(
+            "payload-archived",
+            r#"{"rootThreadId":"payload-archived"}"#,
+            "/payload",
+        );
+        let raw = set_payload_field(&raw, "archivedAt", json!(time).to_string()).unwrap();
+        let rows = vec![
+            row("payload-archived", &raw, None),
+            row(
+                "column-archived",
+                &payload(
+                    "column-archived",
+                    r#"{"rootThreadId":"column-archived"}"#,
+                    "/column",
+                ),
+                Some(time),
+            ),
+        ];
+        let (_fixture, store, mut app) = fixture(rows).await;
+        assert_eq!(
+            shell_ids(&mut app, json!({"location":"active"})).await,
+            ["payload-archived"]
+        );
+        assert_eq!(
+            shell_ids(&mut app, json!({"location":"archive"})).await,
+            ["column-archived"]
+        );
+        assert_eq!(
+            ids(read(&mut app, json!({"kind":"active_index"}))
+                .await
+                .unwrap()),
+            ["payload-archived"]
+        );
+        let links = read(
+            &mut app,
+            json!({"kind":"pull_request_threads","unsettled_only":false}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(links.as_array().unwrap().len(), 1);
+        assert!(
+            links[0]["payload_json"]
+                .as_str()
+                .unwrap()
+                .contains("payload-archived")
+        );
+        assert_eq!(
+            ids(read(
+                &mut app,
+                json!({"kind":"worktrees","include_archived":false})
+            )
+            .await
+            .unwrap()),
+            ["column-archived"]
+        );
+        drop(app);
+        store.shutdown().await.unwrap();
     }
 }

@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-import * as Assert from "node:assert/strict";
-import * as FS from "node:fs/promises";
-import * as Path from "node:path";
-import * as ChildProcess from "node:child_process";
+import * as NodeAssert from "node:assert/strict";
+import * as NodeFSP from "node:fs/promises";
+import * as NodePath from "node:path";
+import * as NodeChildProcess from "node:child_process";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -14,7 +14,7 @@ import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { AuthStandardClientScopes } from "@t3tools/contracts";
 import { createFixture } from "./database-fixture.mjs";
-import { hash, finishProof } from "./redb-domain-fixture.mjs";
+import { finishProof } from "./redb-domain-fixture.mjs";
 import {
   sampleEvents,
   fixedDateTime,
@@ -26,8 +26,8 @@ import { inspectNativeReplay } from "../apps/web/scripts/hybrid-client-database.
 import { verifyNativeSchemaUpgrade } from "./omdb-schema-upgrade-fixture.mjs";
 
 const [executable, proofPath] = process.argv.slice(2);
-Assert.ok(executable && Path.isAbsolute(executable));
-ChildProcess.execFileSync(process.execPath, ["tools/generate-omdb-schema.mjs", "--check"], {
+NodeAssert.ok(executable && NodePath.isAbsolute(executable));
+NodeChildProcess.execFileSync(process.execPath, ["tools/generate-omdb-schema.mjs", "--check"], {
   stdio: "inherit",
 });
 // Select exactly as production does. Other incremental helpers are unrelated
@@ -38,17 +38,17 @@ const Selected = await import("../apps/server/src/persistence/SelectedPersistenc
 const Runtime = await import("../apps/server/src/orchestration-v2/selectedRuntimeLayer.ts");
 const Config = await import("../apps/server/src/config.ts");
 const Projection = await import("../apps/server/src/orchestration-v2/ProjectionStore.ts");
-const Projects = await import("../apps/server/src/orchestration-v2/ProjectStore.ts");
 const Sink = await import("../apps/server/src/orchestration-v2/EventSink.ts");
 const Search = await import("../apps/server/src/orchestration-v2/ThreadSearch.ts");
 const Sessions = await import("../apps/server/src/persistence/AuthSessions.ts");
+const decodeCreateAuthSessionInput = Schema.decodeUnknownSync(Sessions.CreateAuthSessionInput);
 const EnvironmentAuth = await import("../apps/server/src/auth/EnvironmentAuth.ts");
 const ServerEnvironment = await import("../apps/server/src/environment/ServerEnvironment.ts");
 const ServerSecretStore = await import("../apps/server/src/auth/ServerSecretStore.ts");
 const ManagedPolicy = await import("../apps/server/src/policy/ManagedPolicy.ts");
 const Transactions = await import("../apps/server/src/persistence/PersistenceTransactions.ts");
 const Sqlite = await import("../apps/server/src/persistence/Sqlite.ts");
-Assert.equal(Selected.selection.kind, "omdb");
+NodeAssert.equal(Selected.selection.kind, "omdb");
 
 const fixture = await createFixture();
 const checks = [];
@@ -98,7 +98,7 @@ const run = (use) =>
   Effect.runPromise(
     Effect.gen(function* () {
       const context = yield* Layer.build(graph);
-      Assert.ok(Option.isNone(Context.getOption(context, SqlClient.SqlClient)));
+      NodeAssert.ok(Option.isNone(Context.getOption(context, SqlClient.SqlClient)));
       return yield* use(context).pipe(Effect.provideContext(context));
     }).pipe(Effect.scoped, Effect.provide(Logger.layer([]))),
   );
@@ -107,7 +107,7 @@ try {
   await run((context) =>
     Effect.gen(function* () {
       const config = Context.get(context, Config.ServerConfig);
-      Assert.equal(config.dbPath, Path.join(fixture.root, "userdata", "statev2.omdb"));
+      NodeAssert.equal(config.dbPath, NodePath.join(fixture.root, "userdata", "statev2.omdb"));
       const sink = Context.get(context, Sink.EventSinkV2);
       yield* sink.commitProjectCommand({
         commandId: "production:project",
@@ -143,15 +143,15 @@ try {
         events: sampleEvents,
         effects: [],
       });
-      Assert.equal(committed.committed, true);
+      NodeAssert.equal(committed.committed, true);
       yield* sink.write({ events: completionEvents });
       const projections = Context.get(context, Projection.ProjectionStoreV2);
       const tx = Context.get(context, Transactions.PersistenceTransactions);
       yield* tx.withReadTransaction(
         Effect.gen(function* () {
-          Assert.equal((yield* projections.getThread("thread:main")).id, "thread:main");
+          NodeAssert.equal((yield* projections.getThread("thread:main")).id, "thread:main");
           const shell = yield* projections.getShellSnapshot();
-          Assert.ok(shell.threads.some((thread) => thread.id === "thread:main"));
+          NodeAssert.ok(shell.threads.some((thread) => thread.id === "thread:main"));
         }),
       );
       const snapshot = yield* projections.getThreadSnapshot("thread:main");
@@ -167,7 +167,7 @@ try {
         attemptCompletedAt: completedAt,
         providerTurnCompletedAt: completedAt,
       };
-      Assert.equal(
+      NodeAssert.equal(
         inspectNativeReplay({
           executable,
           stateDirectory: fixture.root,
@@ -180,11 +180,11 @@ try {
         scopes: AuthStandardClientScopes,
         label: "native production",
       });
-      Assert.ok(
+      NodeAssert.ok(
         (yield* auth.listSessions()).some((session) => session.sessionId === issued.sessionId),
       );
       yield* Context.get(context, Sessions.AuthSessionRepository).create(
-        Schema.decodeUnknownSync(Sessions.CreateAuthSessionInput)({
+        decodeCreateAuthSessionInput({
           sessionId: "production:persisted-auth",
           subject: "owner",
           scopes: ["orchestration:read"],
@@ -208,7 +208,7 @@ try {
   checks.push(
     "production-selected event sink, complete projections, search and authentication share native persistence without SqlClient",
   );
-  Assert.equal(
+  NodeAssert.equal(
     inspectNativeReplay({
       executable,
       stateDirectory: fixture.root,
@@ -223,8 +223,8 @@ try {
   await run((context) =>
     Effect.gen(function* () {
       const projections = Context.get(context, Projection.ProjectionStoreV2);
-      Assert.equal((yield* projections.getThread("thread:main")).id, "thread:main");
-      Assert.ok(
+      NodeAssert.equal((yield* projections.getThread("thread:main")).id, "thread:main");
+      NodeAssert.ok(
         Option.isSome(
           yield* Context.get(context, Sessions.AuthSessionRepository).getById({
             sessionId: "production:persisted-auth",
@@ -240,8 +240,8 @@ try {
         events: sampleEvents,
         effects: [],
       });
-      Assert.equal(replay.committed, false);
-      Assert.equal(
+      NodeAssert.equal(replay.committed, false);
+      NodeAssert.equal(
         inspectNativeReplay({
           executable,
           stateDirectory: fixture.root,
@@ -254,11 +254,11 @@ try {
   checks.push(
     "restart preserves committed threads and authentication; duplicate command replay does not write again",
   );
-  const files = await FS.readdir(Path.join(fixture.root, "userdata"));
-  Assert.ok(files.includes("statev2.omdb"));
-  Assert.ok(!files.some((file) => /^state(?:v2)?\.sqlite(?:-(?:wal|shm))?$/.test(file)));
-  Assert.equal(
-    await FS.readFile(Path.join(fixture.root, "userdata", "server-owner.sqlite"), "utf8"),
+  const files = await NodeFSP.readdir(NodePath.join(fixture.root, "userdata"));
+  NodeAssert.ok(files.includes("statev2.omdb"));
+  NodeAssert.ok(!files.some((file) => /^state(?:v2)?\.sqlite(?:-(?:wal|shm))?$/.test(file)));
+  NodeAssert.equal(
+    await NodeFSP.readFile(NodePath.join(fixture.root, "userdata", "server-owner.sqlite"), "utf8"),
     "t3code-omdb-owner-v1\n",
   );
   checks.push(
@@ -271,8 +271,8 @@ try {
       ),
     ).pipe(Effect.scoped),
   );
-  Assert.equal(refusal._tag, "Failure");
-  Assert.ok(JSON.stringify(refusal).includes("NativeDatabaseAuthoritative"));
+  NodeAssert.equal(refusal._tag, "Failure");
+  NodeAssert.ok(JSON.stringify(refusal).includes("NativeDatabaseAuthoritative"));
   checks.push(
     "retained SQLite configuration refuses an authoritative omdb home instead of forking state",
   );
@@ -294,6 +294,7 @@ try {
       "apps/server/src/persistence/redb_bootstrap.rs",
       "apps/server/src/persistence/omdb-schema.json",
       "apps/server/src/persistence/omdb-schema-80.json",
+      "apps/server/src/persistence/omdb-schema-88.json",
       "tools/omdb-schema-upgrade-fixture.mjs",
       "apps/server/src/persistence/SelectedPersistence.ts",
       "apps/server/src/persistence/Sqlite.ts",
