@@ -51,6 +51,12 @@ complete qualification: its native component job stopped in the production
 TypeScript contract check before adapter and application jobs could run.
 That run is not a qualified ancestor or a reusable full-application receipt.
 
+The standalone acceptance runtime now includes the production `jsonc-parser`
+dependency and applies the existing workspace patches for `@cursor/sdk`,
+`@ff-labs/fff-node` and `node-pty`. This closes missing-module and missing-symbol
+errors found in a fresh installation of the earlier candidate. Package versions
+match the integrated workspace, and the typecheck diagnostics remain enabled.
+
 The updated source therefore requires fresh fork qualification from the last
 verified ancestor, including native storage, production adapters and the normal
 application flow. The trusted upstream source does not qualify changed native

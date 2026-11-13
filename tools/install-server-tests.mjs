@@ -20,6 +20,9 @@ NodeChildProcess.execFileSync("npm", ["ci", "--ignore-scripts", "--no-audit", "-
 // Production adapters and recovery imports reach Markdown and provider SDKs.
 // Apply the same pinned patches as the workspace installation before importing.
 const patches = [
+  ["@cursor/sdk", "1.2.0"],
+  ["@ff-labs/fff-node", "0.11.0"],
+  ["node-pty", "1.2.0-beta.15"],
   ["mdast-util-math", "3.0.0"],
   ["micromark-extension-llm-math", "3.1.0", "micromark-extension-math"],
   ["micromark-extension-gfm-table", "2.1.1"],
