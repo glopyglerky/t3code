@@ -342,7 +342,14 @@ const exercise = Effect.fn("checkRedbProjectionContext.exercise")(function* ({
     ["run:a"],
   );
   NodeAssert.equal(result.sideChat.sideChat, true);
-  NodeAssert.equal(result.rollback.rolledBackAttemptIds.length, 4);
+  // Migration 89 changes the unchanged SQL join to run-first traversal. The
+  // source row order of both runs and their attempts must survive import.
+  NodeAssert.deepEqual(result.rollback.rolledBackAttemptIds, [
+    "attempt:z:second",
+    "attempt:z",
+    "attempt:b:second",
+    "attempt:b",
+  ]);
 
   // Missing snapshots still anchor a run, while unowned missing slots may rebaseline.
   yield* failed(
@@ -603,6 +610,16 @@ const exercise = Effect.fn("checkRedbProjectionContext.exercise")(function* ({
   return normalized(result);
 });
 
+const resumeRollback = Effect.fn("checkRedbProjectionContext.resumeRollback")(function* ({
+  store,
+  apply,
+}) {
+  // The recovery fixture selects provider:background. Reselect the checkpoint's
+  // provider so the restarted query reads attempts instead of returning early.
+  yield* apply(makeEvent("provider-thread.updated", jsonPayloads.providerThread));
+  return normalized(yield* store.getCheckpointRollbackContext("thread:main", rollbackTarget));
+});
+
 try {
   const source = NodePath.join(fixture.root, "source.sqlite");
   await createMigratedSqlite(source, () =>
@@ -648,7 +665,13 @@ try {
     "Missing checkpoints preserve run anchors and remain valid rollback targets",
     "Live run forks protect inherited message, render and answer files; side chats do not retain them",
   );
-  await withServices("redb", source, ({ store }) =>
+  const resumedRollback = await withServices("upstream", upstream, resumeRollback);
+  NodeAssert.deepEqual(
+    resumedRollback.rolledBackAttemptIds,
+    expected.rollback.rolledBackAttemptIds,
+  );
+  NodeAssert.deepEqual(await withServices("sqlite", retained, resumeRollback), resumedRollback);
+  await withServices("redb", source, ({ store, apply }) =>
     Effect.gen(function* () {
       NodeAssert.deepEqual(
         normalized(yield* store.getCheckpointCaptureContext("thread:main", captureTarget)),
@@ -658,6 +681,7 @@ try {
         normalized(yield* store.getRuntimeRecoveryProjection("thread:main")),
         expected.liveRecovery,
       );
+      NodeAssert.deepEqual(yield* resumeRollback({ store, apply }), resumedRollback);
     }),
   );
   checks.push("Context results survive helper restart");

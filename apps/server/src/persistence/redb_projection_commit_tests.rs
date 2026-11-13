@@ -1426,3 +1426,74 @@ async fn turn_item_counts_follow_cross_run_moves_deletion_and_nested_rollback() 
     assert!(app.get("verify", counts, &[text_cell("first"), text_cell("")]).await.unwrap().is_none());
     app.rollback("verify").await.unwrap();
 }
+
+#[tokio::test]
+async fn rolled_back_attempts_follow_run_source_order_and_preserve_thread_ownership() {
+    let fixture = TestFixture::start().await;
+    let store = fixture.initialize().await;
+    let mut app = initialize(&store).await;
+    prepare(&store).await;
+    prepare_reads(&store).await;
+    app.begin("write").await.unwrap();
+    // Insertion, IDs, and ordinals deliberately disagree. The upstream 89
+    // plan visits runs by source rowid, then attempts by each run's rowids.
+    for (id, ordinal, owner, status) in [
+        ("z", 9, "thread", "rolled_back"),
+        ("b", 2, "thread", "rolled_back"),
+        ("a", 1, "thread", "completed"),
+        ("foreign", 1, "other", "rolled_back"),
+    ] {
+        let mut payload = run(id, ordinal);
+        payload["status"] = json!(status);
+        payload["threadId"] = json!(owner);
+        apply(&mut app, "write", event("run.created", owner, payload))
+            .await
+            .unwrap();
+    }
+    // Interleaving attempts also distinguishes run-major order from a global
+    // attempt-row scan. Both sides of the join must belong to the thread.
+    for (id, run_id, ordinal, owner) in [
+        ("b-second", "b", 2, "thread"),
+        ("z-second", "z", 2, "thread"),
+        ("foreign-attempt", "z", 3, "other"),
+        ("b-first", "b", 1, "thread"),
+        ("z-first", "z", 1, "thread"),
+        ("completed-run", "a", 1, "thread"),
+        ("foreign-run", "foreign", 1, "thread"),
+    ] {
+        apply(&mut app, "write", event("run-attempt.created", owner, json!({
+            "id":id,"runId":run_id,"attemptOrdinal":ordinal,"rootNodeId":"node",
+            "providerInstanceId":"instance","providerThreadId":"provider",
+            "providerTurnId":null,"status":"completed",
+        }))).await.unwrap();
+    }
+    let query = || serde_json::from_value(json!({
+        "kind":"rolledback_attempts","thread_id":"thread",
+    })).unwrap();
+    let expected = json!([
+        {"id":"z-second"},{"id":"z-first"},{"id":"b-second"},{"id":"b-first"},
+    ]);
+    assert_eq!(app.projections_context("write", query()).await.unwrap(), expected);
+    app.savepoint("write", "status").await.unwrap();
+    let mut changed = run("z", 9);
+    changed["status"] = json!("completed");
+    apply(&mut app, "write", event("run.updated", "thread", changed.clone())).await.unwrap();
+    assert_eq!(app.projections_context("write", query()).await.unwrap(), json!([
+        {"id":"b-second"},{"id":"b-first"},
+    ]));
+    app.rollback_to("write", "status").await.unwrap();
+    app.release("write", "status").await.unwrap();
+    assert_eq!(app.projections_context("write", query()).await.unwrap(), expected);
+    // Updating a selected row retains its original source order.
+    changed["status"] = json!("rolled_back");
+    changed["completedAt"] = json!(NOW);
+    apply(&mut app, "write", event("run.updated", "thread", changed)).await.unwrap();
+    app.commit("write").await.unwrap();
+    drop(app);
+    store.shutdown().await.unwrap();
+    let reopened = fixture.connect().await;
+    let mut app = ApplicationTransactions::new(reopened.clone());
+    app.begin("read").await.unwrap();
+    assert_eq!(app.projections_context("read", query()).await.unwrap(), expected);
+    app.rollback("read").await.unwrap();
+}

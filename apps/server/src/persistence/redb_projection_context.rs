@@ -319,7 +319,26 @@ async fn select(session: &mut Session, q: ProjectionContextQuery) -> Result<Valu
         "rollback_target_attempt"=>{let ordinal=required_ordinal(q.ordinal)?;let mut out=Vec::new();for run in thread_rows(session,RUNS,t).await?{if integer(&run.row,"ordinal")?!=ordinal||string(&run,"status")?=="rolled_back"{continue;}let payload=p(&run)?;if let Some(attempt)=point(session,ATTEMPTS,payload.get("activeAttemptId").and_then(Value::as_str),Some(t)).await?.pop(){out.push(json!({"id":id(&attempt,ATTEMPTS)?,"providerTurnId":optional(&attempt,"provider_turn_id")?}));}}return Ok(json!(out));},
         "rollback_runs"=>(RUNS,sorted(keep(thread_rows(session,RUNS,t).await?,|row|Ok(integer(&row.row,"ordinal")?>required_ordinal(q.ordinal)?&&one_of(row,"status",&["completed","interrupted","failed","cancelled"])?))?,&["ordinal"])?),
         "bound_session"=>{let id=q.record_id.as_deref();let rows=keep(bound_sessions(session,t).await?,|row|Ok(id==Some(string(row,"provider_session_id")?.as_str())))?;(SESSIONS,rows)},
-        "rolledback_attempts"=>{let runs=sorted(keep(thread_rows(session,RUNS,t).await?,|row|Ok(string(row,"status")?=="rolled_back"))?,&["run_id"])?;let mut out=Vec::new();for run in runs{for attempt in related(session,ATTEMPTS,"run_id",&id(&run,RUNS)?).await?{if string(&attempt,"thread_id")?==*t{out.push(json!({"id":id(&attempt,ATTEMPTS)?}));}}}return Ok(json!(out));},
+        "rolledback_attempts" => {
+            // Migration 89 changes the upstream join to visit rolled-back runs
+            // through (thread_id, status, rowid), then each run's attempts in
+            // source row order. Run IDs and attempt ordinals do not order it.
+            let runs = sorted(
+                keep(thread_rows(session, RUNS, t).await?, |row| {
+                    Ok(string(row, "status")? == "rolled_back")
+                })?,
+                &[],
+            )?;
+            let mut out = Vec::new();
+            for run in runs {
+                for attempt in related(session, ATTEMPTS, "run_id", &id(&run, RUNS)?).await? {
+                    if string(&attempt, "thread_id")? == *t {
+                        out.push(json!({"id":id(&attempt, ATTEMPTS)?}));
+                    }
+                }
+            }
+            return Ok(json!(out));
+        },
         "stale_checkpoints"=>(CHECKPOINTS,sorted(keep(thread_rows(session,CHECKPOINTS,t).await?,|row|Ok(string(row,"scope_id")?==required(&q.scope_id)?&&string(row,"status")?=="ready"&&cell_json(row,"app_run_ordinal")?.as_i64().is_some_and(|v|q.ordinal.is_some_and(|n|v>n))))?,&["ordinal_within_scope"])?),
         "rollback_nodes"=>{let mut rows=Vec::new();for id in q.ids.as_ref().ok_or_else(||invalid("context node identities are required"))?.iter().flatten().collect::<BTreeSet<_>>(){rows.extend(point(session,NODES,Some(id),Some(t)).await?);}(NODES,sorted(rows,&["node_id"])?)},
         "rollback_turns"=>(TURNS,sorted(keep(thread_rows(session,TURNS,t).await?,|row|Ok(optional(row,"provider_thread_id")?.as_deref()==q.provider_thread_id.as_deref()||q.provider_turn_id.as_ref().is_some_and(|id|id==&string(row,"provider_turn_id").unwrap_or_default())||q.attempt_id.as_ref().is_some_and(|id|optional(row,"run_attempt_id").ok().flatten().as_ref()==Some(id))))?,&["provider_thread_id","ordinal"])?),
