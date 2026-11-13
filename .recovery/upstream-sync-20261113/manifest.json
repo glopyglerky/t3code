@@ -1,0 +1,1097 @@
+{
+  "schema_version": 1,
+  "status": "incomplete_unmergeable",
+  "repository": "glopyglerky/t3code-ls",
+  "reason": "The hosted execution environment became unavailable during candidate upload. The complete source tree cannot be materialized from this archive.",
+  "production_baseline": {
+    "commit": "17ec4bae52471ba66f24f6abadbf29e4498106e7",
+    "tree": "37f71ff366b9563e549a0cd1f78c4e28f57cc595",
+    "unchanged": true,
+    "qualified_run": "https://github.com/glopyglerky/t3code-ls/actions/runs/43089751300"
+  },
+  "intended_upstream": {
+    "repository": "pingdotgg/t3code",
+    "commit": "ed7e5010baafd73d0164ee1d5adbd21e26f8f9cb",
+    "previous_commit": "7171fdd7716b05dc1b4be40c26ac78e8bb35f80c"
+  },
+  "expected_local_commits": [
+    {
+      "commit": "2f30c6c17b63d17ae0a1052a9f304117bcaa2c27",
+      "tree": "fd8f5f4a9544ed7a57fa46cfac2ecfd9818ab9ac",
+      "parents": [
+        "17ec4bae52471ba66f24f6abadbf29e4498106e7",
+        "ed7e5010baafd73d0164ee1d5adbd21e26f8f9cb"
+      ],
+      "message": "Sync upstream ed7e5010 and extend native persistence contracts\n\nIntegrate latest upstream application source while preserving selected Rust\nexecution and all platform implementations. Upgrade native schema80 to88,\nrestore new projection and orchestration contracts, and move active-run and\nlegacy subagent identifier reads through selected persistence.\n\nRetain immutable-source differential fixtures and source accounting. Full\ncandidate CI must qualify this exact revision before advancing main.\n",
+      "remote_published": false
+    },
+    {
+      "commit": "ee279fead1c152d286ba81fd561d55869b956f38",
+      "tree": "707b3bfe125b7c3c3bbdbf2aa3effc92b4d92ea1",
+      "parents": [
+        "2f30c6c17b63d17ae0a1052a9f304117bcaa2c27"
+      ],
+      "message": "Update immutable outbox oracle contract imports\n\nLoad the newly used ModelSelection and NonNegativeInt contract schemas when\nexecuting upstream EffectOutbox source in differential fixtures.\n",
+      "remote_published": false
+    }
+  ],
+  "archive": {
+    "root": ".recovery/upstream-sync-20261113",
+    "available_objects": 64,
+    "missing_objects": 94,
+    "available_bytes": 5448463,
+    "missing_bytes": 1045324
+  },
+  "source_objects": [
+    {
+      "path": ".gitignore",
+      "sha": "1dcfee1da80532a67877ac3de90be95a082a9123",
+      "size_bytes": 939,
+      "status": "missing"
+    },
+    {
+      "path": "apps/desktop/scripts/dev-electron.mjs",
+      "sha": "c24b8b66b0a7b13234d30f799e631e5c868edb14",
+      "size_bytes": 7964,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/integration/transferBudgetV2.integration.test.ts",
+      "sha": "79c76ed9059127117a4247e7646b05712ebff5fa",
+      "size_bytes": 31677,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/79c76ed9059127117a4247e7646b05712ebff5fa"
+    },
+    {
+      "path": "apps/server/package.json",
+      "sha": "e552ca21373f7dcd25e2adf8ff74af9d7199b5f8",
+      "size_bytes": 4206,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/auth/EnvironmentAuth.ts",
+      "sha": "9fc20bdb0d43ab37b2a2044252b87cca31821c7b",
+      "size_bytes": 56635,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/9fc20bdb0d43ab37b2a2044252b87cca31821c7b"
+    },
+    {
+      "path": "apps/server/src/background/KeepAwake.ts",
+      "sha": "700a2c30eb86f9b3e72e3ae18dcdbd58b04de15f",
+      "size_bytes": 6906,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/cli/doctor.ts",
+      "sha": "8000a4139be7561d510ff8c815e40b003f33f3a4",
+      "size_bytes": 8909,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/cli/environment.ts",
+      "sha": "2db039e9aa45c59fa250e32a368f1cdfa36da959",
+      "size_bytes": 6411,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/cli/project.ts",
+      "sha": "c52574a586d18d67fce1cc6e07a9ac99a6821994",
+      "size_bytes": 21599,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/cli/server.ts",
+      "sha": "deec075a5f82f24340333bb410c43c6a5209a414",
+      "size_bytes": 4347,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/config.ts",
+      "sha": "b2ee8cdd666aba632db62af2b12a556baee80d69",
+      "size_bytes": 11666,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts",
+      "sha": "2c5cc36bc84f1277e735690e2cb97f0ad7ff458d",
+      "size_bytes": 367434,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/2c5cc36bc84f1277e735690e2cb97f0ad7ff458d"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/CommandPolicy.ts",
+      "sha": "e4004de8b5b2b7a042a96c41300e31dc016bd07c",
+      "size_bytes": 15343,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/EventSink.ts",
+      "sha": "438d11a4a5f45d16246bb8dffa69447d20801ca6",
+      "size_bytes": 46520,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/438d11a4a5f45d16246bb8dffa69447d20801ca6"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/FoundationPersistence.test.ts",
+      "sha": "54137cadea4c32864c8f15f554b2e7aa404cc15e",
+      "size_bytes": 168117,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/54137cadea4c32864c8f15f554b2e7aa404cc15e"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/NativeCommandPolicy.ts",
+      "sha": "a99dab13dc9fc58dcd9ba4cbeea583be258cbe65",
+      "size_bytes": 8669,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/NativeEffectOutbox.ts",
+      "sha": "17fe228d781c90ba4b2f65b7353d41ebb5e2eab3",
+      "size_bytes": 19659,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/NativeProjectionRecordRows.ts",
+      "sha": "bf628aff13492122e510e4ae0c95a767de738812",
+      "size_bytes": 8038,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/NativeProjectionShellRows.ts",
+      "sha": "98d8f976394615af8c1810bbbd3676d51d0bde6e",
+      "size_bytes": 7285,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/NativeThreadFind.ts",
+      "sha": "f9fe86f8a5ab0e3adf490188448ceac116f35b07",
+      "size_bytes": 2499,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/NativeTurnItemPositionStore.ts",
+      "sha": "a501d618f76527a8128ef24cbac8ce1263ecd39a",
+      "size_bytes": 1244,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/Orchestrator.ts",
+      "sha": "1b0646569574339ca0bcee4af156176fe94fdff1",
+      "size_bytes": 610076,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/1b0646569574339ca0bcee4af156176fe94fdff1"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/ProjectRows.ts",
+      "sha": "5dc4e3bb1c6c76384094623be0aa74cee2981623",
+      "size_bytes": 1915,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/ProjectStore.ts",
+      "sha": "c44dce2a1bc8360dbfe9e9d1ed0314bb13701739",
+      "size_bytes": 8366,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/ProjectionCommitStore.ts",
+      "sha": "f049fd08e03d85fecefc753f3ed0e034d43d1baf",
+      "size_bytes": 4253,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/ProjectionContextRows.ts",
+      "sha": "5dfd8e99d4dc24fea779e0c70bbbd2e950bff6fe",
+      "size_bytes": 2726,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/ProjectionLookupRows.ts",
+      "sha": "fa360c910ba942523118c7a06bc02f0cb3e05cca",
+      "size_bytes": 2740,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/ProjectionRecordRows.ts",
+      "sha": "0e9b29b3ba715e53f0326142e4dd0354f44252d2",
+      "size_bytes": 2290,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/ProjectionRecovery.test.ts",
+      "sha": "eb8dd78fa9ffdf5ff53c67a503e81d3444e33b61",
+      "size_bytes": 62650,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/eb8dd78fa9ffdf5ff53c67a503e81d3444e33b61"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/ProjectionShellRows.ts",
+      "sha": "aab778ee33c180b5a74ef49a896e08b8fc49b99d",
+      "size_bytes": 3552,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/ProjectionStore.ts",
+      "sha": "6651a131e79ee91ad11baec17c4221f6964e3113",
+      "size_bytes": 309971,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/6651a131e79ee91ad11baec17c4221f6964e3113"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/ProviderRuntimeRecoveryService.test.ts",
+      "sha": "d986eccee2bca2ede64ddc3dfb8875f759877d01",
+      "size_bytes": 55722,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/d986eccee2bca2ede64ddc3dfb8875f759877d01"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/ProviderRuntimeRecoveryService.ts",
+      "sha": "d5cd1a44ddb56ef574cd916a5f27cb560b871b04",
+      "size_bytes": 41355,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/d5cd1a44ddb56ef574cd916a5f27cb560b871b04"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/ShellStream.ts",
+      "sha": "53f1047509a87204ec4b3c8bf383e74868645d96",
+      "size_bytes": 29679,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/53f1047509a87204ec4b3c8bf383e74868645d96"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/SqliteProjectRows.ts",
+      "sha": "4ae58492bdd96befd7e27c997e66a199d7d44fd5",
+      "size_bytes": 3666,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/SqliteProjectionContextRows.ts",
+      "sha": "1f69e8b9518fb5d7d4b720f838d6ab5c0d4330c9",
+      "size_bytes": 30994,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/1f69e8b9518fb5d7d4b720f838d6ab5c0d4330c9"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/SqliteProjectionLookupRows.ts",
+      "sha": "e1ee07dc41b5f82b434049335c6b66429df5969f",
+      "size_bytes": 11326,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/SqliteProjectionRecoveryRows.ts",
+      "sha": "96a9a59df2f0b8db4922c06c0c535ea777758d4e",
+      "size_bytes": 19348,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/SqliteProjectionShellRows.ts",
+      "sha": "1201a28e817ea287b79d9a9d0042a7b5d5d075b4",
+      "size_bytes": 35029,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/1201a28e817ea287b79d9a9d0042a7b5d5d075b4"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/ThreadFind.ts",
+      "sha": "c4c5c0fcf2f24f77d30815f8cf7af758a689ac19",
+      "size_bytes": 19449,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/ThreadFindRows.ts",
+      "sha": "29fa6a1b9d8166570bbb7d213611b874403bb615",
+      "size_bytes": 1419,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/ThreadSearch.test.ts",
+      "sha": "d8cad34a194b9c5e4f0485ebc8b9fcf5785e9d1e",
+      "size_bytes": 55652,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/d8cad34a194b9c5e4f0485ebc8b9fcf5785e9d1e"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/ThreadSearch.ts",
+      "sha": "8f25daddeb5f2180eb3d70c2dcbce1dde6c229ff",
+      "size_bytes": 30393,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/8f25daddeb5f2180eb3d70c2dcbce1dde6c229ff"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/TurnItemPositionStore.ts",
+      "sha": "2d9a2b575b1e43e1575de33a7ec036ca7dde61aa",
+      "size_bytes": 5122,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/http.test.ts",
+      "sha": "368418c98cd575d033393c32ea454783aa86dbd4",
+      "size_bytes": 15303,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/http.ts",
+      "sha": "74d52d25c4ed3cba32f41b74f4c9d9b8dce960ba",
+      "size_bytes": 12382,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/legacy/LegacyV1ThreadImporter.ts",
+      "sha": "601c269f7a10492c0417059b9886f6df93a12f50",
+      "size_bytes": 23574,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/redb_effect_outbox.rs",
+      "sha": "34ba00377cb387727476fa9d879eae7ea2ba71fe",
+      "size_bytes": 17563,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/redb_effect_outbox_tests.rs",
+      "sha": "ce9995030489d22a6ccb27cd76351a0b7be28eb4",
+      "size_bytes": 21046,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/redb_project_rows.rs",
+      "sha": "03a2b3653f030ecf40ea3628b3d539428e36ab45",
+      "size_bytes": 18434,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/redb_project_rows_tests.rs",
+      "sha": "d54f02b96036fbf752b011fbaf7bac0c2285ecb2",
+      "size_bytes": 13597,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/redb_turn_item_positions.rs",
+      "sha": "cfa898955e2faa14549cf279047b52187b07e3ee",
+      "size_bytes": 16113,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/redb_turn_item_positions_tests.rs",
+      "sha": "d51db39ba556883088b30786c2fc27fc32c53135",
+      "size_bytes": 14996,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/runtimeLayer.ts",
+      "sha": "d443377f1f8bb437341cf4001f3bb90c841aff59",
+      "size_bytes": 19144,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/testkit/ProviderReplayHarness.ts",
+      "sha": "fe0e221385bf25b9b7e77f97ecae308a9b16b001",
+      "size_bytes": 23740,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/peer/PeerLinks.ts",
+      "sha": "f5a550081ef457fece4329168c12fd50d0cc2f94",
+      "size_bytes": 27736,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/f5a550081ef457fece4329168c12fd50d0cc2f94"
+    },
+    {
+      "path": "apps/server/src/persistence/AuxiliaryPersistenceReads.ts",
+      "sha": "fdb91895145c93787b73296307dded67d92cb0fa",
+      "size_bytes": 2481,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/persistence/NativeAuxiliaryPersistenceReads.ts",
+      "sha": "93b573c3803314a529a0ca7d60dfdd82d283e298",
+      "size_bytes": 3203,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/persistence/NativeProjectionCommitStore.ts",
+      "sha": "758e7c932879f602b6da1d10a9c6a31eeb2453e7",
+      "size_bytes": 10051,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/persistence/Omdb.ts",
+      "sha": "56cab00d95c9dbce41962395b0947f077bbe3ac1",
+      "size_bytes": 12427,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/persistence/SelectedPersistence.ts",
+      "sha": "583e1caf14e0fcb0b647be2afbfe2582cc88e848",
+      "size_bytes": 6852,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/persistence/Sqlite.ts",
+      "sha": "f9d1b57a26d79ad587a49de4003cfc190cffabef",
+      "size_bytes": 7586,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/persistence/SqliteAuxiliaryPersistenceReads.ts",
+      "sha": "a6dac0bfab365e3289e4b46729ceba74b1af0da5",
+      "size_bytes": 3909,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/persistence/SqliteProjectionCommitStore.ts",
+      "sha": "f4a93cf84cb99cd849cf9657fea7ac9dc532d909",
+      "size_bytes": 6118,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/persistence/fixtures/message-search-text.json",
+      "sha": "ecc4b768cb81f00899eb6d656370d523619e58c4",
+      "size_bytes": 5953,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/persistence/migrateSqliteToOmdb.ts",
+      "sha": "c5a8ee1689deef3e32b1cc94444676d2db2c1c24",
+      "size_bytes": 2005,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/persistence/omdb-schema.json",
+      "sha": "4c08b9f79fec80f49074436f22c9be2b50770991",
+      "size_bytes": 40961,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/4c08b9f79fec80f49074436f22c9be2b50770991"
+    },
+    {
+      "path": "apps/server/src/persistence/redb_auxiliary_reads.rs",
+      "sha": "fd5aa161d7ff031ccfd663cb45ce7b95aa196e11",
+      "size_bytes": 18040,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/persistence/redb_bootstrap.rs",
+      "sha": "fb64e7b120ffd4f186bd916ae6c0e83dd1b42255",
+      "size_bytes": 7525,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/persistence/redb_import.rs",
+      "sha": "21984f49e09e9b07c8b008739cfd030c2f128dee",
+      "size_bytes": 18447,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/persistence/redb_message_rowids.rs",
+      "sha": "b862bfefa8d2baf676a64843af77c264b7bf4583",
+      "size_bytes": 12943,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/persistence/redb_message_search_text.rs",
+      "sha": "8a98cb584f6ace5f643f139808e48c1033b9c244",
+      "size_bytes": 6687,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/persistence/redb_projection_commit.rs",
+      "sha": "2c62c40c85ae83270bc720c66db9df22b58e45f9",
+      "size_bytes": 69144,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/2c62c40c85ae83270bc720c66db9df22b58e45f9"
+    },
+    {
+      "path": "apps/server/src/persistence/redb_projection_commit_tests.rs",
+      "sha": "e261b292092ac3aafc7af9d2692cb782e8e8e454",
+      "size_bytes": 44888,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/e261b292092ac3aafc7af9d2692cb782e8e8e454"
+    },
+    {
+      "path": "apps/server/src/persistence/redb_projection_context.rs",
+      "sha": "97a2af1ed232c46a3f50e488726e6f2ab16805cb",
+      "size_bytes": 30373,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/97a2af1ed232c46a3f50e488726e6f2ab16805cb"
+    },
+    {
+      "path": "apps/server/src/persistence/redb_projection_lookup.rs",
+      "sha": "3f2786d4354dfb664591bdf9cee8726ab9443f59",
+      "size_bytes": 19214,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/persistence/redb_projection_read_index.rs",
+      "sha": "bc3b14f5ad8947ed6b7c2c8aac9dfb1e9fda8cbe",
+      "size_bytes": 25018,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/persistence/redb_projection_records.rs",
+      "sha": "9f0595fc500fd3bf7bb5aefa61348cbb861067fa",
+      "size_bytes": 32974,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/9f0595fc500fd3bf7bb5aefa61348cbb861067fa"
+    },
+    {
+      "path": "apps/server/src/persistence/redb_projection_recovery.rs",
+      "sha": "b351a89d94e3cf7aab8b65421f7b55c6ca2f4317",
+      "size_bytes": 26282,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/b351a89d94e3cf7aab8b65421f7b55c6ca2f4317"
+    },
+    {
+      "path": "apps/server/src/persistence/redb_projection_shell.rs",
+      "sha": "fd6526aa117cb559215a9bf3bbd91d5d8a42242c",
+      "size_bytes": 34972,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/fd6526aa117cb559215a9bf3bbd91d5d8a42242c"
+    },
+    {
+      "path": "apps/server/src/persistence/redb_projection_window.rs",
+      "sha": "d77c3aa0fc6914f687e27479032f32fe4bef192a",
+      "size_bytes": 49527,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/d77c3aa0fc6914f687e27479032f32fe4bef192a"
+    },
+    {
+      "path": "apps/server/src/persistence/redb_projection_window_index.rs",
+      "sha": "1819295f7aedae9ef1fd5f5b0525409107f0cb5c",
+      "size_bytes": 20982,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/persistence/redb_schema_upgrade.rs",
+      "sha": "0b9ad52e0dbba2a2b58f927e82a133ee78fe835e",
+      "size_bytes": 14379,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/persistence/redb_schema_upgrade_tests.rs",
+      "sha": "c8d9338c5c9a730364f22bb976672d4e845c0eb6",
+      "size_bytes": 17948,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/persistence/redb_thread_find.rs",
+      "sha": "70c506abb03862a67e0809e56d46557220e29987",
+      "size_bytes": 6638,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/persistence/redb_thread_search.rs",
+      "sha": "147ca43c9fef0933402c665d8b273376b57a76e6",
+      "size_bytes": 46608,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/147ca43c9fef0933402c665d8b273376b57a76e6"
+    },
+    {
+      "path": "apps/server/src/persistence/redb_turn_item_counts.rs",
+      "sha": "d3b182b3cdd160b83b7f1f515b8b9e0c50f64381",
+      "size_bytes": 2185,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/project/ProjectService.test.ts",
+      "sha": "310cef25334715981aae8b8b6ab7b2a71e92c3d2",
+      "size_bytes": 35730,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/310cef25334715981aae8b8b6ab7b2a71e92c3d2"
+    },
+    {
+      "path": "apps/server/src/project/ProjectService.ts",
+      "sha": "86897cdea40b7549b8e85637d757f31388b954f4",
+      "size_bytes": 24507,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/provider/CodexProvider.ts",
+      "sha": "c14c20a95826134545c8b3935d1794d0559d5ca1",
+      "size_bytes": 39380,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/c14c20a95826134545c8b3935d1794d0559d5ca1"
+    },
+    {
+      "path": "apps/server/src/provider/ProviderInstanceRegistryHydration.ts",
+      "sha": "3dfdf6c11f0f307a1fff97f3db8a8a7a2f3c2459",
+      "size_bytes": 9749,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/provider/ProviderOrchestrationAdapterInfrastructure.ts",
+      "sha": "83fbb40b7de5abc0b6d5c08e10cd36473f48e371",
+      "size_bytes": 2262,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/provider/providerMaintenanceRunner.ts",
+      "sha": "48440cfb42f49cfb725eacfb3cba4359e62d42a0",
+      "size_bytes": 31218,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/48440cfb42f49cfb725eacfb3cba4359e62d42a0"
+    },
+    {
+      "path": "apps/server/src/provider/provider_update_verification.rs",
+      "sha": "07de2e571de107a917a93fe37dd2d8591295a40a",
+      "size_bytes": 9663,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/pullRequest/linkedThreads.ts",
+      "sha": "489f53495fb022b48254a36d36281c9bec9b57af",
+      "size_bytes": 6703,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/scheduledTasks/ScheduledTaskService.ts",
+      "sha": "0ebc0d6a4e678aac25092b2a9e52d9e148e68ad7",
+      "size_bytes": 104622,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/0ebc0d6a4e678aac25092b2a9e52d9e148e68ad7"
+    },
+    {
+      "path": "apps/server/src/server.ts",
+      "sha": "fe6bf24ba889f4e3f01e870a7559958da1aab236",
+      "size_bytes": 61213,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/fe6bf24ba889f4e3f01e870a7559958da1aab236"
+    },
+    {
+      "path": "apps/server/src/serverOwnership.ts",
+      "sha": "ff50b30cad475d2602dee9434923a36768b00e79",
+      "size_bytes": 12789,
+      "status": "missing"
+    },
+    {
+      "path": "apps/server/src/serverSettings.ts",
+      "sha": "433031855eae681b82bac043a4861276a9292ea4",
+      "size_bytes": 52629,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/433031855eae681b82bac043a4861276a9292ea4"
+    },
+    {
+      "path": "apps/server/src/storageCleanup.ts",
+      "sha": "a9142f8bf88daa27bf48983c77b81fb7ba9f6859",
+      "size_bytes": 74661,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/a9142f8bf88daa27bf48983c77b81fb7ba9f6859"
+    },
+    {
+      "path": "apps/server/src/ws.test.ts",
+      "sha": "305aed27045aca95f384f079ff6c042f03477ae5",
+      "size_bytes": 103642,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/305aed27045aca95f384f079ff6c042f03477ae5"
+    },
+    {
+      "path": "apps/server/src/ws.ts",
+      "sha": "b2817efe8ff8720f1c8039242d214933f9decd61",
+      "size_bytes": 166524,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/b2817efe8ff8720f1c8039242d214933f9decd61"
+    },
+    {
+      "path": "apps/web/src/components/chat/ComposerFooterControls.tsx",
+      "sha": "a5696c79f52d0d1260f42fccde00fd79da4bfa8a",
+      "size_bytes": 12949,
+      "status": "missing"
+    },
+    {
+      "path": "crates/core/src/bin/t3-code-ls-policy.rs",
+      "sha": "60964fc26ac7be1f7bd958978f91fa9ac734c989",
+      "size_bytes": 2386,
+      "status": "missing"
+    },
+    {
+      "path": "crates/core/src/codex_generation.rs",
+      "sha": "70bcc0fab76d63b73c8428cf64f4e337a2c83890",
+      "size_bytes": 27101,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/70bcc0fab76d63b73c8428cf64f4e337a2c83890"
+    },
+    {
+      "path": "crates/core/src/dispatch.rs",
+      "sha": "a5321de9c39e0c861f4a5be067034bc392d92275",
+      "size_bytes": 13725,
+      "status": "missing"
+    },
+    {
+      "path": "crates/core/src/maintenance.rs",
+      "sha": "b6885f90a475900c6cd3cdd4e28874b1268487b9",
+      "size_bytes": 43585,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/b6885f90a475900c6cd3cdd4e28874b1268487b9"
+    },
+    {
+      "path": "crates/core/src/maintenance_wire.rs",
+      "sha": "d15efce7ae8f997cb13cf80b083c239fd44b2d93",
+      "size_bytes": 38017,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/d15efce7ae8f997cb13cf80b083c239fd44b2d93"
+    },
+    {
+      "path": "crates/core/src/outbox.rs",
+      "sha": "ce46cba655692a55d4dae220401c16f0280761d6",
+      "size_bytes": 24786,
+      "status": "missing"
+    },
+    {
+      "path": "crates/core/src/outbox_wire.rs",
+      "sha": "be37b2cd381c9a6908de6c3be4dec5d98973c8cc",
+      "size_bytes": 15915,
+      "status": "missing"
+    },
+    {
+      "path": "crates/storage/src/backend.rs",
+      "sha": "4875081f3179f0cda13e514fdc0bfd9fa891d016",
+      "size_bytes": 70991,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/4875081f3179f0cda13e514fdc0bfd9fa891d016"
+    },
+    {
+      "path": "crates/storage/src/bin/t3-code-ls-db.rs",
+      "sha": "3de15259c7b9c4e58c709c4ab68bbf98ee821450",
+      "size_bytes": 53968,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/3de15259c7b9c4e58c709c4ab68bbf98ee821450"
+    },
+    {
+      "path": "crates/storage/src/lib.rs",
+      "sha": "b78d758435307d065247e950e21e52ec66549889",
+      "size_bytes": 34819,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/b78d758435307d065247e950e21e52ec66549889"
+    },
+    {
+      "path": "crates/storage/src/outbox.rs",
+      "sha": "3ab2d88328a5463555f03857ecbd82764836c7b1",
+      "size_bytes": 55339,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/3ab2d88328a5463555f03857ecbd82764836c7b1"
+    },
+    {
+      "path": "crates/storage/src/outbox_tests.rs",
+      "sha": "3ea70c45bc56ad0812487cb5c0f26a66c9aaa0fc",
+      "size_bytes": 60316,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/3ea70c45bc56ad0812487cb5c0f26a66c9aaa0fc"
+    },
+    {
+      "path": "crates/storage/tests/store.rs",
+      "sha": "4bbc0def5c2435f5cee4f25dcab1d78d1e4ef1f7",
+      "size_bytes": 18503,
+      "status": "missing"
+    },
+    {
+      "path": "crates/storage/tests/thread_service.rs",
+      "sha": "d1610b5fa079668ab8a2bad5f67cfb3cef007137",
+      "size_bytes": 33339,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/d1610b5fa079668ab8a2bad5f67cfb3cef007137"
+    },
+    {
+      "path": "docs/porting/default-ed7e5010.md",
+      "sha": "3016a8261283e3d57488c79cccd776a74b77f237",
+      "size_bytes": 5507,
+      "status": "missing"
+    },
+    {
+      "path": "knip.jsonc",
+      "sha": "429c9a2b0bc75c2bec63c375a44dcd094ba42e91",
+      "size_bytes": 7873,
+      "status": "missing"
+    },
+    {
+      "path": "package.json",
+      "sha": "a372ab642a81af93fab7ccb063a405af3a64591e",
+      "size_bytes": 6831,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/a372ab642a81af93fab7ccb063a405af3a64591e"
+    },
+    {
+      "path": "packages/provider-core/src/server/NativeMaintenancePolicy.ts",
+      "sha": "c53a54d055a77a4bb0b2723ac2cd10134932e442",
+      "size_bytes": 16522,
+      "status": "missing"
+    },
+    {
+      "path": "packages/provider-core/src/server/maintenanceResolver.ts",
+      "sha": "b8cff5c66e4f98e4cf3afcd7137dd3b7aac73272",
+      "size_bytes": 77774,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/b8cff5c66e4f98e4cf3afcd7137dd3b7aac73272"
+    },
+    {
+      "path": "packages/shared/package.json",
+      "sha": "24fe9845513abaa80ba1841d7e5424a5806efb49",
+      "size_bytes": 17438,
+      "status": "missing"
+    },
+    {
+      "path": "pnpm-lock.yaml",
+      "sha": "25283a9f42845e1c7c8d54e44e42f304a2e5adf7",
+      "size_bytes": 969547,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/25283a9f42845e1c7c8d54e44e42f304a2e5adf7"
+    },
+    {
+      "path": "pnpm-workspace.yaml",
+      "sha": "7c3277bfdaaccf0f30c5b27affd1b121c2aba6b0",
+      "size_bytes": 14330,
+      "status": "missing"
+    },
+    {
+      "path": "port-map.json",
+      "sha": "ff832f8cbb4fc7a6c3cff03aeb8449036e965726",
+      "size_bytes": 100571,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/ff832f8cbb4fc7a6c3cff03aeb8449036e965726"
+    },
+    {
+      "path": "scripts/build-desktop-artifact.test.ts",
+      "sha": "adf8b70ceb59e9a08c5f913aed09e46bd9faa78c",
+      "size_bytes": 77691,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/adf8b70ceb59e9a08c5f913aed09e46bd9faa78c"
+    },
+    {
+      "path": "scripts/build-desktop-artifact.ts",
+      "sha": "682be187ca4998f85181ed49a7136805ab949f6f",
+      "size_bytes": 156566,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/682be187ca4998f85181ed49a7136805ab949f6f"
+    },
+    {
+      "path": "scripts/dev-runner.test.ts",
+      "sha": "532416d277fb96918e5dd6bf3f82cb0bde943dc3",
+      "size_bytes": 34432,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/532416d277fb96918e5dd6bf3f82cb0bde943dc3"
+    },
+    {
+      "path": "scripts/dev-runner.ts",
+      "sha": "dec50bd75ba10a9e78526823b53401f3f557f4b6",
+      "size_bytes": 37196,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/dec50bd75ba10a9e78526823b53401f3f557f4b6"
+    },
+    {
+      "path": "tools/check-dispatch.mjs",
+      "sha": "a381955fb45135c4438bad8aa927bb8c43f82636",
+      "size_bytes": 18901,
+      "status": "missing"
+    },
+    {
+      "path": "tools/check-generation-adapter.mjs",
+      "sha": "3d5e96c65d9258701e296b118b6180f66b232b4b",
+      "size_bytes": 31624,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/3d5e96c65d9258701e296b118b6180f66b232b4b"
+    },
+    {
+      "path": "tools/check-generation.mjs",
+      "sha": "63a2e4f46544f7ce35562915417d0532be3669c5",
+      "size_bytes": 23590,
+      "status": "missing"
+    },
+    {
+      "path": "tools/check-maintenance-adapter.mjs",
+      "sha": "8b431cbce4c5923fe936913a2ddcc2be7fbbbc4b",
+      "size_bytes": 69893,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/8b431cbce4c5923fe936913a2ddcc2be7fbbbc4b"
+    },
+    {
+      "path": "tools/check-maintenance.mjs",
+      "sha": "f883738d7a6b5a7a4ab6515e8134a5559cee5f51",
+      "size_bytes": 38539,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/f883738d7a6b5a7a4ab6515e8134a5559cee5f51"
+    },
+    {
+      "path": "tools/check-native-outbox-worker.mjs",
+      "sha": "8b5c9686cb5923c540e139f3aef04bebe3409478",
+      "size_bytes": 30258,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/8b5c9686cb5923c540e139f3aef04bebe3409478"
+    },
+    {
+      "path": "tools/check-omdb-production.mjs",
+      "sha": "fd7d16e9fa9e0a8cdbe66565ce5d6fe6771fb5d3",
+      "size_bytes": 12292,
+      "status": "missing"
+    },
+    {
+      "path": "tools/check-omdb-startup.mjs",
+      "sha": "b44b5602acc536517a0f3d0a54bc8003606003a0",
+      "size_bytes": 10594,
+      "status": "missing"
+    },
+    {
+      "path": "tools/check-outbox-runtime.mjs",
+      "sha": "46c832774656b3ac62b7b9ebb3e85570d4f5b56a",
+      "size_bytes": 8466,
+      "status": "missing"
+    },
+    {
+      "path": "tools/check-outbox.mjs",
+      "sha": "7f0b0b133e6a0672f1149f33755a738132320e30",
+      "size_bytes": 37149,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/7f0b0b133e6a0672f1149f33755a738132320e30"
+    },
+    {
+      "path": "tools/check-redb-application-outbox.mjs",
+      "sha": "fa2d14c5de8420fe2faf015425c58d271482d2e4",
+      "size_bytes": 42724,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/fa2d14c5de8420fe2faf015425c58d271482d2e4"
+    },
+    {
+      "path": "tools/check-redb-auxiliary-reads.mjs",
+      "sha": "1f3151801fe29a50d7a7d0eb4b635e639e169e53",
+      "size_bytes": 23625,
+      "status": "missing"
+    },
+    {
+      "path": "tools/check-redb-event-sink.mjs",
+      "sha": "fcf07df423aaed9845602efb120e1eb63f209270",
+      "size_bytes": 38287,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/fcf07df423aaed9845602efb120e1eb63f209270"
+    },
+    {
+      "path": "tools/check-redb-projection-context.mjs",
+      "sha": "77b5b7f6e49797323809bc87811ff78e4bea26c2",
+      "size_bytes": 29762,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/77b5b7f6e49797323809bc87811ff78e4bea26c2"
+    },
+    {
+      "path": "tools/check-redb-projection-lookups.mjs",
+      "sha": "d0e52a97be929cd5cc69e1ed4ddb82c87a176b48",
+      "size_bytes": 14659,
+      "status": "missing"
+    },
+    {
+      "path": "tools/check-redb-projection-records.mjs",
+      "sha": "841ba03ab1dcb78fbdf41e7842f9e08cfa9fe021",
+      "size_bytes": 27577,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/841ba03ab1dcb78fbdf41e7842f9e08cfa9fe021"
+    },
+    {
+      "path": "tools/check-redb-projection-windows.mjs",
+      "sha": "417583a9184f7d426c6b326cd20739f685fad586",
+      "size_bytes": 28789,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/417583a9184f7d426c6b326cd20739f685fad586"
+    },
+    {
+      "path": "tools/check-redb-projects.mjs",
+      "sha": "e286024620747cb42a925c58a6f94c52b841044f",
+      "size_bytes": 15542,
+      "status": "missing"
+    },
+    {
+      "path": "tools/check-redb-receipts-positions.mjs",
+      "sha": "2ad35e587eb667dd345b04bd5572866d97681f1c",
+      "size_bytes": 20295,
+      "status": "missing"
+    },
+    {
+      "path": "tools/check-redb-thread-search.mjs",
+      "sha": "02d4aca91bf919ce7105d35f58026de606fb50f7",
+      "size_bytes": 37339,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/02d4aca91bf919ce7105d35f58026de606fb50f7"
+    },
+    {
+      "path": "tools/omdb-production-types.ts",
+      "sha": "d09820e0186405a20ede8c0779443d6eaa20b930",
+      "size_bytes": 1649,
+      "status": "missing"
+    },
+    {
+      "path": "tools/omdb-schema-upgrade-fixture.mjs",
+      "sha": "57a3f052583469921ec77ca50392f1c3bd0dee0e",
+      "size_bytes": 11595,
+      "status": "missing"
+    },
+    {
+      "path": "tools/redb-projection-records-tsconfig.json",
+      "sha": "229781ffb5a1656de15a20b459623bd113c2a782",
+      "size_bytes": 412,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/229781ffb5a1656de15a20b459623bd113c2a782"
+    },
+    {
+      "path": "tools/server-test-runtime/package-lock.json",
+      "sha": "5247a71217d5ac757432a6333d2e18ab6f54dbce",
+      "size_bytes": 153039,
+      "status": "archived",
+      "archive_path": ".recovery/upstream-sync-20261113/objects/5247a71217d5ac757432a6333d2e18ab6f54dbce"
+    },
+    {
+      "path": "tools/server-test-runtime/package.json",
+      "sha": "059cc005aacd99d3e425e3a034907b5c4f2d8251",
+      "size_bytes": 1792,
+      "status": "missing"
+    },
+    {
+      "path": "upstream-README.md",
+      "sha": "a319d27b6bc17409b3dc501a6a717db517ac6119",
+      "size_bytes": 5696,
+      "status": "missing"
+    },
+    {
+      "path": "upstream.lock.json",
+      "sha": "1ff314db1de835c438ea31816dd665e4126b63bf",
+      "size_bytes": 4168,
+      "status": "missing"
+    },
+    {
+      "path": "tools/check-outbox-runtime.mjs",
+      "sha": "a0725451469609251e4b8ed6249557effb1e14d6",
+      "size_bytes": 8514,
+      "status": "missing"
+    }
+  ],
+  "pending_fixes": [
+    {
+      "path": "apps/server/src/orchestration-v2/ProjectionStore.ts",
+      "issue": "Shell response omitted latestRunBackgroundWake:false compared with immutable upstream. Repair shared shell output mapping and rerun shell differential gate."
+    },
+    {
+      "path": "tools/omdb-schema-upgrade-fixture.mjs",
+      "issue": "Create the schema80 import archive through snapshotForNativeImport with migrate:false, then copy its exported snapshot inside the scope. A direct SQLite export has a different schemaVersion header from real startup backup exports."
+    },
+    {
+      "path": "tools/check-redb-projection-context.mjs",
+      "issue": "New live-fork attachment assertion expects guestShare data after an earlier metadata event replaced that field. Compare immutable SQLite behavior and correct the fixture without weakening production attachment retention."
+    },
+    {
+      "path": "tools/check-redb-projection-windows.mjs",
+      "issue": "New fixture passes a turn-item status outside the current event schema. Correct fixture status and rerun fork visibility differential cases."
+    },
+    {
+      "path": "tools/check-outbox-runtime.mjs",
+      "issue": "The local follow-up adds ModelSelection and NonNegativeInt to immutable oracle imports. Its expected blob is missing from this archive; preserve both contract imports when recovering."
+    }
+  ],
+  "pending_qualification": [
+    "Restore every missing blob or reimplement and review the missing changes.",
+    "Rerun final storage tests with pinned Lustr/BlueFe.",
+    "Rerun native production composition guard after the final legacy subagent ID API port.",
+    "Build the full server, web and desktop/native bundle.",
+    "Run complete exact-candidate CI, controlled provider restart/failure paths and browser client acceptance.",
+    "Advance main only after complete exact-commit qualification."
+  ],
+  "observed_partial_checks": [
+    "Frozen pnpm workspace install passed.",
+    "Full five-package Rust run completed with 368 passed and 0 failed across 37 test binaries, before final receipt-lineage, citation and legacy-ID read changes.",
+    "Seven production adapter typecheck projects passed with singleThreaded. Six mapped component typecheck projects passed before the large CLI checker was killed by host memory pressure.",
+    "Source retention guard and exact wrapped upstream README check passed for upstream ed7e5010.",
+    "Runtime migration-head, startup, CLI, projection-records, receipts/positions, thread-search and project gates passed during the session.",
+    "No complete exact-commit application qualification receipt was produced for the intended candidate."
+  ]
+}
