@@ -154,6 +154,60 @@ pub async fn execute_project(
     execute_project_with(store, Some(planner), request).await
 }
 
+async fn legacy_custom_title(
+    store: &Store,
+    project_id: &str,
+    last_sequence: u64,
+) -> Result<bool, Error> {
+    let mut after = 0;
+    let mut page_limit = 256;
+    while after < last_sequence {
+        let limit = page_limit.min((last_sequence - after).min(256) as u32);
+        let events = match store.events(after, limit).await {
+            // A valid individual event can fill most of the bounded page. Retry
+            // these explicit size errors with one record, without hiding other
+            // read failures or increasing the store's memory limit.
+            Err(Error::Invalid(message))
+                if limit > 1
+                    && matches!(
+                        message.as_str(),
+                        "page exceeds 16 MiB; request fewer records"
+                            | "response exceeds 16 MiB; request fewer records"
+                    ) =>
+            {
+                page_limit = 1;
+                continue;
+            }
+            result => result?,
+        };
+        if events.is_empty() {
+            return Err(Error::IncompatibleStore);
+        }
+        for event in events {
+            if event.sequence > last_sequence {
+                return Err(Error::IncompatibleStore);
+            }
+            if event.sequence != after + 1 {
+                return Err(Error::IncompatibleStore);
+            }
+            after = event.sequence;
+            // Match migration 087's stream identity and JSON text predicate.
+            let event = event.payload;
+            if event.get("aggregateKind").and_then(Value::as_str) == Some("project")
+                && event.get("aggregateId").and_then(Value::as_str) == Some(project_id)
+                && event.get("type").and_then(Value::as_str) == Some("project.meta-updated")
+                && event
+                    .get("payload")
+                    .and_then(|payload| payload.get("title"))
+                    .is_some_and(Value::is_string)
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 async fn execute_project_with(
     store: &Store,
     planner: Option<&Path>,
@@ -221,6 +275,17 @@ async fn execute_project_with(
             workspace_owner = row.payload.clone();
         }
     }
+    if let Some(row) = project.as_object_mut()
+        && !row.contains_key("hasCustomTitle")
+    {
+        // The generic store's snapshots and historical receipts remain immutable
+        // representations of their original writes. Resolve only a legacy row
+        // participating in this command; a successful event persists the flag
+        // atomically with its receipt under the snapshot's revision check.
+        let has_custom_title =
+            legacy_custom_title(store, &project_id, snapshot.last_sequence).await?;
+        row.insert("hasCustomTitle".into(), Value::Bool(has_custom_title));
+    }
     let planner_input = json!({
         "version": 1,
         "operation": "plan-and-project",
@@ -280,3 +345,7 @@ async fn execute_project_with(
         })
         .await
 }
+
+#[cfg(test)]
+#[path = "project_service_tests.rs"]
+mod tests;

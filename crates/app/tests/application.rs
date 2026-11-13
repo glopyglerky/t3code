@@ -98,6 +98,10 @@ async fn application_commands_events_receipts_and_cleanup_survive_server_restart
         created_project.receipt.result["ok"]["project"]["title"],
         "Project"
     );
+    assert_eq!(
+        created_project.receipt.result["ok"]["project"]["hasCustomTitle"],
+        false
+    );
     let mut create_thread = thread("thread-create");
     create_thread["createdBy"] = json!("system");
     create_thread["creationSource"] = json!("provider");

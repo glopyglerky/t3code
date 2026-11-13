@@ -46,6 +46,7 @@ export function projectRow(overrides = {}) {
   return {
     projectId: "project:one",
     title: "Project 🦀",
+    hasCustomTitle: false,
     workspaceRoot: "/fixture/project",
     defaultModelSelection: null,
     defaultThreadEnvMode: null,
@@ -196,6 +197,18 @@ for (const [label, state] of [
 }
 
 add("no metadata changes still creates the update event", update(), active, { runtime: true });
+for (const hasCustomTitle of [false, true]) {
+  const state = { project: projectRow({ hasCustomTitle }) };
+  for (const [label, command] of [
+    ["same title update", update({ title: state.project.title })],
+    ["renamed title update", update({ title: "Renamed" })],
+    ["metadata only", update({ autoPull: true })],
+    ["delete", remove()],
+    ["recreate rejected", create()],
+  ]) {
+    add(`custom title ${hasCustomTitle} ${label}`, command, state, { runtime: true });
+  }
+}
 add(
   "workspace ownership is ignored unless the command changes the root",
   update({ title: "Renamed" }),
@@ -216,7 +229,7 @@ const allChanges = {
   title: "Edited project",
   workspaceRoot: "/fixture/new\nworkspace",
   defaultModelSelection: {
-    instanceId: "provider:fixture",
+    instanceId: "provider_fixture",
     model: "fixture-model",
     options: [{ id: "reasoning", value: "high", extension }],
     extension,
@@ -241,6 +254,14 @@ const allChanges = {
 add("all optional payloads and nested extensions survive", update(allChanges), active, {
   runtime: true,
 });
+add(
+  "planner retains model payloads outside the persistence schema",
+  update({
+    defaultModelSelection: { ...allChanges.defaultModelSelection, instanceId: "provider:fixture" },
+  }),
+  active,
+  { runtime: true },
+);
 
 // Exhaust every combination of omitted metadata fields. This checks absence itself,
 // including the independent pin/archive flags, not merely equivalent final rows.
@@ -542,7 +563,13 @@ for (let index = 0; index < lifecycle.length; index++) {
     },
   );
   if (outcome.ok !== undefined) {
-    row = projectRow({ ...row, ...outcome.ok.payload });
+    row = projectRow({
+      ...row,
+      ...outcome.ok.payload,
+      hasCustomTitle:
+        row?.hasCustomTitle === true ||
+        (outcome.ok.type === "project.meta-updated" && outcome.ok.payload.title !== undefined),
+    });
   }
 }
 

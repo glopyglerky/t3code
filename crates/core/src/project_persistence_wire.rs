@@ -56,13 +56,17 @@ fn validate_row(row: &Value, project_id: &Value) -> WireResult<()> {
     field(row, "autoPull")?
         .as_bool()
         .ok_or(Error::InvalidRequest)?;
+    if let Some(value) = row.get("hasCustomTitle") {
+        value.as_bool().ok_or(Error::InvalidRequest)?;
+    }
     field(row, "scripts")?
         .as_array()
         .ok_or(Error::InvalidRequest)?;
     Ok(())
 }
 
-/// Checks every field used when a stored row participates in project decisions.
+/// Legacy rows may lack the custom-title flag until their event history is read.
+/// Present flags must be Boolean; projection updates require a resolved flag.
 pub fn validate_projection_shape(row: &Value) -> WireResult<()> {
     validate_row(row, field(row, "projectId")?)
 }
@@ -163,6 +167,7 @@ fn normalize_row(row: Value) -> WireResult<Value> {
         &[
             "projectId",
             "title",
+            "hasCustomTitle",
             "workspaceRoot",
             "defaultModelSelection",
             "defaultThreadEnvMode",
@@ -231,6 +236,14 @@ pub fn project_event(existing: &Value, event: &Value) -> WireResult<Value> {
     project_id.as_str().ok_or(Error::InvalidRequest)?;
     match field(event, "type")?.as_str() {
         Some("project.created") => {
+            let has_custom_title = if existing == &Value::Null {
+                false
+            } else {
+                validate_row(existing, project_id)?;
+                field(existing, "hasCustomTitle")?
+                    .as_bool()
+                    .ok_or(Error::InvalidRequest)?
+            };
             let mut row = Value::Object(Vec::new());
             for name in [
                 "projectId",
@@ -243,6 +256,10 @@ pub fn project_event(existing: &Value, event: &Value) -> WireResult<Value> {
             ] {
                 set(&mut row, name, field(payload, name)?.clone())?;
             }
+            if has_custom_title {
+                set(&mut row, "title", field(existing, "title")?.clone())?;
+            }
+            set(&mut row, "hasCustomTitle", Value::Bool(has_custom_title))?;
             for name in ["defaultThreadEnvMode", "faviconPath", "projectIcon"] {
                 set(
                     &mut row,
@@ -262,6 +279,9 @@ pub fn project_event(existing: &Value, event: &Value) -> WireResult<Value> {
                 return Ok(Value::Null);
             }
             validate_row(existing, project_id)?;
+            field(existing, "hasCustomTitle")?
+                .as_bool()
+                .ok_or(Error::InvalidRequest)?;
             let mut row = existing.clone();
             if field(event, "type")?.as_str() == Some("project.deleted") {
                 let deleted_at = field(payload, "deletedAt")?.clone();
@@ -283,6 +303,9 @@ pub fn project_event(existing: &Value, event: &Value) -> WireResult<Value> {
                     if let Some(value) = payload.get(name) {
                         set(&mut row, name, value.clone())?;
                     }
+                }
+                if payload.get("title").is_some() {
+                    set(&mut row, "hasCustomTitle", Value::Bool(true))?;
                 }
                 set(&mut row, "updatedAt", field(payload, "updatedAt")?.clone())?;
             }
@@ -343,4 +366,114 @@ pub fn respond(frame: &str) -> WireResult<String> {
     }
     response.push('\n');
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event(kind: &str, payload: &str) -> Value {
+        Value::Object(vec![
+            ("type".into(), Value::String(kind.into())),
+            ("payload".into(), json::parse(payload).unwrap()),
+        ])
+    }
+
+    fn created() -> Value {
+        event(
+            "project.created",
+            r#"{
+                "projectId":"project:one","title":"Generated title",
+                "workspaceRoot":"/fixture/project","defaultModelSelection":null,
+                "scripts":[],"createdAt":"2026-11-08T12:00:00.000Z",
+                "updatedAt":"2026-11-08T12:00:00.000Z"
+            }"#,
+        )
+    }
+
+    #[test]
+    fn title_edits_are_sticky_even_when_the_text_does_not_change() {
+        let mut row = project_event(&Value::Null, &created()).unwrap();
+        assert_eq!(row.get("hasCustomTitle"), Some(&Value::Bool(false)));
+        let metadata = event(
+            "project.meta-updated",
+            r#"{"projectId":"project:one","autoPull":true,
+                "updatedAt":"2026-11-08T12:01:00.000Z"}"#,
+        );
+        row = project_event(&row, &metadata).unwrap();
+        assert_eq!(row.get("hasCustomTitle"), Some(&Value::Bool(false)));
+        row = project_event(
+            &row,
+            &event(
+                "project.meta-updated",
+                r#"{"projectId":"project:one","title":"Generated title",
+                    "updatedAt":"2026-11-08T12:02:00.000Z"}"#,
+            ),
+        )
+        .unwrap();
+        assert_eq!(row.get("hasCustomTitle"), Some(&Value::Bool(true)));
+        row = project_event(&row, &metadata).unwrap();
+        assert_eq!(row.get("hasCustomTitle"), Some(&Value::Bool(true)));
+        row = project_event(
+            &row,
+            &event(
+                "project.deleted",
+                r#"{"projectId":"project:one","deletedAt":"2026-11-08T12:03:00.000Z"}"#,
+            ),
+        )
+        .unwrap();
+        assert_eq!(row.get("hasCustomTitle"), Some(&Value::Bool(true)));
+        assert_eq!(
+            row.get("title").and_then(Value::as_str),
+            Some("Generated title")
+        );
+    }
+
+    #[test]
+    fn recreated_rows_preserve_only_a_custom_title_and_reset_other_defaults() {
+        for has_custom_title in [false, true] {
+            let mut row = project_event(&Value::Null, &created()).unwrap();
+            set(&mut row, "title", Value::String("Old title".into())).unwrap();
+            set(&mut row, "hasCustomTitle", Value::Bool(has_custom_title)).unwrap();
+            set(&mut row, "autoPull", Value::Bool(true)).unwrap();
+            set(
+                &mut row,
+                "deletedAt",
+                Value::String("2026-11-08T12:01:00.000Z".into()),
+            )
+            .unwrap();
+            let actual = project_event(&row, &created()).unwrap();
+            let mut expected = project_event(&Value::Null, &created()).unwrap();
+            if has_custom_title {
+                set(&mut expected, "title", Value::String("Old title".into())).unwrap();
+                set(&mut expected, "hasCustomTitle", Value::Bool(true)).unwrap();
+            }
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn legacy_rows_require_history_resolution_before_projection_updates() {
+        let mut row = project_event(&Value::Null, &created()).unwrap();
+        let Value::Object(entries) = &mut row else {
+            unreachable!()
+        };
+        entries.retain(|(key, _)| key != "hasCustomTitle");
+        assert_eq!(validate_projection_shape(&row), Ok(()));
+        let update = event(
+            "project.meta-updated",
+            r#"{"projectId":"project:one","updatedAt":"2026-11-08T12:01:00.000Z"}"#,
+        );
+        assert_eq!(project_event(&row, &update), Err(Error::InvalidRequest));
+        assert_eq!(project_event(&row, &created()), Err(Error::InvalidRequest));
+        for invalid in [
+            Value::Null,
+            Value::Number("1".into()),
+            Value::String("true".into()),
+        ] {
+            set(&mut row, "hasCustomTitle", invalid).unwrap();
+            assert_eq!(validate_projection_shape(&row), Err(Error::InvalidRequest));
+            assert_eq!(project_event(&row, &update), Err(Error::InvalidRequest));
+        }
+    }
 }

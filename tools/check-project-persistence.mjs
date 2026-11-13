@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-import * as assert from "node:assert/strict";
-import * as childProcess from "node:child_process";
-import * as module from "node:module";
+import * as NodeAssert from "node:assert/strict";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeModule from "node:module";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -16,13 +16,15 @@ import * as SqlitePersistence from "../apps/server/src/persistence/Sqlite.ts";
 import { projectCases } from "./check-project-commands.mjs";
 import { upstreamSource } from "./upstream-source.mjs";
 
-assert.ok(process.argv[2], "Pass project_persistence_matrix executable");
+NodeAssert.ok(process.argv[2], "Pass project_persistence_matrix executable");
 const executable = process.argv[2];
 const singleMode = process.argv[3] === "--single";
-const source = module
-  .stripTypeScriptTypes(upstreamSource("apps/server/src/orchestration-v2/ProjectStore.ts"), {
+const source = NodeModule.stripTypeScriptTypes(
+  upstreamSource("apps/server/src/orchestration-v2/ProjectStore.ts"),
+  {
     mode: "strip",
-  })
+  },
+)
   .replace(/^import\s[\s\S]*?;\s*$/gm, "")
   .replace(/^export (?=(?:function|const|class) )/gm, "");
 const imports = {
@@ -70,18 +72,40 @@ const eligible = projectCases.filter(
     result.error !== undefined ||
     (eventIsValid(result.ok) && (input.state.project === null || rowIsValid(input.state.project))),
 );
+// Schema.is must not silently drop all existing-row comparisons when upstream
+// adds a required projection field. These scenarios exercise each write branch,
+// both values of the sticky title flag, and state after a lifecycle rename.
+const requiredScenarios = [
+  "create supplies only upstream defaults",
+  "no metadata changes still creates the update event",
+  "all optional payloads and nested extensions survive",
+  "delete active project with none workspace owner",
+  "lifecycle step 2 project.meta.update",
+  "lifecycle step 7 project.delete",
+  ...[false, true].flatMap((custom) =>
+    ["same title update", "renamed title update", "metadata only", "delete"].map(
+      (action) => `custom title ${custom} ${action}`,
+    ),
+  ),
+];
 const cases = singleMode ? eligible.filter(({ runtime }) => runtime) : eligible;
+for (const label of requiredScenarios) {
+  NodeAssert.ok(
+    cases.some((fixture) => fixture.label === label && fixture.result.ok !== undefined),
+    `Required projection comparison is missing after schema/runtime selection: ${label}`,
+  );
+}
 function invokePlanner(input) {
-  const processResult = childProcess.spawnSync(executable, [], {
+  const processResult = NodeChildProcess.spawnSync(executable, [], {
     input,
     encoding: "utf8",
     env: {},
     maxBuffer: 128 * 1024 * 1024,
     timeout: 120_000,
   });
-  assert.ifError(processResult.error);
-  assert.equal(processResult.status, 0, processResult.stderr);
-  assert.equal(processResult.stderr, "");
+  NodeAssert.ifError(processResult.error);
+  NodeAssert.equal(processResult.status, 0, processResult.stderr);
+  NodeAssert.equal(processResult.stderr, "");
   return processResult.stdout
     .trimEnd()
     .split("\n")
@@ -93,7 +117,7 @@ const frames = cases.map(({ input }) =>
 const actual = singleMode
   ? frames.flatMap((frame) => invokePlanner(frame + "\n"))
   : invokePlanner(frames.join("\n") + "\n");
-assert.equal(actual.length, cases.length);
+NodeAssert.equal(actual.length, cases.length);
 let committed = 0;
 await Effect.runPromise(
   Effect.gen(function* () {
@@ -102,18 +126,18 @@ await Effect.runPromise(
     for (let index = 0; index < cases.length; index++) {
       const { input, result, label } = cases[index];
       if (result.error !== undefined) {
-        assert.deepEqual(actual[index], result, label);
+        NodeAssert.deepEqual(actual[index], result, label);
         continue;
       }
       yield* sql`DELETE FROM projection_projects`;
       const row = input.state.project;
       if (row !== null) {
         yield* sql`INSERT INTO projection_projects (
-        project_id, title, workspace_root, default_model_selection_json,
+        project_id, title, has_custom_title, workspace_root, default_model_selection_json,
         default_thread_env_mode, auto_pull, favicon_path, project_icon_json,
         scripts_json, pinned_at, archived_at, created_at, updated_at, deleted_at
       ) VALUES (
-        ${row.projectId}, ${row.title}, ${row.workspaceRoot},
+        ${row.projectId}, ${row.title}, ${row.hasCustomTitle ? 1 : 0}, ${row.workspaceRoot},
         ${row.defaultModelSelection === null ? null : JSON.stringify(row.defaultModelSelection)},
         ${row.defaultThreadEnvMode}, ${row.autoPull ? 1 : 0}, ${row.faviconPath},
         ${row.projectIcon === null ? null : JSON.stringify(row.projectIcon)},
@@ -123,7 +147,7 @@ await Effect.runPromise(
       }
       yield* sql.withTransaction(store.apply(result.ok));
       const projected = yield* store.get(input.command.projectId, { includeDeleted: true });
-      assert.deepEqual(
+      NodeAssert.deepEqual(
         actual[index],
         {
           version: 1,
@@ -145,7 +169,7 @@ if (frameExecutable) {
   const single = frameExecutable;
   const valid = { ...cases[0].input, operation: "plan-and-project" };
   const invoke = (input, args = []) =>
-    childProcess.spawnSync(single, args, {
+    NodeChildProcess.spawnSync(single, args, {
       input,
       encoding: "utf8",
       env: {},
@@ -153,8 +177,8 @@ if (frameExecutable) {
       timeout: 30_000,
     });
   const good = invoke(JSON.stringify(valid) + "\n");
-  assert.equal(good.status, 0, good.stderr);
-  assert.deepEqual(JSON.parse(good.stdout), actual[0]);
+  NodeAssert.equal(good.status, 0, good.stderr);
+  NodeAssert.deepEqual(JSON.parse(good.stdout), actual[0]);
   const malformed = [
     JSON.stringify(valid),
     JSON.stringify(valid) + "\n" + JSON.stringify(valid) + "\n",
@@ -165,17 +189,18 @@ if (frameExecutable) {
   ];
   for (const input of malformed) {
     const failed = invoke(input);
-    assert.ifError(failed.error);
-    assert.equal(failed.status, 2);
-    assert.equal(failed.stdout, "");
+    NodeAssert.ifError(failed.error);
+    NodeAssert.equal(failed.status, 2);
+    NodeAssert.equal(failed.stdout, "");
   }
-  assert.equal(invoke(JSON.stringify(valid) + "\n", ["unexpected"]).status, 2);
+  NodeAssert.equal(invoke(JSON.stringify(valid) + "\n", ["unexpected"]).status, 2);
 }
 console.log(
   JSON.stringify({
     status: "passed",
     comparisons: cases.length,
     projectedRows: committed,
+    requiredProjectionScenarios: requiredScenarios.length,
     plannerOnlyFixturesOutsidePersistenceSchema: projectCases.length - eligible.length,
     oracle: "immutable ProjectCommands and ProjectStoreV2 with real Effect and SQLite transactions",
     frameChecks: frameExecutable ? 8 : 0,

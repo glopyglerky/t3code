@@ -828,7 +828,7 @@
         "tools/check-project-commands.mjs"
       ],
       "retired_paths": [],
-      "notes": "Planner replacement remains behind ProjectService, preserving authorization, workspace locking, receipt ownership and forced-deletion partial progress. SQLite is still authoritative.",
+      "notes": "Planner replacement remains behind ProjectService, preserving authorization, workspace locking, receipt ownership and forced-deletion partial progress. Project reads and mutations use selected persistence: omdb owns the native application route, while upstream-selected targets retain SQLite.",
       "rust_crates": ["crates/core"]
     },
     {
@@ -1358,12 +1358,16 @@
         }
       ],
       "rust_paths": [
+        "crates/core/src/project_persistence_wire.rs",
+        "crates/core/src/bin/t3-code-ls-project-store.rs",
+        "crates/core/examples/project_persistence_matrix.rs",
         "crates/storage/src/lib.rs",
         "crates/storage/src/backend.rs",
         "crates/storage/src/bin/t3-code-ls-db.rs",
         "crates/storage/src/outbox.rs",
         "crates/storage/src/outbox_tests.rs",
         "crates/storage/src/project_service.rs",
+        "crates/storage/src/project_service_tests.rs",
         "crates/storage/src/thread_service.rs",
         "crates/storage/src/sqlite_import.rs",
         "apps/server/src/persistence/redb_transactions.rs",
@@ -1685,7 +1689,7 @@
         "tools/check-redb-cli.mjs"
       ],
       "retired_paths": [],
-      "notes": "The selected production server and CLI use the complete omdb application boundary through one transaction owner. Native schema80 to88 upgrade preserves activated data and updates citation-aware message search, turn item counts and custom project titles. Typed native APIs cover atomic event guards, outbox claims, compaction filters, fork visibility, shell and recovery state, attachment retention, scheduler compare-and-set, KeepAwake active-run existence and legacy subagent identifier retention. The active-run query stops at the first indexed match. Queue-only run filters use the existing global queued-run index and recheck thread ownership, avoiding completed history. Explicit run-ID filters read compact keys directly; includeLatestRun preserves full-thread candidates and original filtering/order semantics. Bootstrap and CLI preserve upgrade ownership and never reopen SQLite after native activation. SQLite remains the migration source, immutable behavior comparison and unqualified-platform implementation. Fresh exact-commit platform receipts remain required.",
+      "notes": "The selected production server and CLI use the complete omdb application boundary through one transaction owner. Native schema80 to88 upgrade preserves activated data and updates citation-aware message search, turn item counts and custom project titles. Typed native APIs cover atomic event guards, outbox claims, compaction filters, fork visibility, shell and recovery state, attachment retention, scheduler compare-and-set, KeepAwake active-run existence and legacy subagent identifier retention. The active-run query stops at the first indexed match. Queue-only run filters use the existing global queued-run index and recheck thread ownership, avoiding completed history. Explicit run-ID filters read compact keys directly; includeLatestRun preserves full-thread candidates and original filtering/order semantics. Bootstrap and CLI preserve upgrade ownership and never reopen SQLite after native activation. SQLite remains the migration source, immutable behavior comparison and unqualified-platform implementation. Fresh exact-commit platform receipts remain required. The retained native project API and standalone plan-and-project executable share the core project projection reducer and remain independently compared with immutable ProjectStore behavior; the selected application graph uses shared ProjectStore semantics over native project rows.",
       "rust_crates": ["crates/core", "crates/storage"]
     },
     {

@@ -44,6 +44,30 @@ filters, latest-run inclusion and requested message lookup against immutable
 upstream. Queued membership also follows status changes through nested rollback
 and commit in the existing native transaction.
 
+## Retained native project API
+
+Qualification of candidate `a80e0dbcdc73d6316ae1e3d427d1605fb1f33870`
+found that the retained native project projection reducer omitted
+`hasCustomTitle`. The selected application graph already stored that field through
+its native project rows. The separate reducer also remains in use by native
+project services and the standalone plan-and-project executable, so it must follow
+the same upstream contract.
+
+The reducer now emits the flag on creation, marks explicit title edits as custom,
+preserves it through unrelated updates and deletion, and protects a custom title
+when a creation event is reapplied. Existing stored rows without the flag are
+resolved from project title-change events through the snapshot's last sequence.
+Reads use bounded pages, preserve old receipts and projections, and reject corrupt
+history. A successful command persists the resolved flag under the existing
+revision check. Rows that already carry the flag do not reread history.
+
+The differential fixtures include the required flag in their row shape and SQLite
+seed data. Named successful creation, update and deletion scenarios must remain
+eligible for comparison, preventing a future schema change from silently removing
+those cases. The port map explicitly tracks the retained core reducer, its
+executable and its persistence regressions alongside the selected application
+implementation.
+
 ## Qualification
 
 The previous candidate, `c2b0096246dbf153e74e984b223ef6d8d1a80e58`, did not

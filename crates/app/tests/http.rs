@@ -239,6 +239,10 @@ async fn real_socket_commands_preserve_receipts_and_do_not_duplicate_durable_eve
         created_project.receipt.result["ok"]["project"]["projectId"],
         "project-1"
     );
+    assert_eq!(
+        created_project.receipt.result["ok"]["project"]["hasCustomTitle"],
+        false
+    );
     let create_thread = json!({
         "type":"thread.create", "commandId":"thread-create", "threadId":"thread-1", "projectId":"project-1",
         "title":"Thread", "modelSelection":{"instanceId":"codex","model":"test-model"},
