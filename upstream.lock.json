@@ -4,9 +4,9 @@
     "repository": "pingdotgg/t3code",
     "channel": "default-branch",
     "branch": "main",
-    "source_url": "https://github.com/pingdotgg/t3code/commit/ed7e5010baafd73d0164ee1d5adbd21e26f8f9cb",
-    "commit": "ed7e5010baafd73d0164ee1d5adbd21e26f8f9cb",
-    "root_tree": "463398f10af5c0fe8438f6326e4aa148894e858e"
+    "source_url": "https://github.com/pingdotgg/t3code/commit/4aec277f79b2d4dabd88f13cfab264d9f80cbcef",
+    "commit": "4aec277f79b2d4dabd88f13cfab264d9f80cbcef",
+    "root_tree": "7bf74b290c336059616fe8f13c5612effd0b86f6"
   },
   "qualification": {
     "status": "unqualified",
@@ -19,7 +19,7 @@
     "server": {
       "path_prefixes": ["apps/server/"],
       "entries": 1645,
-      "inventory_sha256": "f8c2a1279a44ded7b96a26846467ef7a93848aa800bf93ac1f41863c8243071c"
+      "inventory_sha256": "64f7ad9ce694f4df4f2651f11f004a06ab446e8dcc2f86e122da03c340fffc9c"
     },
     "contracts": {
       "path_prefixes": ["packages/contracts/"],
@@ -34,7 +34,7 @@
     "web": {
       "path_prefixes": ["apps/web/"],
       "entries": 2036,
-      "inventory_sha256": "9bbafa558ee1dd2b1842f0330e893d4ea842fc4555efcb4fd5f3da1c0e1dd659"
+      "inventory_sha256": "ecfddf92a479d95cbc91825c61c388893f500cf5eb9599f4769b94d863d789ab"
     },
     "desktop": {
       "path_prefixes": ["apps/desktop/"],
@@ -44,7 +44,7 @@
     "mobile": {
       "path_prefixes": ["apps/mobile/"],
       "entries": 1793,
-      "inventory_sha256": "b48ceb288e04f6c521939c348acf2487827a197830bc180983a2192b5c75903b"
+      "inventory_sha256": "37640b9143c23e8c80639e2b3f7dd0964d814ffc2f95552784b1733e4012a9bc"
     },
     "connect": {
       "path_prefixes": [
@@ -59,7 +59,7 @@
         "packages/contracts/src/relay"
       ],
       "entries": 248,
-      "inventory_sha256": "667f9305395d98d6ff34d772d3d16737031beac5220eba02da77b61d3ff149d2"
+      "inventory_sha256": "eba0a054e5f2b436e7b514fa718bc86e8ebd2dd6f9d7619e94fac1dd70f04c2a"
     },
     "providers": {
       "path_prefixes": [
@@ -68,7 +68,7 @@
         "packages/effect-codex-app-server/"
       ],
       "entries": 355,
-      "inventory_sha256": "c65bc0668144c44016234ad639ca899c2abe1a6d54c7ca8fad9ebac32f882f84"
+      "inventory_sha256": "d25364a661988db1242e1fe84058e52ca6f4cca6d22a9a3b44ba1d2c3d48bb0c"
     },
     "shared": {
       "path_prefixes": ["packages/shared/"],
@@ -80,17 +80,17 @@
     "repository": "pingdotgg/t3code",
     "channel": "default-branch",
     "branch": "main",
-    "source_url": "https://github.com/pingdotgg/t3code/commit/ed7e5010baafd73d0164ee1d5adbd21e26f8f9cb",
-    "commit": "ed7e5010baafd73d0164ee1d5adbd21e26f8f9cb",
+    "source_url": "https://github.com/pingdotgg/t3code/commit/4aec277f79b2d4dabd88f13cfab264d9f80cbcef",
+    "commit": "4aec277f79b2d4dabd88f13cfab264d9f80cbcef",
     "status": "integrated"
   },
   "integration": {
-    "commit": "ed7e5010baafd73d0164ee1d5adbd21e26f8f9cb",
+    "commit": "4aec277f79b2d4dabd88f13cfab264d9f80cbcef",
     "recovered_from": "d29a94f3a175eac1f26c548023fedd8695cedfaf",
     "preserved_rust_base": "0be60f85268daece83e616b97f6fc421ec83ee6b",
     "meaning": "The upstream field pins the integrated implementation. Source integration does not establish full Rust or cross-platform acceptance.",
-    "previous_commit": "7171fdd7716b05dc1b4be40c26ac78e8bb35f80c",
-    "report": "docs/porting/default-ed7e5010.md"
+    "previous_commit": "ed7e5010baafd73d0164ee1d5adbd21e26f8f9cb",
+    "report": "docs/porting/default-4aec277f.md"
   },
   "nightly_reference": {
     "repository": "pingdotgg/t3code",
