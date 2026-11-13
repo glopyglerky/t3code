@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-import * as Assert from "node:assert/strict";
-import * as FS from "node:fs/promises";
-import * as Path from "node:path";
+import * as NodeAssert from "node:assert/strict";
+import * as NodeFSP from "node:fs/promises";
+import * as NodePath from "node:path";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 
@@ -22,8 +22,11 @@ import {
 import { jsonPayloads, sampleEvents, makeEvent, fixedTime } from "./redb-event-sink-fixtures.mjs";
 
 const [executable, proofPath] = process.argv.slice(2);
-Assert.ok(executable && Path.isAbsolute(executable), "Pass an absolute native database executable");
-await FS.access(executable, FS.constants.X_OK);
+NodeAssert.ok(
+  executable && NodePath.isAbsolute(executable),
+  "Pass an absolute native database executable",
+);
+await NodeFSP.access(executable, NodeFSP.constants.X_OK);
 const oracle = await loadUpstreamModule("apps/server/src/orchestration-v2/ProjectionStore.ts");
 const fixture = await createFixture();
 const fields = [
@@ -45,7 +48,9 @@ const fields = [
 ];
 const checks = [];
 const failed = (body) =>
-  Effect.exit(body).pipe(Effect.tap((exit) => Effect.sync(() => Assert.ok(Exit.isFailure(exit)))));
+  Effect.exit(body).pipe(
+    Effect.tap((exit) => Effect.sync(() => NodeAssert.ok(Exit.isFailure(exit)))),
+  );
 const ids = (records) => records.map((record) => record.id);
 
 async function withServices(kind, filename, use) {
@@ -55,6 +60,7 @@ async function withServices(kind, filename, use) {
         const store = yield* NativeProjectionStore.make;
         return yield* use({
           read: store.getThreadRecords,
+          readMessages: store.getMessagesById,
           apply: store.apply,
           transaction: client.withTransaction,
         });
@@ -66,6 +72,7 @@ async function withServices(kind, filename, use) {
       const store = yield* module.ProjectionStoreV2.pipe(Effect.provide(module.layer));
       return yield* use({
         read: store.getThreadRecords,
+        readMessages: store.getMessagesById,
         apply: store.apply,
         transaction: (body) => sql.withTransaction(body),
       });
@@ -321,36 +328,165 @@ const queries = [
   [["contextTransfers"], { contextTransferStatuses: ["failed"] }],
 ];
 
-function exercise({ read, apply, transaction }) {
+const exerciseNarrowRuns = Effect.fn("fixture.projectionRecords.narrowRuns")(function* ({
+  read,
+  readMessages,
+  apply,
+  transaction,
+}) {
+  const threadId = "thread:narrow-runs";
+  const otherId = "thread:narrow-other";
+  for (const id of [threadId, otherId])
+    yield* apply(
+      makeEvent(
+        "thread.created",
+        {
+          ...jsonPayloads.thread,
+          id,
+          lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: id },
+        },
+        { threadId: id },
+      ),
+    );
+  const payloads = new Map();
+  for (const [name, owner, ordinal, status] of [
+    ["completed", threadId, 1, "completed"],
+    ["later", threadId, 3, "queued"],
+    ["earlier", threadId, 2, "queued"],
+    ["other", otherId, 1, "queued"],
+    ["cancelled", threadId, 4, "cancelled"],
+  ]) {
+    const run = {
+      ...jsonPayloads.run,
+      id: `run:narrow:${name}`,
+      threadId: owner,
+      userMessageId: `message:narrow:${name}`,
+      ordinal,
+      status,
+      startedAt: status === "completed" ? fixedTime : null,
+    };
+    payloads.set(name, run);
+    yield* apply(makeEvent("run.created", run, { threadId: owner }));
+    yield* apply(
+      makeEvent(
+        "message.updated",
+        {
+          ...jsonPayloads.message,
+          id: run.userMessageId,
+          threadId: owner,
+          runId: run.id,
+          role: "user",
+          text: `Queue input ${name}`,
+          streaming: false,
+        },
+        { threadId: owner },
+      ),
+    );
+  }
+  const id = (name) => `run:narrow:${name}`;
+  const cases = [
+    [{ runStatuses: ["queued"] }, ["earlier", "later"]],
+    [{ runStatuses: ["queued", "queued"] }, ["earlier", "later"]],
+    [
+      { runIds: ["later", "other", "completed", "earlier", "later", "missing"].map(id) },
+      ["completed", "earlier", "later"],
+    ],
+    [
+      {
+        runIds: ["later", "other", "completed", "earlier", "later"].map(id),
+        runStatuses: ["queued"],
+      },
+      ["earlier", "later"],
+    ],
+    [{ runIds: [id("completed")], runStatuses: ["queued"] }, []],
+    [{ runIds: [id("missing")] }, []],
+    [{ runIds: [] }, []],
+    [{ runStatuses: [] }, []],
+    [{ runIds: [id("later")], runStatuses: [] }, []],
+    [{ runStatuses: ["completed", "queued"] }, ["completed", "earlier", "later"]],
+    [{ runStatuses: [], includeLatestRun: true }, ["later"]],
+    [{ runIds: [id("earlier")], runStatuses: [], includeLatestRun: true }, []],
+    [{ runIds: [], includeLatestRun: true }, []],
+  ];
+  const selections = [];
+  for (const [filter, expected] of cases) {
+    const projection = yield* read(threadId, ["runs"], filter);
+    NodeAssert.deepEqual(ids(projection.runs), expected.map(id));
+    selections.push(projection);
+  }
+  const queued = selections[0];
+  const messages = yield* readMessages(threadId, [
+    ...queued.runs.map((run) => run.userMessageId),
+    queued.runs[0].userMessageId,
+    "message:narrow:other",
+    "message:narrow:missing",
+  ]);
+  NodeAssert.deepEqual([...messages.keys()], ["message:narrow:earlier", "message:narrow:later"]);
+  NodeAssert.deepEqual([...(yield* readMessages(threadId, [])).keys()], []);
+  const inside = yield* transaction(
+    Effect.gen(function* () {
+      yield* apply(
+        makeEvent("run.updated", { ...payloads.get("later"), status: "running" }, { threadId }),
+      );
+      yield* failed(
+        transaction(
+          Effect.gen(function* () {
+            yield* apply(
+              makeEvent(
+                "run.updated",
+                { ...payloads.get("earlier"), status: "running" },
+                { threadId },
+              ),
+            );
+            return yield* Effect.fail("rollback queued membership");
+          }),
+        ),
+      );
+      const result = yield* read(threadId, ["runs"], { runStatuses: ["queued"] });
+      NodeAssert.deepEqual(ids(result.runs), [id("earlier")]);
+      return result;
+    }),
+  );
+  const committed = yield* read(threadId, ["runs"], { runStatuses: ["queued"] });
+  NodeAssert.deepEqual(normalized(committed), normalized(inside));
+  return { selections, messages: [...messages.entries()], committed };
+});
+
+const exercise = Effect.fn("fixture.projectionRecords.exercise")(function ({
+  read,
+  readMessages,
+  apply,
+  transaction,
+}) {
   return Effect.gen(function* () {
     const result = { queries: [] };
     for (const [selected, filter] of queries)
       result.queries.push(yield* read("thread:main", selected, filter));
     for (const field of fields) result.queries.push(yield* read("thread:main", [field]));
-    Assert.deepEqual(ids(result.queries[6].runs), ["run:old", "run:current"]);
-    Assert.deepEqual(ids(result.queries[7].runs), ["run:current"]);
+    NodeAssert.deepEqual(ids(result.queries[6].runs), ["run:old", "run:current"]);
+    NodeAssert.deepEqual(ids(result.queries[7].runs), ["run:current"]);
     const all = result.queries[0];
-    Assert.deepEqual(ids(all.contextHandoffs), ["handoff:main", "handoff:z", "handoff:a"]);
-    Assert.deepEqual(ids(all.contextTransfers), ["transfer:main", "transfer:z", "transfer:a"]);
-    Assert.ok(ids(all.providerThreads).includes("provider:owned"));
-    Assert.ok(ids(all.providerThreads).includes("provider:subagent"));
+    NodeAssert.deepEqual(ids(all.contextHandoffs), ["handoff:main", "handoff:z", "handoff:a"]);
+    NodeAssert.deepEqual(ids(all.contextTransfers), ["transfer:main", "transfer:z", "transfer:a"]);
+    NodeAssert.ok(ids(all.providerThreads).includes("provider:owned"));
+    NodeAssert.ok(ids(all.providerThreads).includes("provider:subagent"));
     const messages = yield* read("thread:main", ["messages"], {
       messageIds: ["message:assistant", "message:user"],
     });
-    Assert.deepEqual(ids(messages.messages), ["message:user", "message:assistant"]);
+    NodeAssert.deepEqual(ids(messages.messages), ["message:user", "message:assistant"]);
     const latest = yield* read("thread:main", ["providerTurns"], {
       latestProviderTurnUsageOnly: true,
     });
-    Assert.deepEqual(ids(latest.providerTurns), ["turn:later"]);
+    NodeAssert.deepEqual(ids(latest.providerTurns), ["turn:later"]);
     const omitted = yield* read("thread:main", ["nodes", "subagents"], {
       omitSettledLeafNodes: true,
       omitSettledSubagents: true,
     });
-    Assert.ok(!ids(omitted.nodes).includes("node:settled"));
-    Assert.ok(ids(omitted.nodes).includes("node:active-terminal"));
-    Assert.ok(ids(omitted.nodes).includes("node:without-run"));
-    Assert.ok(!ids(omitted.subagents).includes("subagent:settled"));
-    Assert.ok(ids(omitted.subagents).includes("subagent:active-terminal"));
+    NodeAssert.ok(!ids(omitted.nodes).includes("node:settled"));
+    NodeAssert.ok(ids(omitted.nodes).includes("node:active-terminal"));
+    NodeAssert.ok(ids(omitted.nodes).includes("node:without-run"));
+    NodeAssert.ok(!ids(omitted.subagents).includes("subagent:settled"));
+    NodeAssert.ok(ids(omitted.subagents).includes("subagent:active-terminal"));
     const compactedThread = "thread:compacted";
     const scoped = (type, payload) => makeEvent(type, payload, { threadId: compactedThread });
     yield* apply(
@@ -437,7 +573,7 @@ function exercise({ read, apply, transaction }) {
       keepMessageId: "message:compacted:resent",
     };
     result.beforeCompaction = yield* read(compactedThread, narrowedFields, { sinceLastCompaction });
-    Assert.equal(result.beforeCompaction.messages.length, 9);
+    NodeAssert.equal(result.beforeCompaction.messages.length, 9);
     for (const [name, ordinal] of [
       ["boundary", 100],
       ["rolled", 200],
@@ -457,20 +593,24 @@ function exercise({ read, apply, transaction }) {
       );
     }
     result.afterCompaction = yield* read(compactedThread, narrowedFields, { sinceLastCompaction });
-    Assert.equal(result.afterCompaction.runs.length, 9, "Compaction does not narrow run metadata");
-    Assert.equal(
+    NodeAssert.equal(
+      result.afterCompaction.runs.length,
+      9,
+      "Compaction does not narrow run metadata",
+    );
+    NodeAssert.equal(
       result.afterCompaction.turnItems.length,
       2,
       "Compaction does not narrow turn items",
     );
     for (const field of ["attempts", "nodes", "messages", "providerTurns"]) {
-      Assert.equal(result.afterCompaction[field].length, 8);
-      Assert.ok(!ids(result.afterCompaction[field]).some((id) => id.endsWith(":old")));
+      NodeAssert.equal(result.afterCompaction[field].length, 8);
+      NodeAssert.ok(!ids(result.afterCompaction[field]).some((id) => id.endsWith(":old")));
     }
     result.withoutCompactionExceptions = yield* read(compactedThread, narrowedFields, {
       sinceLastCompaction: { keepRunIds: [], keepMessageId: "message:missing" },
     });
-    Assert.equal(result.withoutCompactionExceptions.messages.length, 6);
+    NodeAssert.equal(result.withoutCompactionExceptions.messages.length, 6);
 
     for (const [name, sessionId] of [
       ["private", null],
@@ -517,17 +657,19 @@ function exercise({ read, apply, transaction }) {
         omitSettledSubagentRecords: true,
       },
     );
-    Assert.ok(!ids(result.omittedSubagentRecords.nodes).includes("subagent:settled:private"));
-    Assert.ok(!ids(result.omittedSubagentRecords.subagents).includes("subagent:settled:private"));
-    Assert.ok(
+    NodeAssert.ok(!ids(result.omittedSubagentRecords.nodes).includes("subagent:settled:private"));
+    NodeAssert.ok(
+      !ids(result.omittedSubagentRecords.subagents).includes("subagent:settled:private"),
+    );
+    NodeAssert.ok(
       !ids(result.omittedSubagentRecords.providerThreads).includes("provider:settled:private"),
     );
-    Assert.ok(
+    NodeAssert.ok(
       ids(result.omittedSubagentRecords.providerThreads).includes("provider:settled:shared"),
     );
-    Assert.ok(ids(result.omittedSubagentRecords.providerThreads).includes("provider:owned"));
+    NodeAssert.ok(ids(result.omittedSubagentRecords.providerThreads).includes("provider:owned"));
     result.missing = (yield* read("missing", fields).pipe(Effect.flip))._tag;
-    Assert.equal(result.missing, "ProjectionStoreThreadNotFoundError");
+    NodeAssert.equal(result.missing, "ProjectionStoreThreadNotFoundError");
     result.dateOrder = [];
     for (let index = 0; index < datePairs.length; index += 1) {
       const selected = yield* read("thread:dates", ["providerTurns"], {
@@ -536,26 +678,28 @@ function exercise({ read, apply, transaction }) {
       });
       result.dateOrder.push(ids(selected.providerTurns));
     }
-    const boundedRead = () =>
-      Effect.gen(function* () {
-        const items = yield* read("thread:bounded", ["turnItems"], {
-          turnItemTypes: ["user_message"],
-        });
-        const messages = yield* read("thread:bounded", ["messages"], {
-          messageIds: ["message:bounded:a", "message:bounded:b"],
-        });
-        Assert.deepEqual(ids(items.turnItems), ["item:bounded:input"]);
-        Assert.deepEqual(ids(messages.messages), ["message:bounded:a", "message:bounded:b"]);
-        return { items, messages };
+    const boundedRead = Effect.fn("fixture.projectionRecords.boundedRead")(function* () {
+      const items = yield* read("thread:bounded", ["turnItems"], {
+        turnItemTypes: ["user_message"],
       });
+      const messages = yield* read("thread:bounded", ["messages"], {
+        messageIds: ["message:bounded:a", "message:bounded:b"],
+      });
+      NodeAssert.deepEqual(ids(items.turnItems), ["item:bounded:input"]);
+      NodeAssert.deepEqual(ids(messages.messages), ["message:bounded:a", "message:bounded:b"]);
+      return { items, messages };
+    });
     result.boundedRead = yield* boundedRead();
-    Assert.deepEqual(normalized(yield* transaction(boundedRead())), normalized(result.boundedRead));
+    NodeAssert.deepEqual(
+      normalized(yield* transaction(boundedRead())),
+      normalized(result.boundedRead),
+    );
     yield* transaction(
       Effect.gen(function* () {
         yield* apply(handoff("handoff:z", { summaryText: "Updated without moving source order" }));
         yield* apply(handoff("handoff:0-live"));
         result.inside = yield* read("thread:main", ["contextHandoffs"]);
-        Assert.deepEqual(ids(result.inside.contextHandoffs), [
+        NodeAssert.deepEqual(ids(result.inside.contextHandoffs), [
           "handoff:main",
           "handoff:z",
           "handoff:a",
@@ -569,7 +713,7 @@ function exercise({ read, apply, transaction }) {
             }),
           ),
         );
-        Assert.deepEqual(
+        NodeAssert.deepEqual(
           ids((yield* read("thread:main", ["contextHandoffs"])).contextHandoffs),
           ids(result.inside.contextHandoffs),
         );
@@ -584,16 +728,17 @@ function exercise({ read, apply, transaction }) {
         }),
       ),
     );
-    Assert.deepEqual(
+    NodeAssert.deepEqual(
       ids((yield* read("thread:main", ["contextTransfers"])).contextTransfers),
       ids(all.contextTransfers),
     );
+    result.narrowRuns = yield* exerciseNarrowRuns({ read, readMessages, apply, transaction });
     return normalized(result);
   });
-}
+});
 
 try {
-  const source = Path.join(fixture.root, "source.sqlite");
+  const source = NodePath.join(fixture.root, "source.sqlite");
   await createMigratedSqlite(source, () =>
     Effect.gen(function* () {
       const store = yield* oracle.module.ProjectionStoreV2.pipe(
@@ -707,24 +852,24 @@ try {
       );
     }),
   );
-  const upstream = Path.join(fixture.root, "upstream.sqlite");
-  const retained = Path.join(fixture.root, "retained.sqlite");
-  await FS.copyFile(source, upstream);
-  await FS.copyFile(source, retained);
-  const sourceHash = hash(await FS.readFile(source));
-  const exported = Path.join(fixture.root, "source.ndjson");
+  const upstream = NodePath.join(fixture.root, "upstream.sqlite");
+  const retained = NodePath.join(fixture.root, "retained.sqlite");
+  await NodeFSP.copyFile(source, upstream);
+  await NodeFSP.copyFile(source, retained);
+  const sourceHash = hash(await NodeFSP.readFile(source));
+  const exported = NodePath.join(fixture.root, "source.ndjson");
   exportSqliteState({ source, destination: exported });
   nativeRequest(executable, fixture, "initialize", {
     operation: "import_sqlite_application",
     path: exported,
   });
   const expected = await withServices("upstream", upstream, exercise);
-  Assert.deepEqual(
+  NodeAssert.deepEqual(
     await withServices("sqlite", retained, exercise),
     expected,
     "Extracted selected-record SQL preserves immutable upstream behavior",
   );
-  Assert.deepEqual(
+  NodeAssert.deepEqual(
     await withServices("redb", source, exercise),
     expected,
     "Native selected records match immutable upstream behavior",
@@ -734,17 +879,18 @@ try {
     "Filtered turn items and message ordering avoid more than 16 MiB of excluded history bodies, including inside the live writer transaction",
     "Message order uses all relevant turn-item ordinals even when the requested turn-item fields are filtered",
     "Latest-run guards, settled leaf/subagent exclusions, owner-linked provider threads and nullable run filters match upstream",
+    "Queued and explicit-run reads preserve ownership, ordering, duplicate/empty/combined filters, latest-run rules and atomic queued membership; queue-shaped message reads load only requested owned IDs",
     "Token-usage timestamp ordering preserves UTC-offset equivalence, equal-time ordinal ties and invalid-date ordering",
     `${datePairs.length} paired timestamp vectors preserve SQLite date/time/numeric/clock formats, boundaries and millisecond truncation`,
     "Imported context row order and update/new-row order survive root and nested transaction rollback",
   );
   await withServices("redb", source, ({ read }) =>
     Effect.gen(function* () {
-      Assert.deepEqual(normalized(yield* read("thread:main", fields)), expected.committed);
+      NodeAssert.deepEqual(normalized(yield* read("thread:main", fields)), expected.committed);
     }),
   );
   checks.push("A reopened native helper preserves the complete selected-record result");
-  Assert.equal(hash(await FS.readFile(source)), sourceHash);
+  NodeAssert.equal(hash(await NodeFSP.readFile(source)), sourceHash);
   await finishProof({
     executable,
     fixture,
@@ -757,7 +903,9 @@ try {
       "apps/server/src/orchestration-v2/ProjectionRecordRows.ts",
       "apps/server/src/orchestration-v2/NativeProjectionRecordRows.ts",
       "apps/server/src/orchestration-v2/NativeProjectionStore.ts",
+      "apps/server/src/orchestration-v2/NativeProjectionLookupRows.ts",
       "apps/server/src/persistence/redb_projection_records.rs",
+      "apps/server/src/persistence/redb_projection_lookup.rs",
       "apps/server/src/persistence/redb_projection_read_index.rs",
       "apps/server/src/persistence/redb_projection_window_index.rs",
       "tools/check-redb-projection-records.mjs",

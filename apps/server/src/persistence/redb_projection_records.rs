@@ -278,6 +278,39 @@ async fn candidates(
     active: &mut BTreeMap<String, bool>,
 ) -> Result<Vec<IndexedRow>> {
     match field {
+        ProjectionRecordField::Runs if filter.include_latest_run != Some(true) => {
+            if filter.run_ids.as_ref().is_some_and(Vec::is_empty)
+                || filter.run_statuses.as_ref().is_some_and(Vec::is_empty)
+            {
+                return Ok(Vec::new());
+            }
+            let rows = if let Some(ids) = &filter.run_ids {
+                let mut rows = Vec::new();
+                for id in ids.iter().collect::<BTreeSet<_>>() {
+                    if let Some(row) = compact_row(session, RUNS, id).await? {
+                        rows.push(row);
+                    }
+                }
+                rows
+            } else if filter
+                .run_statuses
+                .as_ref()
+                .is_some_and(|statuses| statuses.iter().all(|status| status == "queued"))
+            {
+                // Queue reads must not walk completed run history. This index
+                // already follows queued status in the projection transaction.
+                related(session, RUNS, "_recovery", "queued_run").await?
+            } else {
+                return related(session, RUNS, "thread_id", thread).await;
+            };
+            let mut owned = Vec::new();
+            for row in rows {
+                if text(&row.row, "thread_id")? == thread {
+                    owned.push(row);
+                }
+            }
+            Ok(owned)
+        }
         ProjectionRecordField::ProviderSessions => {
             let mut rows = Vec::new();
             for binding in related(session, BINDINGS, "thread_id", thread).await? {

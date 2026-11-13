@@ -29,6 +29,21 @@ translation through ThreadManagementService and Orchestrator. Its native lookup
 already reads requested message keys directly and enforces thread ownership.
 The shared orchestration service keeps its native policy and persistence wiring.
 
+Native run selection now uses existing indexes for the new MCP read patterns.
+An explicit run-ID filter reads those compact keys directly. A queue-only status
+filter reads the existing global queued-run index and checks thread ownership,
+avoiding completed run history. Other status filters retain their existing path.
+`includeLatestRun` keeps the full thread candidate set before applying the original
+filters and ordering. No schema or index format changes are needed.
+
+The native regression places a missing-metadata tripwire in a history containing
+1,024 completed runs. Selected queued and explicit-ID reads must avoid that
+unrelated history, while a full-history read must detect the missing metadata.
+Differential cases compare empty, duplicate, missing and cross-thread IDs, combined
+filters, latest-run inclusion and requested message lookup against immutable
+upstream. Queued membership also follows status changes through nested rollback
+and commit in the existing native transaction.
+
 ## Qualification
 
 The previous candidate, `c2b0096246dbf153e74e984b223ef6d8d1a80e58`, did not

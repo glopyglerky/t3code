@@ -230,6 +230,114 @@ async fn prepare_reads(store: &Store) {
 }
 
 #[tokio::test]
+async fn queued_and_explicit_run_reads_do_not_enumerate_completed_history() {
+    use super::records::{
+        ProjectionRecordField as F, ProjectionRecordFilter, ProjectionRecordsQuery,
+    };
+    let fixture = TestFixture::start().await;
+    let store = fixture.initialize().await;
+    let mut app = initialize(&store).await;
+    prepare(&store).await;
+    prepare_reads(&store).await;
+    app.begin("write").await.unwrap();
+    for id in ["thread", "other"] {
+        apply(&mut app, "write", event("thread.created", id, thread(id)))
+            .await
+            .unwrap();
+    }
+    for ordinal in 0..1024 {
+        let mut value = run(&format!("completed:{ordinal}"), ordinal);
+        value["status"] = json!("completed");
+        apply(&mut app, "write", event("run.created", "thread", value))
+            .await
+            .unwrap();
+    }
+    for (id, owner, ordinal) in [
+        ("queued:later", "thread", 2049),
+        ("queued:earlier", "thread", 2048),
+        ("queued:other", "other", 2050),
+    ] {
+        let mut value = run(id, ordinal);
+        value["threadId"] = json!(owner);
+        value["status"] = json!("queued");
+        apply(&mut app, "write", event("run.created", owner, value))
+            .await
+            .unwrap();
+    }
+    // Leave a tripwire in an unrelated completed run's compact metadata. A
+    // history scan must encounter it; queued and explicit-key reads must not.
+    // The final full-history query verifies that the tripwire is effective.
+    let mut session = app.take("write").unwrap();
+    let metadata = store_key(&format!(
+        "application/generation/{}/projection-reads/v1/window-meta/{}/{}",
+        session.catalog.generation,
+        RUNS,
+        request_digest(&json!([text_cell("completed:0")]))
+    ));
+    assert!(session.transaction.get(&metadata).await.unwrap().is_some());
+    session.transaction.delete(metadata).await.unwrap();
+    app.finish("write", session, Ok(())).await.unwrap();
+
+    let query = |filter| ProjectionRecordsQuery {
+        thread_id: "thread".into(),
+        fields: vec![F::Runs],
+        filter: Some(filter),
+        window: None,
+    };
+    let ids = |result: &records::ProjectionRecordResult| {
+        result.rows[&F::Runs]
+            .iter()
+            .map(|value| {
+                serde_json::from_str::<Value>(value).unwrap()["id"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>()
+    };
+    let queued = app
+        .projection_records("write", query(ProjectionRecordFilter {
+            run_statuses: Some(vec!["queued".into(), "queued".into()]),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+    assert_eq!(ids(&queued), ["queued:earlier", "queued:later"]);
+    let selected = app
+        .projection_records("write", query(ProjectionRecordFilter {
+            run_ids: Some(vec![
+                "queued:later".into(), "queued:other".into(), "completed:1023".into(),
+                "queued:earlier".into(), "queued:later".into(), "missing".into(),
+            ]),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+    assert_eq!(ids(&selected), ["completed:1023", "queued:earlier", "queued:later"]);
+    let combined = app
+        .projection_records("write", query(ProjectionRecordFilter {
+            run_ids: Some(vec!["completed:1023".into(), "queued:later".into(), "queued:other".into()]),
+            run_statuses: Some(vec!["queued".into()]),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+    assert_eq!(ids(&combined), ["queued:later"]);
+    for filter in [
+        ProjectionRecordFilter { run_ids: Some(vec![]), ..Default::default() },
+        ProjectionRecordFilter { run_statuses: Some(vec![]), ..Default::default() },
+        ProjectionRecordFilter { run_ids: Some(vec!["queued:later".into()]), run_statuses: Some(vec![]), ..Default::default() },
+    ] {
+        assert!(ids(&app.projection_records("write", query(filter)).await.unwrap()).is_empty());
+    }
+    assert!(matches!(
+        app.projection_records("write", query(ProjectionRecordFilter::default())).await,
+        Err(Error::IncompatibleStore)
+    ));
+    assert!(!app.has_active_writer());
+}
+
+#[tokio::test]
 async fn projection_lookups_preserve_owner_checks_requested_order_and_deleted_metadata() {
     let fixture = TestFixture::start().await;
     let store = fixture.initialize().await;
