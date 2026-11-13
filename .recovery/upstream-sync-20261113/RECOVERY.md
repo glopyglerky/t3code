@@ -12,7 +12,7 @@ The archive contains **64 verified Git blobs, 5,448,463 bytes**. Another **94 ex
 
 Expected local merge commit: `2f30c6c17b63d17ae0a1052a9f304117bcaa2c27`, tree `fd8f5f4a9544ed7a57fa46cfac2ecfd9818ab9ac`, parents `17ec4bae52471ba66f24f6abadbf29e4498106e7` and `ed7e5010baafd73d0164ee1d5adbd21e26f8f9cb`.
 
-Expected local follow-up: `ee279fead1c152d286ba81fd561d55869b956f38`, tree `707b3bfe125b7c3c3bbdbf2aa3effc92b4d92ea1`. Neither intended commit was published. Their hashes identify the lost local snapshots and do not imply that GitHub holds those complete commits.
+Expected local follow-up: `ee279fead1c152d286ba81fd561d55869b956f38`, tree `707b3bfe125b7c3c3bbdbf2aa3effc92b4d92ea1`. Neither intended commit was published. Their hashes identify the currently unavailable local snapshots and do not imply that GitHub holds those complete commits.
 
 ## Checks completed during implementation
 
@@ -28,7 +28,7 @@ These are partial observations from working revisions. They do not qualify the c
 
 - Restore the shared shell response's `latestRunBackgroundWake` field.
 - Make the simulated schema80 fixture export through the same private-backup path used by real startup. Its current direct export produces a different schemaVersion header.
-- Correct the live-fork attachment fixture's guest-share expectation after metadata replacement, using immutable SQLite behavior as the oracle.
+- Investigate the failed live-fork attachment case. Earlier metadata may overwrite `guestShare`; confirm immutable SQLite behavior before changing the fixture or implementation.
 - Correct the windows fixture's turn-item status to satisfy the current event schema.
 - Recover the outbox oracle follow-up that adds `ModelSelection` and `NonNegativeInt` imports.
 
