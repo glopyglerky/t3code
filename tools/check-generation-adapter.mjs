@@ -8,7 +8,12 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { CodexSettings, ProviderDriverKind, ProviderInstanceId } from "@t3tools/contracts";
+import {
+  CodexSettings,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  ServerProvider,
+} from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { createModelSelection } from "@t3tools/shared/model";
 import * as Cause from "effect/Cause";
@@ -41,6 +46,7 @@ const temporary = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3ls-gen
 const instanceId = ProviderInstanceId.make("codex");
 const defaultSelection = createModelSelection(instanceId, "gpt-5.4-mini");
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
+const decodeServerProvider = Schema.decodeSync(ServerProvider);
 const hostPlatform = Effect.runSync(HostProcess.Platform);
 const credential = "synthetic-generation-credential-never-an-argument";
 const scenarios = [];
@@ -736,14 +742,29 @@ try {
                 instanceId,
                 textGeneration: provider,
                 snapshot: {
-                  getSnapshot: Effect.succeed({
-                    instanceId,
-                    driver: ProviderDriverKind.make("codex"),
-                    enabled: true,
-                    installed: true,
-                    status: "ready",
-                    auth: { status: "authenticated" },
-                  }),
+                  getSnapshot: Effect.succeed(
+                    decodeServerProvider({
+                      instanceId,
+                      driver: ProviderDriverKind.make("codex"),
+                      enabled: true,
+                      installed: true,
+                      status: "ready",
+                      auth: { status: "authenticated" },
+                      version: null,
+                      checkedAt: "1970-01-01T00:00:00Z",
+                      models: [
+                        {
+                          slug: defaultSelection.model,
+                          name: "Fixture text model",
+                          isCustom: false,
+                          capabilities: null,
+                          supportsTextGeneration: true,
+                        },
+                      ],
+                      slashCommands: [],
+                      skills: [],
+                    }),
+                  ),
                 },
               };
               const service = yield* TextGeneration.make.pipe(

@@ -61,23 +61,3 @@ export interface ProjectionRecordRows {
     query: ProjectionRecordQuery,
   ) => Effect.Effect<ProjectionRecordResult, ProjectionRecordRowsError>;
 }
-
-export function emptyProjectionRecordRows(): Record<ProjectionRecordField, ReadonlyArray<string>> {
-  return {
-    runs: [],
-    attempts: [],
-    nodes: [],
-    subagents: [],
-    providerSessions: [],
-    providerThreads: [],
-    providerTurns: [],
-    runtimeRequests: [],
-    messages: [],
-    plans: [],
-    turnItems: [],
-    checkpointScopes: [],
-    checkpoints: [],
-    contextHandoffs: [],
-    contextTransfers: [],
-  };
-}

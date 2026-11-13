@@ -400,7 +400,13 @@ try {
             if (expected === undefined) expected = result;
             else NodeAssert.deepEqual(result, expected);
             const audit = JSON.parse(await NodeFSP.readFile(auditPath, "utf8"));
-            NodeAssert.deepEqual(audit.argv, ["app-server", "--fixture", "space argument"]);
+            NodeAssert.deepEqual(audit.argv, [
+              "app-server",
+              "-c",
+              "thread_unload_delay_secs=0",
+              "--fixture",
+              "space argument",
+            ]);
             NodeAssert.equal(audit.home, home);
             NodeAssert.equal(audit.codexHome, codexHome);
             NodeAssert.equal(audit.credential, credential);
@@ -556,7 +562,7 @@ try {
             .split("\n")
             .map((line) => JSON.parse(line));
           NodeAssert.deepEqual(invocations, [
-            ["app-server", "--fixture", "space argument"],
+            ["app-server", "-c", "thread_unload_delay_secs=0", "--fixture", "space argument"],
             ...(originalSelected ? [["--version"]] : []),
           ]);
           assertClosed(observation, JSON.parse(await NodeFSP.readFile(auditPath, "utf8")));

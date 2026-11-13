@@ -212,7 +212,7 @@ function isDeferrableWorkItem(item: HistoryRow["item"]): boolean {
   );
 }
 
-/** A row that folds when its run is not blocked and its group is large enough. */
+/** @public Imported by immutable upstream projection oracles through this shared dependency. */
 export function isFoldableWorkItem(item: HistoryRow["item"]): boolean {
   return (
     item.runId != null &&

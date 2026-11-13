@@ -78,6 +78,20 @@ while the native route uses Rust. Keeping that separate duplicate would leave tw
 SQL implementations with different filter semantics. This removes no platform
 capability and does not retire the canonical upstream implementation.
 
+The unused pre-cutover copy `tools/oracles/CommandPolicy.ts` is also removed.
+Its last fork revision is `17ec4bae52471ba66f24f6abadbf29e4498106e7`, blob
+`c12e10eef2f1f57c9e0311c37e86224112eb1bfb`. The policy and dispatch checks now
+load the integrated immutable upstream source, while the adapter check exercises
+the selected production service. A complete tracked-source reference check found
+no remaining consumer of the old copy. The current TypeScript policy service and
+its upstream-selected behavior remain present.
+
+Internal persistence factories keep their implementations with module-local
+bindings where no external consumer exists. The explicit SQLite keep-awake
+composition, standalone native-client layer and maintenance policy export retain
+documented public contracts. Fork acceptance scripts and compile-only contract
+checks are explicit Knip entries rather than unused-export exclusions.
+
 The 15 original upstream source removals are accounted for by immutable source
 identities, replacement paths where applicable and the fork's disposition of each
 file. Original implementations required by unqualified platforms remain present.

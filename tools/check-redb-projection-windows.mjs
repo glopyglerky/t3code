@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-import * as Assert from "node:assert/strict";
-import * as FS from "node:fs/promises";
-import * as Path from "node:path";
+import * as NodeAssert from "node:assert/strict";
+import * as NodeFSP from "node:fs/promises";
+import * as NodePath from "node:path";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 
@@ -24,12 +24,17 @@ import {
 import { jsonPayloads, sampleEvents, makeEvent, fixedTime } from "./redb-event-sink-fixtures.mjs";
 
 const [executable, proofPath] = process.argv.slice(2);
-Assert.ok(executable && Path.isAbsolute(executable), "Pass an absolute native database executable");
+NodeAssert.ok(
+  executable && NodePath.isAbsolute(executable),
+  "Pass an absolute native database executable",
+);
 const oracle = await loadUpstreamModule("apps/server/src/orchestration-v2/ProjectionStore.ts");
 const fixture = await createFixture();
 const checks = [];
 const failed = (body) =>
-  Effect.exit(body).pipe(Effect.tap((exit) => Effect.sync(() => Assert.ok(Exit.isFailure(exit)))));
+  Effect.exit(body).pipe(
+    Effect.tap((exit) => Effect.sync(() => NodeAssert.ok(Exit.isFailure(exit)))),
+  );
 
 function eventsFor(name, workCount, fork) {
   const thread = `thread:${name}`,
@@ -429,250 +434,257 @@ const identity = (rows) =>
     },
   }));
 
-function exercise({ store, apply, transaction, timeline }) {
-  return Effect.gen(function* () {
-    const result = { windows: [], snapshots: [], timelines: [], pages: [], history: [] };
-    for (const [thread, options] of cases)
-      result.windows.push(yield* store.getThreadSnapshotWindow(thread, options));
-    for (const thread of [
-      "thread:main",
-      "thread:child",
-      "thread:grandchild",
-      "thread:long",
-      "thread:edge",
-      "thread:edge-fork",
-    ]) {
-      result.snapshots.push(yield* store.getThreadSnapshot(thread));
-      const timelineRows = yield* timeline(thread);
-      result.timelines.push(identity(timelineRows));
-      result.pages.push(
-        yield* store.getTimelinePage(thread, { view: "activity", limit: 7, afterPosition: 2 }),
-      );
-      result.pages.push(yield* store.getTimelinePage(thread, { view: "conversation", limit: 3 }));
-      result.pages.push(
-        yield* store.getTimelinePage(thread, {
-          view: "activity",
-          limit: 7,
-          attachmentId: "attachment_main",
-        }),
-      );
-      result.pages.push(
-        yield* store.getTimelinePage(thread, {
-          view: "activity",
-          limit: 7,
-          itemId: "item:main:input",
-        }),
-      );
-      const last = timelineRows.at(-1);
-      const cursor = encodeThreadHistoryCursor({
-        snapshotSequence: 0,
-        sourceThreadId: last.sourceThreadId,
-        sourceItemId: last.sourceItemId,
-        position: last.item.ordinal,
-        inclusive: true,
-      });
-      const page = yield* store.getThreadHistoryPage(thread, cursor, undefined, false, undefined);
-      result.history.push(page);
-      if (page.nextCursor !== null)
-        result.history.push(
-          yield* store.getThreadHistoryPage(thread, page.nextCursor, undefined, true, undefined),
-        );
-      const deferred = yield* store.getThreadHistoryPage(
-        thread,
-        cursor,
-        undefined,
-        false,
-        "deferred",
-      );
-      result.history.push(deferred);
-      const workAnchor = deferred.items.find((row) => row.item.deferredWork !== undefined);
-      if (workAnchor !== undefined)
-        result.history.push(
-          yield* store.getThreadHistoryPage(
-            thread,
-            workAnchor.item.deferredWork.cursor,
-            workAnchor.sourceItemId,
-            false,
-            "work",
-          ),
-        );
-    }
-    Assert.ok(
-      result.windows[3].projection.turnItems.some((item) => item.deferredWork?.itemCount > 150),
-      "Completed tool work becomes a deferred cohort",
+const exercise = Effect.fn("checkRedbProjectionWindows.exercise")(function* ({
+  store,
+  apply,
+  transaction,
+  timeline,
+}) {
+  const result = { windows: [], snapshots: [], timelines: [], pages: [], history: [] };
+  for (const [thread, options] of cases)
+    result.windows.push(yield* store.getThreadSnapshotWindow(thread, options));
+  for (const thread of [
+    "thread:main",
+    "thread:child",
+    "thread:grandchild",
+    "thread:long",
+    "thread:edge",
+    "thread:edge-fork",
+  ]) {
+    result.snapshots.push(yield* store.getThreadSnapshot(thread));
+    const timelineRows = yield* timeline(thread);
+    result.timelines.push(identity(timelineRows));
+    result.pages.push(
+      yield* store.getTimelinePage(thread, { view: "activity", limit: 7, afterPosition: 2 }),
     );
-    Assert.ok(
-      result.windows[6].projection.turnItems.some((item) => item.id === "item:interrupt:request"),
-      "Interrupt result retains its earlier request",
-    );
-    Assert.ok(
-      result.windows[16].projection.visibleTurnItems.some(
-        (item) => item.visibility === "synthetic",
-      ),
-      "Zero-row fork windows retain synthetic markers",
-    );
-    for (const event of eventsFor("cutoff-source", 0)) yield* apply(event);
-    const sourceThread = "thread:cutoff-source";
-    const sourceEvent = (type, payload) => makeEvent(type, payload, { threadId: sourceThread });
-    yield* apply(
-      sourceEvent("run.updated", {
-        ...jsonPayloads.run,
-        id: "run:cutoff-source",
-        threadId: sourceThread,
-        ordinal: 1,
-        status: "rolled_back",
-        rootNodeId: "node:cutoff-source",
-        activeAttemptId: "attempt:cutoff-source",
-        userMessageId: "message:cutoff-source",
-        completedAt: "2026-11-10T11:00:00.000Z",
+    result.pages.push(yield* store.getTimelinePage(thread, { view: "conversation", limit: 3 }));
+    result.pages.push(
+      yield* store.getTimelinePage(thread, {
+        view: "activity",
+        limit: 7,
+        attachmentId: "attachment_main",
       }),
     );
-    for (const [name, ordinal, status, attemptStatus, inputIntent] of [
-      ["after", 2, "rolled_back", "rolled_back", "turn_start"],
-      ["undelivered", 3, "rolled_back", "cancelled", "queued_turn"],
-      ["boundary", 4, "completed", "completed", "turn_start"],
-      ["queued", 5, "queued", "pending", "queued_turn"],
-    ]) {
-      const runId = `run:cutoff:${name}`,
-        nodeId = `node:cutoff:${name}`,
-        attemptId = `attempt:cutoff:${name}`,
-        messageId = `message:cutoff:${name}`;
-      yield* apply(
-        sourceEvent("run.created", {
-          ...jsonPayloads.run,
-          id: runId,
-          threadId: sourceThread,
-          ordinal,
-          status,
-          rootNodeId: nodeId,
-          activeAttemptId: attemptId,
-          userMessageId: messageId,
-          completedAt: status === "queued" ? null : "2026-11-10T13:00:00.000Z",
-        }),
+    result.pages.push(
+      yield* store.getTimelinePage(thread, {
+        view: "activity",
+        limit: 7,
+        itemId: "item:main:input",
+      }),
+    );
+    const last = timelineRows.at(-1);
+    const cursor = encodeThreadHistoryCursor({
+      snapshotSequence: 0,
+      sourceThreadId: last.sourceThreadId,
+      sourceItemId: last.sourceItemId,
+      position: last.item.ordinal,
+      inclusive: true,
+    });
+    const page = yield* store.getThreadHistoryPage(thread, cursor, undefined, false, undefined);
+    result.history.push(page);
+    if (page.nextCursor !== null)
+      result.history.push(
+        yield* store.getThreadHistoryPage(thread, page.nextCursor, undefined, true, undefined),
       );
-      yield* apply(
-        sourceEvent("run-attempt.created", {
-          ...jsonPayloads.attempt,
-          id: attemptId,
-          runId,
-          rootNodeId: nodeId,
-          status: attemptStatus,
-        }),
+    const deferred = yield* store.getThreadHistoryPage(
+      thread,
+      cursor,
+      undefined,
+      false,
+      "deferred",
+    );
+    result.history.push(deferred);
+    const workAnchor = deferred.items.find((row) => row.item.deferredWork !== undefined);
+    if (workAnchor !== undefined)
+      result.history.push(
+        yield* store.getThreadHistoryPage(
+          thread,
+          workAnchor.item.deferredWork.cursor,
+          workAnchor.sourceItemId,
+          false,
+          "work",
+        ),
       );
-      yield* apply(
-        sourceEvent("node.updated", {
-          ...jsonPayloads.node,
-          id: nodeId,
-          threadId: sourceThread,
-          runId,
-          rootNodeId: nodeId,
-        }),
-      );
-      yield* apply(
-        sourceEvent("message.updated", {
-          ...jsonPayloads.message,
-          id: messageId,
-          threadId: sourceThread,
-          runId,
-          nodeId,
-          role: "user",
-          createdBy: "user",
-          creationSource: "web",
-        }),
-      );
-      yield* apply(
-        sourceEvent("turn-item.updated", {
-          ...jsonPayloads.turnItem,
-          id: `item:cutoff:${name}`,
-          threadId: sourceThread,
-          runId,
-          nodeId,
-          ordinal: ordinal * 100,
-          type: "user_message",
-          messageId,
-          inputIntent,
-          createdBy: "user",
-          creationSource: "web",
-          attachments: [],
-        }),
-      );
-    }
-    for (const event of eventsFor("cutoff-child", 0, {
-      type: "run",
+  }
+  NodeAssert.ok(
+    result.windows[3].projection.turnItems.some((item) => item.deferredWork?.itemCount > 150),
+    "Completed tool work becomes a deferred cohort",
+  );
+  NodeAssert.ok(
+    result.windows[6].projection.turnItems.some((item) => item.id === "item:interrupt:request"),
+    "Interrupt result retains its earlier request",
+  );
+  NodeAssert.ok(
+    result.windows[16].projection.visibleTurnItems.some((item) => item.visibility === "synthetic"),
+    "Zero-row fork windows retain synthetic markers",
+  );
+  for (const event of eventsFor("cutoff-source", 0)) yield* apply(event);
+  const sourceThread = "thread:cutoff-source";
+  const sourceEvent = (type, payload) => makeEvent(type, payload, { threadId: sourceThread });
+  yield* apply(
+    sourceEvent("run.updated", {
+      ...jsonPayloads.run,
+      id: "run:cutoff-source",
       threadId: sourceThread,
-      runId: "run:cutoff:boundary",
-    }))
-      yield* apply(event);
-    result.cutoffWindow = yield* store.getThreadSnapshotWindow("thread:cutoff-child", {
-      rowLimit: 77,
-      userTurnLimit: 10,
-      deferWork: true,
-    });
-    result.cutoffTimeline = identity(yield* timeline("thread:cutoff-child"));
-    result.cutoffLocal = yield* store.getThreadSnapshotWindow(sourceThread, {
-      rowLimit: 77,
-      userTurnLimit: 10,
-      deferWork: true,
-    });
-    const inheritedIds = result.cutoffWindow.projection.visibleTurnItems.map(
-      (row) => row.sourceItemId,
-    );
-    Assert.ok(
-      inheritedIds.includes("item:cutoff:after"),
-      "A fork keeps the source run rolled back after its creation",
-    );
-    Assert.ok(
-      !inheritedIds.includes("item:cutoff-source:input"),
-      "A fork excludes a run rolled back before its creation",
-    );
-    Assert.ok(
-      !inheritedIds.includes("item:cutoff:undelivered"),
-      "Cancelled queued input stays hidden after rollback in a fork",
-    );
-    Assert.ok(
-      !result.cutoffLocal.projection.turnItems.some((row) => row.id === "item:cutoff:queued"),
-      "Undelivered queued input is absent from local windows",
-    );
-    result.missing = (yield* store
-      .getThreadSnapshotWindow("missing", { rowLimit: 1 })
-      .pipe(Effect.flip))._tag;
-    const change = makeEvent("turn-item.updated", {
-      ...jsonPayloads.turnItem,
-      id: "item:live",
-      ordinal: 2_000_000,
-      text: "Committed native window item",
-    });
-    yield* transaction(
-      Effect.gen(function* () {
-        yield* apply(change);
-        result.inside = yield* store.getThreadSnapshotWindow("thread:main", { rowLimit: 1 });
-        yield* failed(
-          transaction(
-            Effect.gen(function* () {
-              yield* apply(
-                makeEvent("turn-item.updated", {
-                  ...jsonPayloads.turnItem,
-                  id: "item:rolled-back",
-                  ordinal: 3_000_000,
-                }),
-              );
-              return yield* Effect.fail("rollback window metadata and row");
-            }),
-          ),
-        );
-        Assert.deepEqual(
-          normalized(yield* store.getThreadSnapshotWindow("thread:main", { rowLimit: 1 })),
-          normalized(result.inside),
-        );
+      ordinal: 1,
+      status: "rolled_back",
+      rootNodeId: "node:cutoff-source",
+      activeAttemptId: "attempt:cutoff-source",
+      userMessageId: "message:cutoff-source",
+      completedAt: "2026-11-10T11:00:00.000Z",
+    }),
+  );
+  for (const [name, ordinal, status, attemptStatus, inputIntent] of [
+    ["after", 2, "rolled_back", "completed", "turn_start"],
+    ["undelivered", 3, "rolled_back", "cancelled", "queued_turn"],
+    ["boundary", 4, "completed", "completed", "turn_start"],
+    ["queued", 5, "queued", "pending", "queued_turn"],
+  ]) {
+    const runId = `run:cutoff:${name}`,
+      nodeId = `node:cutoff:${name}`,
+      attemptId = `attempt:cutoff:${name}`,
+      messageId = `message:cutoff:${name}`;
+    yield* apply(
+      sourceEvent("run.created", {
+        ...jsonPayloads.run,
+        id: runId,
+        threadId: sourceThread,
+        ordinal,
+        status,
+        rootNodeId: nodeId,
+        activeAttemptId: attemptId,
+        userMessageId: messageId,
+        completedAt: status === "queued" ? null : "2026-11-10T13:00:00.000Z",
       }),
     );
-    result.committed = yield* store.getThreadSnapshotWindow("thread:main", { rowLimit: 1 });
-    return normalized(result);
+    yield* apply(
+      sourceEvent("run-attempt.created", {
+        ...jsonPayloads.attempt,
+        id: attemptId,
+        runId,
+        rootNodeId: nodeId,
+        status: attemptStatus,
+      }),
+    );
+    yield* apply(
+      sourceEvent("node.updated", {
+        ...jsonPayloads.node,
+        id: nodeId,
+        threadId: sourceThread,
+        runId,
+        rootNodeId: nodeId,
+      }),
+    );
+    yield* apply(
+      sourceEvent("message.updated", {
+        ...jsonPayloads.message,
+        id: messageId,
+        threadId: sourceThread,
+        runId,
+        nodeId,
+        role: "user",
+        createdBy: "user",
+        creationSource: "web",
+      }),
+    );
+    yield* apply(
+      sourceEvent("turn-item.updated", {
+        ...jsonPayloads.turnItem,
+        id: `item:cutoff:${name}`,
+        threadId: sourceThread,
+        runId,
+        nodeId,
+        ordinal: ordinal * 100,
+        type: "user_message",
+        messageId,
+        inputIntent,
+        createdBy: "user",
+        creationSource: "web",
+        attachments: [],
+      }),
+    );
+  }
+  for (const event of eventsFor("cutoff-child", 0, {
+    type: "run",
+    threadId: sourceThread,
+    runId: "run:cutoff:boundary",
+  }))
+    yield* apply(event);
+  result.cutoffWindow = yield* store.getThreadSnapshotWindow("thread:cutoff-child", {
+    rowLimit: 77,
+    userTurnLimit: 10,
+    deferWork: true,
   });
-}
+  result.cutoffTimeline = identity(yield* timeline("thread:cutoff-child"));
+  result.cutoffLocal = yield* store.getThreadSnapshotWindow(sourceThread, {
+    rowLimit: 77,
+    userTurnLimit: 10,
+    deferWork: true,
+  });
+  const inheritedIds = result.cutoffWindow.projection.visibleTurnItems.map(
+    (row) => row.sourceItemId,
+  );
+  NodeAssert.ok(
+    inheritedIds.includes("item:cutoff:after"),
+    "A fork keeps the source run rolled back after its creation",
+  );
+  NodeAssert.ok(
+    !inheritedIds.includes("item:cutoff-source:input"),
+    "A fork excludes a run rolled back before its creation",
+  );
+  NodeAssert.ok(
+    !inheritedIds.includes("item:cutoff:undelivered"),
+    "Cancelled queued input stays hidden after rollback in a fork",
+  );
+  NodeAssert.ok(
+    result.cutoffLocal.projection.turnItems.some((row) => row.id === "item:cutoff:queued"),
+    "The latest queued input remains available in canonical state",
+  );
+  NodeAssert.ok(
+    !result.cutoffLocal.projection.visibleTurnItems.some(
+      (row) => row.sourceItemId === "item:cutoff:queued",
+    ),
+    "Undelivered queued input stays hidden from the visible timeline",
+  );
+  result.missing = (yield* store
+    .getThreadSnapshotWindow("missing", { rowLimit: 1 })
+    .pipe(Effect.flip))._tag;
+  const change = makeEvent("turn-item.updated", {
+    ...jsonPayloads.turnItem,
+    id: "item:live",
+    ordinal: 2_000_000,
+    text: "Committed native window item",
+  });
+  yield* transaction(
+    Effect.gen(function* () {
+      yield* apply(change);
+      result.inside = yield* store.getThreadSnapshotWindow("thread:main", { rowLimit: 1 });
+      yield* failed(
+        transaction(
+          Effect.gen(function* () {
+            yield* apply(
+              makeEvent("turn-item.updated", {
+                ...jsonPayloads.turnItem,
+                id: "item:rolled-back",
+                ordinal: 3_000_000,
+              }),
+            );
+            return yield* Effect.fail("rollback window metadata and row");
+          }),
+        ),
+      );
+      NodeAssert.deepEqual(
+        normalized(yield* store.getThreadSnapshotWindow("thread:main", { rowLimit: 1 })),
+        normalized(result.inside),
+      );
+    }),
+  );
+  result.committed = yield* store.getThreadSnapshotWindow("thread:main", { rowLimit: 1 });
+  return normalized(result);
+});
 
 try {
-  const source = Path.join(fixture.root, "source.sqlite");
+  const source = NodePath.join(fixture.root, "source.sqlite");
   await createMigratedSqlite(source, (sql) =>
     Effect.gen(function* () {
       const store = yield* oracle.module.ProjectionStoreV2.pipe(
@@ -811,24 +823,24 @@ try {
       );
     }),
   );
-  const upstream = Path.join(fixture.root, "upstream.sqlite"),
-    retained = Path.join(fixture.root, "retained.sqlite");
-  await FS.copyFile(source, upstream);
-  await FS.copyFile(source, retained);
-  const sourceHash = hash(await FS.readFile(source));
-  const exported = Path.join(fixture.root, "source.ndjson");
+  const upstream = NodePath.join(fixture.root, "upstream.sqlite"),
+    retained = NodePath.join(fixture.root, "retained.sqlite");
+  await NodeFSP.copyFile(source, upstream);
+  await NodeFSP.copyFile(source, retained);
+  const sourceHash = hash(await NodeFSP.readFile(source));
+  const exported = NodePath.join(fixture.root, "source.ndjson");
   exportSqliteState({ source, destination: exported });
   nativeRequest(executable, fixture, "initialize", {
     operation: "import_sqlite_application",
     path: exported,
   });
   const expected = await withServices("upstream", upstream, exercise);
-  Assert.deepEqual(
+  NodeAssert.deepEqual(
     await withServices("sqlite", retained, exercise),
     expected,
     "Shared window/timeline transformations preserve immutable upstream",
   );
-  Assert.deepEqual(
+  NodeAssert.deepEqual(
     await withServices("redb", source, exercise),
     expected,
     "Native indexed windows and fork timelines match immutable upstream",
@@ -844,14 +856,14 @@ try {
   );
   await withServices("redb", source, ({ store }) =>
     Effect.gen(function* () {
-      Assert.deepEqual(
+      NodeAssert.deepEqual(
         normalized(yield* store.getThreadSnapshotWindow("thread:main", { rowLimit: 1 })),
         expected.committed,
       );
     }),
   );
   checks.push("Reopened native windows preserve committed state");
-  Assert.equal(hash(await FS.readFile(source)), sourceHash);
+  NodeAssert.equal(hash(await NodeFSP.readFile(source)), sourceHash);
   await finishProof({
     executable,
     fixture,

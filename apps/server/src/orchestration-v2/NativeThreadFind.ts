@@ -21,7 +21,10 @@ const Payloads = Schema.Array(
   }),
 );
 
-export const makeRows = Effect.gen(function* () {
+const encodeSources = Schema.encodeEffect(Sources);
+const encodeThreadIds = Schema.encodeEffect(ThreadIds);
+
+const makeRows = Effect.gen(function* () {
   const client = yield* RedbClient;
   while (!(yield* client.prepareProjectionReads).prepared) yield* Effect.yieldNow;
   while (!(yield* client.prepareEvents).prepared) yield* Effect.yieldNow;
@@ -33,7 +36,7 @@ export const makeRows = Effect.gen(function* () {
         ActiveThreads,
       ),
     payloads: (sources) =>
-      Schema.encodeEffect(Sources)(sources).pipe(
+      encodeSources(sources).pipe(
         Effect.flatMap((encoded) =>
           client.request(
             "application_thread_find_read",
@@ -48,7 +51,7 @@ export const makeRows = Effect.gen(function* () {
         ),
       ),
     revision: (threadIds) =>
-      Schema.encodeEffect(ThreadIds)(threadIds).pipe(
+      encodeThreadIds(threadIds).pipe(
         Effect.flatMap((ids) =>
           client.request(
             "application_thread_find_read",

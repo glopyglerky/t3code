@@ -13,6 +13,8 @@
         ".coderabbit.config.ts",
         ".github/scripts/thread-transfer-report.cjs",
         ".github/scripts/pr-limits.cjs",
+        // Retained upstream release CLI; the fork does not import release workflows.
+        ".github/scripts/mirror-play-apk.cjs",
       ],
       "vite": { "entry": [".github/**/*.test.cjs"] },
       "vitest": { "entry": [".github/**/*.test.cjs"] },
@@ -39,6 +41,9 @@
         "setup-worktree.ts",
         "sign-macos.ts",
         "prepare-server-compile-cache.cjs",
+        // Called through a process command or retained for upstream archive qualification.
+        "resolve-nightly-release.ts",
+        "smoke-cli-archive.ts",
         "smoke-desktop-app.ts",
         "verify-windows-desktop-artifact.ts",
       ],
@@ -59,11 +64,11 @@
         "scripts/update-test-shard-weights.ts",
         "scripts/verify-background-live.ts",
         "src/provider/testFixtures/*.mjs",
-        // CI qualifies native storage adapters before production storage selects them.
-        "../../tools/check-native-database.mjs",
-        "../../tools/check-native-outbox-worker.mjs",
-        "../../tools/check-maintenance-adapter.mjs",
-        "../../tools/check-generation-adapter.mjs",
+        // Fork CI starts acceptance programs by path and compiles these contract
+        // checks directly. Their imports exercise native factories and retained
+        // SQLite adapters even when the selected production layer differs.
+        "../../tools/check-*.mjs",
+        "../../tools/*-types.ts",
         // graphqlgen reads its config.
         "graphql.config.ts",
       ],
@@ -106,7 +111,12 @@
     "apps/web": {
       // Worktree setup (scripts/setup-worktree.ts) runs this directly, and evidence
       // fixtures run under node.
-      "entry": ["scripts/warm-dep-cache.ts", "test/fixtures/**/*.mjs"],
+      "entry": [
+        "scripts/warm-dep-cache.ts",
+        // Retained built-client verification command; pristine upstream is trusted in fork CI.
+        "scripts/verify-built-boot.ts",
+        "test/fixtures/**/*.mjs",
+      ],
       // UI component modules are copied and adapted as cohesive sets. Keep their
       // named subcomponents even before they have callers; the file audit still
       // reports an entire component module when nothing imports it.

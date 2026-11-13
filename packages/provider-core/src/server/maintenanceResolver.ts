@@ -199,6 +199,7 @@ export function makeTargetedProviderUpdateAction(
 // pnpm 11 resolves `@latest` to the newest release older than `minimumReleaseAge`
 // and exits 0, so a release advertised from the npm dist-tag would never install.
 // An exact spec installs it and pnpm records it in `minimumReleaseAgeExclude`.
+/** @public Kept available to immutable maintenance source-extraction fixtures. */
 export function resolveLatestProviderUpdateAction(
   capabilities: ProviderMaintenanceCapabilities,
   latestVersion: string | null,

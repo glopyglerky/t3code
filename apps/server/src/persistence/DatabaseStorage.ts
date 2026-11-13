@@ -42,7 +42,7 @@ export const ServerRestart = Context.Reference<Effect.Effect<void> | null>(
 
 const formatGiB = (bytes: number) => `${(bytes / 1024 ** 3).toFixed(1)} GiB`;
 
-export const makeWithBackend = Effect.gen(function* () {
+const makeWithBackend = Effect.gen(function* () {
   const storage = yield* DatabaseStorageBackend;
   const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
   const config = yield* ServerConfig.ServerConfig;

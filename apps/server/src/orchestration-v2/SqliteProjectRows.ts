@@ -6,7 +6,7 @@ import * as SqlSchema from "effect/sql/SqlSchema";
 
 import { ProjectRecord, ProjectRows, ProjectSelection, toProjectRowsError } from "./ProjectRows.ts";
 
-export const make = Effect.gen(function* () {
+const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const selectRows = SqlSchema.findAll({
     Request: ProjectSelection,
@@ -33,15 +33,23 @@ export const make = Effect.gen(function* () {
         ...(request.includeDeleted ? [] : [sql`deleted_at IS NULL`]),
         ...(request.projectId === undefined ? [] : [sql`project_id = ${request.projectId}`]),
         ...(request.projectIds === undefined ? [] : [sql.in("project_id", request.projectIds)]),
-        ...(request.workspaceRoot === undefined ? [] : [sql`workspace_root = ${request.workspaceRoot}`]),
+        ...(request.workspaceRoot === undefined
+          ? []
+          : [sql`workspace_root = ${request.workspaceRoot}`]),
       ])}
       ORDER BY created_at ASC, project_id ASC
     `,
   });
 
   return ProjectRows.of({
-    select: Effect.fn("ProjectRows.select")((input) => selectRows(input).pipe(NodeSqliteClient.readOnly, Effect.mapError(toProjectRowsError("select")))),
-    upsert: Effect.fn("ProjectRows.upsert")((encoded) => sql`
+    select: Effect.fn("ProjectRows.select")((input) =>
+      selectRows(input).pipe(
+        NodeSqliteClient.readOnly,
+        Effect.mapError(toProjectRowsError("select")),
+      ),
+    ),
+    upsert: Effect.fn("ProjectRows.upsert")((encoded) =>
+      sql`
       INSERT INTO projection_projects (
         project_id, title, has_custom_title, workspace_root, default_model_selection_json, default_thread_env_mode,
         auto_pull, favicon_path, project_icon_json, scripts_json, pinned_at, archived_at,
@@ -70,7 +78,8 @@ export const make = Effect.gen(function* () {
         created_at = excluded.created_at,
         updated_at = excluded.updated_at,
         deleted_at = excluded.deleted_at
-    `.pipe(Effect.asVoid, Effect.mapError(toProjectRowsError("upsert")))),
+    `.pipe(Effect.asVoid, Effect.mapError(toProjectRowsError("upsert"))),
+    ),
   });
 });
 

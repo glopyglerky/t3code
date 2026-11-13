@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-import * as Assert from "node:assert/strict";
-import * as ChildProcess from "node:child_process";
-import * as Crypto from "node:crypto";
-import * as FS from "node:fs/promises";
-import * as Path from "node:path";
-import * as Sqlite from "node:sqlite";
+import * as NodeAssert from "node:assert/strict";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeCrypto from "node:crypto";
+import * as NodeFSP from "node:fs/promises";
+import * as NodePath from "node:path";
+import * as NodeSqlite from "node:sqlite";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as Context from "effect/Context";
@@ -30,13 +30,16 @@ import { createFixture } from "./database-fixture.mjs";
 import { exportSqliteState } from "./export-sqlite-state.mjs";
 
 const [executable, proofPath] = process.argv.slice(2);
-Assert.ok(executable && Path.isAbsolute(executable), "Pass an absolute database executable");
-await FS.access(executable, FS.constants.X_OK);
+NodeAssert.ok(
+  executable && NodePath.isAbsolute(executable),
+  "Pass an absolute database executable",
+);
+await NodeFSP.access(executable, NodeFSP.constants.X_OK);
 const now = Date.parse("2026-11-10T12:00:00.000Z");
 const day = 86_400_000;
 const iso = (offset = 0) => new Date(now + offset).toISOString();
 const fixed = (offset, effect) => at(iso(offset), effect);
-const hash = (bytes) => Crypto.createHash("sha256").update(bytes).digest("hex");
+const hash = (bytes) => NodeCrypto.createHash("sha256").update(bytes).digest("hex");
 const normalized = (value) => JSON.parse(JSON.stringify(value));
 const checks = [];
 const table = "orchestration_v2_effect_outbox";
@@ -113,10 +116,10 @@ const requests = [
     },
   },
 ];
-Assert.equal(requests.length, 16);
+NodeAssert.equal(requests.length, 16);
 
 function createSource(filename, seed = true) {
-  const database = new Sqlite.DatabaseSync(filename);
+  const database = new NodeSqlite.DatabaseSync(filename);
   try {
     database.exec(`CREATE TABLE ${table} (
       effect_id TEXT PRIMARY KEY, command_id TEXT NOT NULL, thread_id TEXT NOT NULL,
@@ -176,16 +179,16 @@ function createSource(filename, seed = true) {
 }
 
 function cli(fixture, mode, input) {
-  const executed = ChildProcess.spawnSync(executable, fixture.cliArgs(mode), {
+  const executed = NodeChildProcess.spawnSync(executable, fixture.cliArgs(mode), {
     input: JSON.stringify(input) + "\n",
     encoding: "utf8",
     env: {},
     timeout: 45_000,
   });
-  Assert.ifError(executed.error);
-  Assert.equal(executed.status, 0, executed.stderr);
+  NodeAssert.ifError(executed.error);
+  NodeAssert.equal(executed.status, 0, executed.stderr);
   const response = JSON.parse(executed.stdout);
-  Assert.equal(response.ok, true, JSON.stringify(response));
+  NodeAssert.equal(response.ok, true, JSON.stringify(response));
   return response.result;
 }
 
@@ -357,166 +360,174 @@ async function withBackend(kind, fixture, source, use, faults) {
 }
 
 function requireSome(value) {
-  Assert.ok(Option.isSome(value));
+  NodeAssert.ok(Option.isSome(value));
   return value.value;
 }
 
-const exercise = ({ outbox, transaction, snapshot, putOther, getOther }) =>
-  Effect.gen(function* () {
-    const observed = {};
-    const sourceRows = yield* snapshot;
-    observed.importedRaw = sourceRows.map(({ effect_id, payload_json, lease_expires_at }) => ({
-      effect_id,
-      payload_json,
-      lease_expires_at,
-    }));
-    observed.matrix = yield* outbox.listByCommandId("command:matrix");
-    Assert.equal(observed.matrix.length, 80);
-    Assert.ok(Option.isNone(yield* outbox.get("missing")));
-    yield* outbox.awaitSettled("missing");
-    Assert.ok(Option.isNone(yield* fixed(0, outbox.claimNext({ workerId: "worker" }))));
-    Assert.equal(DateTime.formatIso(requireSome(yield* outbox.nextClaimableAt())), iso(100));
-    observed.importedFirst = requireSome(
-      yield* fixed(100, outbox.claimNext({ workerId: "worker" })),
-    );
-    Assert.equal(observed.importedFirst.id, "z-imported");
-    Assert.equal(
-      yield* fixed(101, outbox.succeed({ effectId: "z-imported", workerId: "worker" })),
-      true,
-    );
-    observed.importedSecond = requireSome(
-      yield* fixed(102, outbox.claimNext({ workerId: "worker" })),
-    );
-    Assert.equal(observed.importedSecond.id, "a-imported");
-    Assert.equal(
-      yield* fixed(
-        103,
-        outbox.fail({
-          effectId: "a-imported",
-          workerId: "worker",
-          error: "preserve failed source",
-        }),
-      ),
-      true,
-    );
-    yield* outbox.awaitAvailable;
-    yield* outbox.awaitAvailable;
+const exercise = Effect.fn("checkRedbApplicationOutbox.exercise")(function* ({
+  outbox,
+  transaction,
+  snapshot,
+  putOther,
+  getOther,
+}) {
+  const observed = {};
+  const sourceRows = yield* snapshot;
+  observed.importedRaw = sourceRows.map(({ effect_id, payload_json, lease_expires_at }) => ({
+    effect_id,
+    payload_json,
+    lease_expires_at,
+  }));
+  observed.matrix = yield* outbox.listByCommandId("command:matrix");
+  NodeAssert.equal(observed.matrix.length, 80);
+  NodeAssert.ok(Option.isNone(yield* outbox.get("missing")));
+  yield* outbox.awaitSettled("missing");
+  NodeAssert.ok(Option.isNone(yield* fixed(0, outbox.claimNext({ workerId: "worker" }))));
+  NodeAssert.equal(DateTime.formatIso(requireSome(yield* outbox.nextClaimableAt())), iso(100));
+  observed.importedFirst = requireSome(yield* fixed(100, outbox.claimNext({ workerId: "worker" })));
+  NodeAssert.equal(observed.importedFirst.id, "z-imported");
+  NodeAssert.equal(
+    yield* fixed(101, outbox.succeed({ effectId: "z-imported", workerId: "worker" })),
+    true,
+  );
+  observed.importedSecond = requireSome(
+    yield* fixed(102, outbox.claimNext({ workerId: "worker" })),
+  );
+  NodeAssert.equal(observed.importedSecond.id, "a-imported");
+  NodeAssert.equal(
+    yield* fixed(
+      103,
+      outbox.fail({
+        effectId: "a-imported",
+        workerId: "worker",
+        error: "preserve failed source",
+      }),
+    ),
+    true,
+  );
+  yield* outbox.awaitAvailable;
+  yield* outbox.awaitAvailable;
 
-    const rollback = yield* fixed(
-      0,
-      transaction(
-        Effect.gen(function* () {
-          yield* putOther("rollback", "must disappear");
-          yield* outbox.enqueue([pending("rollback")]);
-          return yield* Effect.fail("rollback fixture");
-        }),
-      ),
-    ).pipe(Effect.exit);
-    Assert.ok(Exit.isFailure(rollback));
-    Assert.equal(yield* getOther("rollback"), null);
-    Assert.ok(Option.isNone(yield* outbox.get("rollback")));
-    const waiter = yield* outbox.awaitAvailable.pipe(Effect.forkChild);
-    yield* Effect.yieldNow;
+  const rollback = yield* fixed(
+    0,
+    transaction(
+      Effect.gen(function* () {
+        yield* putOther("rollback", "must disappear");
+        yield* outbox.enqueue([pending("rollback")]);
+        return yield* Effect.fail("rollback fixture");
+      }),
+    ),
+  ).pipe(Effect.exit);
+  NodeAssert.ok(Exit.isFailure(rollback));
+  NodeAssert.equal(yield* getOther("rollback"), null);
+  NodeAssert.ok(Option.isNone(yield* outbox.get("rollback")));
+  const waiter = yield* outbox.awaitAvailable.pipe(Effect.forkChild);
+  yield* Effect.yieldNow;
+  yield* fixed(
+    0,
+    transaction(
+      Effect.gen(function* () {
+        yield* putOther("committed", "with outbox");
+        yield* outbox.enqueue([
+          pending("z-first", "thread:flow", cleanup, iso(100)),
+          pending("a-second", "thread:flow"),
+          pending("title", "thread:flow", {
+            type: "thread-title.generate",
+            kind: { type: "regenerate" },
+          }),
+        ]);
+        yield* transaction(
+          outbox
+            .enqueue([pending("savepoint-discarded")])
+            .pipe(Effect.andThen(Effect.fail("inner"))),
+        ).pipe(Effect.catch(() => Effect.void));
+        NodeAssert.ok(Option.isNone(yield* outbox.get("savepoint-discarded")));
+      }),
+    ),
+  );
+  NodeAssert.equal(yield* getOther("committed"), "with outbox");
+  NodeAssert.equal(
+    waiter.pollUnsafe(),
+    undefined,
+    "enqueue must not notify workers before EventSink asks",
+  );
+  yield* outbox.notifyAvailable();
+  yield* Fiber.join(waiter);
+  observed.title = requireSome(yield* fixed(0, outbox.claimNext({ workerId: "worker" })));
+  NodeAssert.equal(observed.title.id, "title");
+  NodeAssert.equal(
+    yield* fixed(0, outbox.succeed({ effectId: "title", workerId: "wrong" })),
+    false,
+  );
+  NodeAssert.equal(
     yield* fixed(
       0,
-      transaction(
-        Effect.gen(function* () {
-          yield* putOther("committed", "with outbox");
-          yield* outbox.enqueue([
-            pending("z-first", "thread:flow", cleanup, iso(100)),
-            pending("a-second", "thread:flow"),
-            pending("title", "thread:flow", {
-              type: "thread-title.generate",
-              kind: { type: "regenerate" },
-            }),
-          ]);
-          yield* transaction(
-            outbox
-              .enqueue([pending("savepoint-discarded")])
-              .pipe(Effect.andThen(Effect.fail("inner"))),
-          ).pipe(Effect.catch(() => Effect.void));
-          Assert.ok(Option.isNone(yield* outbox.get("savepoint-discarded")));
-        }),
-      ),
-    );
-    Assert.equal(yield* getOther("committed"), "with outbox");
-    Assert.equal(
-      waiter.pollUnsafe(),
-      undefined,
-      "enqueue must not notify workers before EventSink asks",
-    );
-    yield* outbox.notifyAvailable();
-    yield* Fiber.join(waiter);
-    observed.title = requireSome(yield* fixed(0, outbox.claimNext({ workerId: "worker" })));
-    Assert.equal(observed.title.id, "title");
-    Assert.equal(yield* fixed(0, outbox.succeed({ effectId: "title", workerId: "wrong" })), false);
-    Assert.equal(
-      yield* fixed(
-        0,
-        outbox.retry({ effectId: "title", workerId: "worker", error: "retry", delayMs: -1 }),
-      ),
-      true,
-    );
-    observed.titleRetry = requireSome(yield* fixed(0, outbox.claimNext({ workerId: "worker" })));
-    Assert.equal(observed.titleRetry.attemptCount, 2);
-    Assert.equal(yield* fixed(0, outbox.succeed({ effectId: "title", workerId: "worker" })), true);
-    Assert.ok(Option.isNone(yield* fixed(0, outbox.claimNext({ workerId: "worker" }))));
-    observed.first = requireSome(yield* fixed(100, outbox.claimNext({ workerId: "worker" })));
-    Assert.equal(observed.first.id, "z-first");
-    Assert.ok(Option.isNone(yield* fixed(100, outbox.claimNext({ workerId: "worker" }))));
-    const cancelled = yield* outbox.awaitCancellation("z-first").pipe(Effect.forkChild);
-    const settled = yield* outbox.awaitSettled("z-first").pipe(Effect.forkChild);
-    yield* Effect.yieldNow;
-    const cancel = outbox.cancelUnsettled({
-      threadId: "thread:flow",
-      effectTypes: ["terminal.cleanup"],
-      reason: "cancel fixture",
-    });
-    yield* fixed(
-      100,
-      transaction(cancel.pipe(Effect.andThen(Effect.fail("cancel rollback")))),
-    ).pipe(Effect.catch(() => Effect.void));
-    Assert.equal(requireSome(yield* outbox.get("z-first")).status, "running");
-    Assert.equal(cancelled.pollUnsafe(), undefined);
-    observed.cancelled = yield* fixed(100, transaction(cancel));
-    Assert.deepEqual(observed.cancelled, ["z-first", "a-second"]);
-    Assert.equal(cancelled.pollUnsafe(), undefined, "cancellation is signaled only after commit");
-    yield* outbox.signalCancellations(observed.cancelled);
-    yield* Fiber.join(cancelled);
-    yield* Fiber.join(settled);
-    yield* outbox.clearCancellation("z-first");
-    const nextCancellation = yield* outbox.awaitCancellation("z-first").pipe(Effect.forkChild);
-    yield* Effect.yieldNow;
-    Assert.equal(nextCancellation.pollUnsafe(), undefined);
-    yield* outbox.signalCancellations(["z-first"]);
-    yield* Fiber.join(nextCancellation);
-    yield* fixed(0, outbox.enqueue([pending("z-first", "different-thread")]));
-    Assert.equal(requireSome(yield* outbox.get("z-first")).threadId, "thread:flow");
-
-    observed.reconciled = yield* fixed(2 * day, outbox.reconcileAfterProcessLoss);
-    Assert.deepEqual(observed.reconciled, { requeued: 10, cancelled: 12 });
-    const afterReconcile = yield* snapshot;
-    for (const original of sourceRows) {
-      const actual = afterReconcile.find((row) => row.effect_id === original.effect_id);
-      Assert.equal(actual.payload_json, original.payload_json);
-      Assert.equal(actual.lease_expires_at, original.lease_expires_at);
-    }
-    observed.afterReconcile = afterReconcile.map((row) => ({
-      ...row,
-      payload_json: JSON.parse(row.payload_json),
-    }));
-    observed.pruned = yield* fixed(10 * day, outbox.pruneSettled);
-    Assert.ok(observed.pruned > 500, "prune must finish multiple batches");
-    Assert.equal(requireSome(yield* outbox.get("a-imported")).status, "failed");
-    observed.finalRows = yield* snapshot;
-    return normalized(observed);
+      outbox.retry({ effectId: "title", workerId: "worker", error: "retry", delayMs: -1 }),
+    ),
+    true,
+  );
+  observed.titleRetry = requireSome(yield* fixed(0, outbox.claimNext({ workerId: "worker" })));
+  NodeAssert.equal(observed.titleRetry.attemptCount, 2);
+  NodeAssert.equal(
+    yield* fixed(0, outbox.succeed({ effectId: "title", workerId: "worker" })),
+    true,
+  );
+  NodeAssert.ok(Option.isNone(yield* fixed(0, outbox.claimNext({ workerId: "worker" }))));
+  observed.first = requireSome(yield* fixed(100, outbox.claimNext({ workerId: "worker" })));
+  NodeAssert.equal(observed.first.id, "z-first");
+  NodeAssert.ok(Option.isNone(yield* fixed(100, outbox.claimNext({ workerId: "worker" }))));
+  const cancelled = yield* outbox.awaitCancellation("z-first").pipe(Effect.forkChild);
+  const settled = yield* outbox.awaitSettled("z-first").pipe(Effect.forkChild);
+  yield* Effect.yieldNow;
+  const cancel = outbox.cancelUnsettled({
+    threadId: "thread:flow",
+    effectTypes: ["terminal.cleanup"],
+    reason: "cancel fixture",
   });
+  yield* fixed(100, transaction(cancel.pipe(Effect.andThen(Effect.fail("cancel rollback"))))).pipe(
+    Effect.catch(() => Effect.void),
+  );
+  NodeAssert.equal(requireSome(yield* outbox.get("z-first")).status, "running");
+  NodeAssert.equal(cancelled.pollUnsafe(), undefined);
+  observed.cancelled = yield* fixed(100, transaction(cancel));
+  NodeAssert.deepEqual(observed.cancelled, ["z-first", "a-second"]);
+  NodeAssert.equal(cancelled.pollUnsafe(), undefined, "cancellation is signaled only after commit");
+  yield* outbox.signalCancellations(observed.cancelled);
+  yield* Fiber.join(cancelled);
+  yield* Fiber.join(settled);
+  yield* outbox.clearCancellation("z-first");
+  const nextCancellation = yield* outbox.awaitCancellation("z-first").pipe(Effect.forkChild);
+  yield* Effect.yieldNow;
+  NodeAssert.equal(nextCancellation.pollUnsafe(), undefined);
+  yield* outbox.signalCancellations(["z-first"]);
+  yield* Fiber.join(nextCancellation);
+  yield* fixed(0, outbox.enqueue([pending("z-first", "different-thread")]));
+  NodeAssert.equal(requireSome(yield* outbox.get("z-first")).threadId, "thread:flow");
+
+  observed.reconciled = yield* fixed(2 * day, outbox.reconcileAfterProcessLoss);
+  NodeAssert.deepEqual(observed.reconciled, { requeued: 10, cancelled: 12 });
+  const afterReconcile = yield* snapshot;
+  for (const original of sourceRows) {
+    const actual = afterReconcile.find((row) => row.effect_id === original.effect_id);
+    NodeAssert.equal(actual.payload_json, original.payload_json);
+    NodeAssert.equal(actual.lease_expires_at, original.lease_expires_at);
+  }
+  observed.afterReconcile = afterReconcile.map((row) => ({
+    ...row,
+    payload_json: JSON.parse(row.payload_json),
+  }));
+  observed.pruned = yield* fixed(10 * day, outbox.pruneSettled);
+  NodeAssert.ok(observed.pruned > 500, "prune must finish multiple batches");
+  NodeAssert.equal(requireSome(yield* outbox.get("a-imported")).status, "failed");
+  observed.finalRows = yield* snapshot;
+  return normalized(observed);
+});
 
 async function emptyFixture(run) {
   const fixture = await createFixture();
   try {
-    const source = Path.join(fixture.root, "source.sqlite");
-    const exported = Path.join(fixture.root, "source.ndjson");
+    const source = NodePath.join(fixture.root, "source.sqlite");
+    const exported = NodePath.join(fixture.root, "source.ndjson");
     createSource(source, false);
     exportSqliteState({ source, destination: exported });
     cli(fixture, "initialize", { operation: "import_sqlite_application", path: exported });
@@ -528,36 +539,36 @@ async function emptyFixture(run) {
 
 const fixture = await createFixture();
 try {
-  const source = Path.join(fixture.root, "source.sqlite");
-  const oracle = Path.join(fixture.root, "oracle.sqlite");
-  const exported = Path.join(fixture.root, "source.ndjson");
+  const source = NodePath.join(fixture.root, "source.sqlite");
+  const oracle = NodePath.join(fixture.root, "oracle.sqlite");
+  const exported = NodePath.join(fixture.root, "source.ndjson");
   createSource(source);
-  const sourceHash = hash(await FS.readFile(source));
-  await FS.copyFile(source, oracle);
+  const sourceHash = hash(await NodeFSP.readFile(source));
+  await NodeFSP.copyFile(source, oracle);
   exportSqliteState({ source, destination: exported });
   cli(fixture, "initialize", { operation: "import_sqlite_application", path: exported });
   const expected = await withBackend("sqlite", fixture, oracle, exercise);
   const actual = await withBackend("redb", fixture, source, exercise);
-  Assert.deepEqual(
+  NodeAssert.deepEqual(
     actual,
     expected,
     "The complete application outbox must match immutable upstream SQLite",
   );
   checks.push(
     "All 17 service members execute against immutable upstream SQLite and the real application-row outbox",
-    "All 15 effect types and five lifecycle statuses retain decoded requests and raw imported payload/lease cells",
+    `All ${requests.length} effect types and five lifecycle statuses retain decoded requests and raw imported payload/lease cells`,
     "Imported FIFO order is independent of IDs; title lanes, retry backoff, owner checks and process-loss policies agree",
     "Enqueue and cancellation share other application writes, savepoints and rollback; notifications remain explicit after commit",
     "Pruning spans more than 500 rows and retains failed effects",
   );
   const reopened = await withBackend("redb", fixture, source, ({ outbox, snapshot }) =>
     Effect.gen(function* () {
-      Assert.equal(requireSome(yield* outbox.get("a-imported")).status, "failed");
+      NodeAssert.equal(requireSome(yield* outbox.get("a-imported")).status, "failed");
       return yield* snapshot;
     }),
   );
-  Assert.deepEqual(reopened, expected.finalRows);
-  Assert.equal(hash(await FS.readFile(source)), sourceHash);
+  NodeAssert.deepEqual(reopened, expected.finalRows);
+  NodeAssert.equal(hash(await NodeFSP.readFile(source)), sourceHash);
   checks.push("Reopening preserves committed application rows without altering the SQLite source");
 
   const faultProof = await emptyFixture((target, source) => {
@@ -570,12 +581,12 @@ try {
         Effect.gen(function* () {
           yield* fixed(0, outbox.enqueue([pending("uncertain-commit")]));
           const recovered = requireSome(yield* fixed(0, outbox.claimNext({ workerId: "worker" })));
-          Assert.equal(recovered.attemptCount, 1);
-          Assert.equal(faults.discardedCommits, 1);
-          Assert.equal(faults.claims.length, 2);
-          Assert.equal(faults.claims[0].stream_id, faults.claims[1].stream_id);
-          Assert.equal(faults.claims[0].sequence, faults.claims[1].sequence);
-          Assert.notEqual(faults.claims[0].transaction_id, faults.claims[1].transaction_id);
+          NodeAssert.equal(recovered.attemptCount, 1);
+          NodeAssert.equal(faults.discardedCommits, 1);
+          NodeAssert.equal(faults.claims.length, 2);
+          NodeAssert.equal(faults.claims[0].stream_id, faults.claims[1].stream_id);
+          NodeAssert.equal(faults.claims[0].sequence, faults.claims[1].sequence);
+          NodeAssert.notEqual(faults.claims[0].transaction_id, faults.claims[1].transaction_id);
           yield* fixed(0, outbox.succeed({ effectId: recovered.id, workerId: "worker" }));
           yield* fixed(0, outbox.enqueue([pending("uncertain-shared")]));
           faults.dropStage = 1;
@@ -589,19 +600,19 @@ try {
               }),
             ),
           ).pipe(Effect.exit);
-          Assert.ok(Exit.isFailure(failed));
-          Assert.equal(
+          NodeAssert.ok(Exit.isFailure(failed));
+          NodeAssert.equal(
             faults.claims.length,
             before + 1,
             "A shared uncertain scope must not retry its claim",
           );
-          Assert.equal(yield* getOther("uncertain-owner"), null);
-          Assert.equal(requireSome(yield* outbox.get("uncertain-shared")).attemptCount, 0);
+          NodeAssert.equal(yield* getOther("uncertain-owner"), null);
+          NodeAssert.equal(requireSome(yield* outbox.get("uncertain-shared")).attemptCount, 0);
           const after = requireSome(
             yield* fixed(0, outbox.claimNext({ workerId: "shared-worker" })),
           );
-          Assert.equal(after.id, "uncertain-shared");
-          Assert.equal(after.attemptCount, 1);
+          NodeAssert.equal(after.id, "uncertain-shared");
+          NodeAssert.equal(after.attemptCount, 1);
           yield* fixed(0, outbox.succeed({ effectId: after.id, workerId: "shared-worker" }));
           yield* fixed(0, outbox.enqueue([pending("successful-shared")]));
           const rolledBack = yield* fixed(
@@ -609,19 +620,19 @@ try {
             transaction(
               outbox.claimNext({ workerId: "rollback-worker" }).pipe(
                 Effect.tap((claimed) =>
-                  Effect.sync(() => Assert.equal(requireSome(claimed).id, "successful-shared")),
+                  Effect.sync(() => NodeAssert.equal(requireSome(claimed).id, "successful-shared")),
                 ),
                 Effect.andThen(Effect.fail("owner rollback after successful claim")),
               ),
             ),
           ).pipe(Effect.exit);
-          Assert.ok(Exit.isFailure(rolledBack));
-          Assert.equal(requireSome(yield* outbox.get("successful-shared")).attemptCount, 0);
+          NodeAssert.ok(Exit.isFailure(rolledBack));
+          NodeAssert.equal(requireSome(yield* outbox.get("successful-shared")).attemptCount, 0);
           const reclaimed = requireSome(
             yield* fixed(0, outbox.claimNext({ workerId: "rollback-worker" })),
           );
-          Assert.equal(reclaimed.id, "successful-shared");
-          Assert.equal(reclaimed.attemptCount, 1);
+          NodeAssert.equal(reclaimed.id, "successful-shared");
+          NodeAssert.equal(reclaimed.attemptCount, 1);
           yield* fixed(0, outbox.succeed({ effectId: reclaimed.id, workerId: "rollback-worker" }));
           yield* fixed(0, outbox.enqueue([pending("successful-savepoint")]));
           yield* fixed(
@@ -633,7 +644,7 @@ try {
                     .claimNext({ workerId: "savepoint-worker" })
                     .pipe(Effect.andThen(Effect.fail("savepoint rollback after successful claim"))),
                 ).pipe(Effect.catch(() => Effect.void));
-                Assert.equal(
+                NodeAssert.equal(
                   requireSome(yield* outbox.get("successful-savepoint")).attemptCount,
                   0,
                 );
@@ -643,8 +654,8 @@ try {
           const savepointReclaimed = requireSome(
             yield* fixed(0, outbox.claimNext({ workerId: "savepoint-worker" })),
           );
-          Assert.equal(savepointReclaimed.id, "successful-savepoint");
-          Assert.equal(savepointReclaimed.attemptCount, 1);
+          NodeAssert.equal(savepointReclaimed.id, "successful-savepoint");
+          NodeAssert.equal(savepointReclaimed.attemptCount, 1);
           yield* fixed(
             0,
             outbox.succeed({ effectId: savepointReclaimed.id, workerId: "savepoint-worker" }),
@@ -659,16 +670,16 @@ try {
                 const caught = yield* outbox
                   .claimNext({ workerId: "corrupt-worker" })
                   .pipe(Effect.exit);
-                Assert.ok(Exit.isFailure(caught));
+                NodeAssert.ok(Exit.isFailure(caught));
               }),
             ),
           ).pipe(Effect.exit);
-          Assert.ok(
+          NodeAssert.ok(
             Exit.isFailure(corrupted),
             "Catching a bad claim acknowledgement cannot commit its shared owner",
           );
-          Assert.equal(yield* getOther("corrupt-ack-owner"), null);
-          Assert.equal(requireSome(yield* outbox.get("corrupt-shared-ack")).attemptCount, 0);
+          NodeAssert.equal(yield* getOther("corrupt-ack-owner"), null);
+          NodeAssert.equal(requireSome(yield* outbox.get("corrupt-shared-ack")).attemptCount, 0);
           for (const [operation, read] of [
             ["application_outbox_get", outbox.get("corrupt-shared-ack")],
             ["application_outbox_list", outbox.listByCommandId("command:flow")],
@@ -678,14 +689,14 @@ try {
                 yield* putOther(operation, "must roll back");
                 faults.corruptRead = operation;
                 const caught = yield* read.pipe(Effect.exit);
-                Assert.ok(Exit.isFailure(caught));
+                NodeAssert.ok(Exit.isFailure(caught));
               }),
             ).pipe(Effect.exit);
-            Assert.ok(
+            NodeAssert.ok(
               Exit.isFailure(badRead),
               "Catching an identity-mismatched read cannot commit its shared owner",
             );
-            Assert.equal(yield* getOther(operation), null);
+            NodeAssert.equal(yield* getOther(operation), null);
           }
           return { discardedCommits: faults.discardedCommits, claimFrames: faults.claims.length };
         }),
@@ -703,7 +714,7 @@ try {
     withBackend("redb", target, source, ({ outbox, transaction }) =>
       Effect.gen(function* () {
         yield* fixed(0, outbox.enqueue([pending("settle-publication")]));
-        Assert.equal(
+        NodeAssert.equal(
           requireSome(yield* fixed(0, outbox.claimNext({ workerId: "publication-worker" }))).id,
           "settle-publication",
         );
@@ -715,7 +726,7 @@ try {
             0,
             transaction(
               Effect.gen(function* () {
-                Assert.equal(
+                NodeAssert.equal(
                   yield* outbox[operation]({
                     effectId: "settle-publication",
                     workerId: "publication-worker",
@@ -728,16 +739,16 @@ try {
                 // waiter belonging to another fiber before the owner commits.
                 if (operation !== "retry") yield* outbox.awaitSettled("settle-publication");
                 yield* Effect.yieldNow;
-                Assert.equal(settled.pollUnsafe(), undefined);
-                Assert.equal(available.pollUnsafe(), undefined);
+                NodeAssert.equal(settled.pollUnsafe(), undefined);
+                NodeAssert.equal(available.pollUnsafe(), undefined);
                 return yield* Effect.fail("discard settlement publication");
               }),
             ),
           ).pipe(Effect.exit);
-          Assert.ok(Exit.isFailure(failed));
-          Assert.equal(requireSome(yield* outbox.get("settle-publication")).status, "running");
-          Assert.equal(settled.pollUnsafe(), undefined);
-          Assert.equal(available.pollUnsafe(), undefined);
+          NodeAssert.ok(Exit.isFailure(failed));
+          NodeAssert.equal(requireSome(yield* outbox.get("settle-publication")).status, "running");
+          NodeAssert.equal(settled.pollUnsafe(), undefined);
+          NodeAssert.equal(available.pollUnsafe(), undefined);
         }
         yield* fixed(
           0,
@@ -753,29 +764,29 @@ try {
                   .pipe(Effect.andThen(Effect.fail("discard child publication"))),
               ).pipe(Effect.catch(() => Effect.void));
               yield* outbox.notifyAvailable();
-              Assert.equal(available.pollUnsafe(), undefined);
+              NodeAssert.equal(available.pollUnsafe(), undefined);
             }),
           ),
         );
         yield* Fiber.join(available);
-        Assert.equal(settled.pollUnsafe(), undefined);
-        Assert.equal(requireSome(yield* outbox.get("settle-publication")).status, "running");
+        NodeAssert.equal(settled.pollUnsafe(), undefined);
+        NodeAssert.equal(requireSome(yield* outbox.get("settle-publication")).status, "running");
         const committedAvailable = yield* outbox.awaitAvailable.pipe(Effect.forkChild);
         yield* fixed(
           0,
           transaction(
             Effect.gen(function* () {
               const input = { effectId: "settle-publication", workerId: "publication-worker" };
-              Assert.equal(yield* outbox.succeed(input), true);
+              NodeAssert.equal(yield* outbox.succeed(input), true);
               input.effectId = "caller-mutated-after-settlement";
-              Assert.equal(settled.pollUnsafe(), undefined);
-              Assert.equal(committedAvailable.pollUnsafe(), undefined);
+              NodeAssert.equal(settled.pollUnsafe(), undefined);
+              NodeAssert.equal(committedAvailable.pollUnsafe(), undefined);
             }),
           ),
         );
         yield* Fiber.join(settled);
         yield* Fiber.join(committedAvailable);
-        Assert.equal(requireSome(yield* outbox.get("settle-publication")).status, "succeeded");
+        NodeAssert.equal(requireSome(yield* outbox.get("settle-publication")).status, "succeeded");
 
         yield* fixed(0, outbox.enqueue([pending("cancel-publication")]));
         const cancelled = yield* outbox
@@ -794,25 +805,25 @@ try {
           });
           yield* outbox.signalCancellations(ids);
           ids.splice(0, ids.length, "caller-mutated-after-registration");
-          Assert.equal(cancelled.pollUnsafe(), undefined);
-          Assert.equal(cancelledSettled.pollUnsafe(), undefined);
-          Assert.equal(cancelledAvailable.pollUnsafe(), undefined);
+          NodeAssert.equal(cancelled.pollUnsafe(), undefined);
+          NodeAssert.equal(cancelledSettled.pollUnsafe(), undefined);
+          NodeAssert.equal(cancelledAvailable.pollUnsafe(), undefined);
         });
         const cancelledRollback = yield* fixed(
           0,
           transaction(cancelAndSignal.pipe(Effect.andThen(Effect.fail("cancel rollback")))),
         ).pipe(Effect.exit);
-        Assert.ok(Exit.isFailure(cancelledRollback));
-        Assert.equal(requireSome(yield* outbox.get("cancel-publication")).status, "pending");
-        Assert.equal(cancelled.pollUnsafe(), undefined);
+        NodeAssert.ok(Exit.isFailure(cancelledRollback));
+        NodeAssert.equal(requireSome(yield* outbox.get("cancel-publication")).status, "pending");
+        NodeAssert.equal(cancelled.pollUnsafe(), undefined);
         yield* fixed(0, transaction(cancelAndSignal));
         yield* Fiber.join(cancelled);
         yield* Fiber.join(cancelledSettled);
         yield* Fiber.join(cancelledAvailable);
-        Assert.equal(requireSome(yield* outbox.get("cancel-publication")).status, "cancelled");
+        NodeAssert.equal(requireSome(yield* outbox.get("cancel-publication")).status, "cancelled");
 
         yield* fixed(0, outbox.enqueue([pending("reconcile-publication")]));
-        Assert.equal(
+        NodeAssert.equal(
           requireSome(yield* fixed(0, outbox.claimNext({ workerId: "reconcile-worker" }))).id,
           "reconcile-publication",
         );
@@ -821,21 +832,21 @@ try {
           day,
           transaction(
             Effect.gen(function* () {
-              Assert.deepEqual(yield* outbox.reconcileAfterProcessLoss, {
+              NodeAssert.deepEqual(yield* outbox.reconcileAfterProcessLoss, {
                 requeued: 1,
                 cancelled: 0,
               });
-              Assert.equal(reconciledAvailable.pollUnsafe(), undefined);
+              NodeAssert.equal(reconciledAvailable.pollUnsafe(), undefined);
               return yield* Effect.fail("discard reconcile publication");
             }),
           ),
         ).pipe(Effect.exit);
-        Assert.ok(Exit.isFailure(reconcileRollback));
-        Assert.equal(requireSome(yield* outbox.get("reconcile-publication")).status, "running");
-        Assert.equal(reconciledAvailable.pollUnsafe(), undefined);
+        NodeAssert.ok(Exit.isFailure(reconcileRollback));
+        NodeAssert.equal(requireSome(yield* outbox.get("reconcile-publication")).status, "running");
+        NodeAssert.equal(reconciledAvailable.pollUnsafe(), undefined);
         yield* fixed(day, transaction(transaction(outbox.reconcileAfterProcessLoss)));
         yield* Fiber.join(reconciledAvailable);
-        Assert.equal(requireSome(yield* outbox.get("reconcile-publication")).status, "pending");
+        NodeAssert.equal(requireSome(yield* outbox.get("reconcile-publication")).status, "pending");
       }),
     ),
   );
@@ -881,10 +892,10 @@ try {
           yield* Deferred.succeed(claimInOwner, undefined);
           const first = yield* Fiber.join(owner);
           const second = requireSome(yield* Fiber.join(standalone));
-          Assert.equal(first.id, "claim-owner");
-          Assert.equal(second.id, "claim-waiter");
-          Assert.equal(first.attemptCount, 1);
-          Assert.equal(second.attemptCount, 1);
+          NodeAssert.equal(first.id, "claim-owner");
+          NodeAssert.equal(second.id, "claim-waiter");
+          NodeAssert.equal(first.attemptCount, 1);
+          NodeAssert.equal(second.attemptCount, 1);
         }).pipe(Effect.timeout("10 seconds")),
       faults,
     );
@@ -908,27 +919,27 @@ try {
           );
           const limited = { workerId: "title-worker", maxRunningTitleGenerations: 1 };
           const claimed = requireSome(yield* fixed(0, outbox.claimNext(limited)));
-          Assert.equal(claimed.id, "a-title");
-          Assert.ok(Option.isNone(yield* fixed(0, outbox.claimNext(limited))));
-          Assert.equal(
+          NodeAssert.equal(claimed.id, "a-title");
+          NodeAssert.ok(Option.isNone(yield* fixed(0, outbox.claimNext(limited))));
+          NodeAssert.equal(
             DateTime.formatIso(
               requireSome(yield* outbox.nextClaimableAt({ maxRunningTitleGenerations: 1 })),
             ),
             iso(1000),
           );
-          Assert.equal(DateTime.formatIso(requireSome(yield* outbox.nextClaimableAt())), iso());
+          NodeAssert.equal(DateTime.formatIso(requireSome(yield* outbox.nextClaimableAt())), iso());
           const rolledBack = yield* fixed(
             0,
             transaction(
               Effect.gen(function* () {
                 yield* outbox.succeed({ effectId: "a-title", workerId: "title-worker" });
-                Assert.equal(requireSome(yield* outbox.claimNext(limited)).id, "b-title");
+                NodeAssert.equal(requireSome(yield* outbox.claimNext(limited)).id, "b-title");
                 return yield* Effect.fail("title-cap rollback");
               }),
             ),
           ).pipe(Effect.exit);
-          Assert.ok(Exit.isFailure(rolledBack));
-          Assert.ok(Option.isNone(yield* fixed(0, outbox.claimNext(limited))));
+          NodeAssert.ok(Exit.isFailure(rolledBack));
+          NodeAssert.ok(Option.isNone(yield* fixed(0, outbox.claimNext(limited))));
           yield* fixed(
             0,
             outbox.cancelUnsettled({
@@ -938,9 +949,9 @@ try {
             }),
           );
           const nextTitle = requireSome(yield* fixed(0, outbox.claimNext(limited)));
-          Assert.equal(nextTitle.id, "b-title");
-          Assert.equal(nextTitle.attemptCount, 1);
-          Assert.ok(
+          NodeAssert.equal(nextTitle.id, "b-title");
+          NodeAssert.equal(nextTitle.attemptCount, 1);
+          NodeAssert.ok(
             Option.isNone(
               yield* fixed(0, outbox.claimNext({ ...limited, maxRunningTitleGenerations: 0 })),
             ),
@@ -964,7 +975,7 @@ try {
               Layer.succeed(EffectOutbox.EffectOutboxV2, outbox),
               Layer.succeed(EffectWorker.OrchestrationEffectExecutorV2, {
                 execute: (effect) =>
-                  Effect.sync(() => Assert.equal(effect.id, "worker-execution")).pipe(
+                  Effect.sync(() => NodeAssert.equal(effect.id, "worker-execution")).pipe(
                     Effect.andThen(Deferred.succeed(executed, undefined)),
                   ),
               }),
@@ -973,11 +984,11 @@ try {
         );
         yield* Effect.gen(function* () {
           const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
-          Assert.equal(yield* worker.runOnce, true);
-          Assert.equal(yield* Deferred.isDone(executed), true);
+          NodeAssert.equal(yield* worker.runOnce(), true);
+          NodeAssert.equal(yield* Deferred.isDone(executed), true);
           yield* outbox.awaitSettled("worker-execution");
-          Assert.equal(requireSome(yield* outbox.get("worker-execution")).status, "succeeded");
-          Assert.equal(yield* worker.runOnce, false);
+          NodeAssert.equal(requireSome(yield* outbox.get("worker-execution")).status, "succeeded");
+          NodeAssert.equal(yield* worker.runOnce(), false);
         }).pipe(Effect.provide(services));
       }),
     ),
@@ -991,11 +1002,11 @@ try {
     runtime: process.version,
     checks,
     oracle: oracleSource,
-    executable_sha256: hash(await FS.readFile(executable)),
+    executable_sha256: hash(await NodeFSP.readFile(executable)),
     sqlite_source_sha256: sourceHash,
     faultProof,
   };
-  if (proofPath) await FS.writeFile(proofPath, JSON.stringify(proof, null, 2) + "\n");
+  if (proofPath) await NodeFSP.writeFile(proofPath, JSON.stringify(proof, null, 2) + "\n");
   console.log(JSON.stringify(proof, null, 2));
 } finally {
   await fixture.close();

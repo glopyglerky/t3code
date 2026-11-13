@@ -184,7 +184,7 @@ export type ReadThreadFindIndex = (threadId: ThreadId) => Effect.Effect<
   ProjectionStoreV2Error
 >;
 
-export const makeSqliteThreadFindRows = Effect.gen(function* () {
+const makeSqliteThreadFindRows = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const encodeThreadIds = Schema.encodeEffect(Schema.fromJsonString(Schema.Array(ThreadId)));
   const encodeSources = Schema.encodeEffect(

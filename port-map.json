@@ -775,7 +775,7 @@
         "tools/check-dispatch.mjs"
       ],
       "retired_paths": [],
-      "notes": "The production policy service calls Rust for command and dispatch decisions. Follow-up owner selection streams the current owner, cancellation barrier and settled run history through the native FollowUpOwner reducer; both Orchestrator callsites use the selected service. Differential cases include long owner histories. Fresh exact-commit execution and normal client-flow qualification remain required.",
+      "notes": "The production policy service calls Rust for command and dispatch decisions. Follow-up owner selection streams the current owner, cancellation barrier and settled run history through the native FollowUpOwner reducer; both Orchestrator callsites use the selected service. Differential cases include long owner histories. Fresh exact-commit execution and normal client-flow qualification remain required. The unused fork-only test copy tools/oracles/CommandPolicy.ts was removed after its consumers moved to immutable upstream sources; previous source is preserved at fork commit 17ec4bae52471ba66f24f6abadbf29e4498106e7, blob c12e10eef2f1f57c9e0311c37e86224112eb1bfb. This does not retire the production TypeScript policy for upstream-selected targets.",
       "rust_crates": ["crates/core"]
     },
     {

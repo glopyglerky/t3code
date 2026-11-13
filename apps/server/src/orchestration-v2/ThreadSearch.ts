@@ -673,6 +673,7 @@ export const makeWithRows = Effect.fn("ThreadSearch.makeWithRows")(function* (
   return ThreadSearch.of({ search, searchThreads, searchOlderSettled });
 });
 
+/** @public Retained upstream composition contract, including immutable source consumers. */
 export const make = Effect.gen(function* () {
   return yield* makeWithRows(yield* makeSqliteRows);
 });

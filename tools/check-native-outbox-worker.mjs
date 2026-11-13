@@ -257,7 +257,7 @@ await scenario(
         .pipe(Effect.andThen(outbox.get("lost-response")), Effect.forkScoped);
       yield* Deferred.await(read);
       state.dropClaimResponses = 1;
-      NodeAssert.equal(yield* worker.runOnce, true);
+      NodeAssert.equal(yield* worker.runOnce(), true);
       NodeAssert.equal(row(yield* Fiber.join(settled)).status, "succeeded");
       NodeAssert.deepEqual(
         state.executions.map(({ id, attemptCount }) => [id, attemptCount]),
@@ -280,7 +280,7 @@ await scenario(
       const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
       yield* outbox.enqueue([pending("unresolved-claim")]);
       state.dropClaimResponses = 2;
-      const failure = yield* worker.runOnce.pipe(Effect.flip);
+      const failure = yield* worker.runOnce().pipe(Effect.flip);
       NodeAssert.equal(failure._tag, "OrchestrationEffectWorkerError");
       NodeAssert.equal(state.executions.length, 0);
       const unresolved = row(yield* outbox.get("unresolved-claim"));
@@ -288,7 +288,7 @@ await scenario(
       NodeAssert.equal(unresolved.attemptCount, 1);
       NodeAssert.equal(state.claimRequests.length, 2);
       NodeAssert.deepEqual(state.claimRequests[0], state.claimRequests[1]);
-      NodeAssert.equal(yield* at(60_000, worker.runOnce), true);
+      NodeAssert.equal(yield* at(60_000, worker.runOnce()), true);
       NodeAssert.equal(state.claimRequests.length, 3);
       NodeAssert.deepEqual(state.claimRequests[2], state.claimRequests[0]);
       NodeAssert.deepEqual(
@@ -308,7 +308,7 @@ await scenario(
       const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
       state.dropClaimResponses = 2;
       NodeAssert.equal(
-        (yield* worker.runOnce.pipe(Effect.flip))._tag,
+        (yield* worker.runOnce().pipe(Effect.flip))._tag,
         "OrchestrationEffectWorkerError",
       );
       NodeAssert.equal(
@@ -324,11 +324,11 @@ await scenario(
         }),
         pending("b-ordinary"),
       ]);
-      NodeAssert.equal(yield* at(60_000, worker.runOnce), false);
+      NodeAssert.equal(yield* at(60_000, worker.runOnce()), false);
       NodeAssert.deepEqual(state.claimRequests[2], state.claimRequests[0]);
       NodeAssert.equal(state.executions.length, 0);
       NodeAssert.equal(yield* at(60_000, worker.runRecoveryOnce), true);
-      NodeAssert.equal(yield* at(60_000, worker.runOnce), true);
+      NodeAssert.equal(yield* at(60_000, worker.runOnce()), true);
       NodeAssert.equal(state.claimRequests[3].stream_id, state.claimRequests[0].stream_id);
       NodeAssert.equal(state.claimRequests[3].sequence, 2);
       NodeAssert.equal(state.claimRequests[3].exclude_restart_continuations, true);
@@ -362,7 +362,7 @@ await scenario(
           yield* Deferred.await(release);
         });
       const running = yield* Effect.all(
-        ids.map(() => worker.runOnce),
+        ids.map(() => worker.runOnce()),
         { concurrency: "unbounded" },
       ).pipe(Effect.forkScoped);
       yield* Effect.gen(function* () {
@@ -393,7 +393,7 @@ await scenario(
           yield* Deferred.await(release);
           lateCompletions += 1;
         }).pipe(Effect.uninterruptible);
-      const running = yield* worker.runOnce.pipe(Effect.forkScoped);
+      const running = yield* worker.runOnce().pipe(Effect.forkScoped);
       yield* Effect.gen(function* () {
         yield* beforeWorkerEnds(entered, running);
         const read = yield* Deferred.make();
@@ -430,7 +430,7 @@ await scenario(
       const input = pending("cancel-before-recovery");
       yield* outbox.enqueue([input]);
       state.dropClaimResponses = 2;
-      yield* worker.runOnce.pipe(Effect.flip);
+      yield* worker.runOnce().pipe(Effect.flip);
       NodeAssert.equal(state.executions.length, 0);
       const cancelled = yield* outbox.cancelUnsettled({
         threadId: input.threadId,
@@ -438,7 +438,7 @@ await scenario(
         reason: "cancelled while response was unavailable",
       });
       yield* outbox.signalCancellations(cancelled);
-      NodeAssert.equal(yield* at(60_000, worker.runOnce), false);
+      NodeAssert.equal(yield* at(60_000, worker.runOnce()), false);
       NodeAssert.equal(state.executions.length, 0);
       NodeAssert.deepEqual(state.claimRequests[2], state.claimRequests[0]);
       const stored = yield* actual.request(
@@ -466,7 +466,7 @@ await scenario(
           yield* Deferred.await(release);
         });
       state.dropResponses.set("outbox_succeed", 1);
-      const running = yield* worker.runOnce.pipe(Effect.exit, Effect.forkScoped);
+      const running = yield* worker.runOnce().pipe(Effect.exit, Effect.forkScoped);
       yield* Effect.gen(function* () {
         yield* beforeWorkerEnds(entered, running);
         const read = yield* Deferred.make();
@@ -509,7 +509,7 @@ await scenario(
           yield* Deferred.succeed(entered, undefined);
           yield* Deferred.await(release);
         });
-      const running = yield* worker.runOnce.pipe(Effect.exit, Effect.forkScoped);
+      const running = yield* worker.runOnce().pipe(Effect.exit, Effect.forkScoped);
       yield* Effect.gen(function* () {
         yield* beforeWorkerEnds(entered, running);
         const read = yield* Deferred.make();
@@ -530,7 +530,7 @@ await scenario(
         );
         NodeAssert.equal(stored.status, "succeeded");
         NodeAssert.equal(stored.attempt_count, 1);
-        NodeAssert.equal(yield* at(60_000, worker.runOnce), false);
+        NodeAssert.equal(yield* at(60_000, worker.runOnce()), false);
         yield* Fiber.join(settled);
         NodeAssert.equal(yield* Deferred.isDone(completed), true);
         NodeAssert.deepEqual(
@@ -575,7 +575,7 @@ await scenario(
         state.requests.filter(({ operation }) => operation === "outbox_retry").length,
         1,
       );
-      NodeAssert.equal(yield* at(250, worker.runOnce), true);
+      NodeAssert.equal(yield* at(250, worker.runOnce()), true);
       NodeAssert.deepEqual(
         state.executions.map(({ id, attemptCount }) => [id, attemptCount]),
         [[input.id, 2]],
@@ -612,7 +612,7 @@ for (const [label, transform] of [
         yield* outbox.enqueue([input]);
         state.transformClaimResponse = transform;
         NodeAssert.equal(
-          (yield* worker.runOnce.pipe(Effect.flip))._tag,
+          (yield* worker.runOnce().pipe(Effect.flip))._tag,
           "OrchestrationEffectWorkerError",
         );
         NodeAssert.equal(state.executions.length, 0);
@@ -620,7 +620,7 @@ for (const [label, transform] of [
         NodeAssert.equal(before.status, "running");
         NodeAssert.equal(before.attemptCount, 1);
         state.transformClaimResponse = undefined;
-        NodeAssert.equal(yield* at(120_000, worker.runOnce), true);
+        NodeAssert.equal(yield* at(120_000, worker.runOnce()), true);
         for (const request of state.claimRequests)
           NodeAssert.deepEqual(request, state.claimRequests[0]);
         NodeAssert.deepEqual(
@@ -672,7 +672,7 @@ await scenario(
             true,
           );
         });
-      NodeAssert.equal(yield* worker.runOnce, true);
+      NodeAssert.equal(yield* worker.runOnce(), true);
       NodeAssert.deepEqual(
         state.executions.map(({ id, attemptCount }) => [id, attemptCount]),
         [[input.id, 1]],
@@ -697,7 +697,7 @@ const proof = {
     "real NativeDatabase, NativeEffectOutbox and OrchestrationEffectWorkerV2 with a controlled executor",
     "response faults occur after actual native claim commits; the production worker decides dispatch and settlement",
     "isolated redb files; no production data, provider process, network call or paid turn",
-    "production project/thread transactions and server backend selection still require migration",
+    "production project/thread transactions and server backend selection are covered by separate application acceptance gates",
     "no exactly-once external effect or distributed fencing guarantee",
   ],
 };

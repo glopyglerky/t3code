@@ -112,7 +112,6 @@ import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import type * as Statement from "effect/sql/Statement";
@@ -121,7 +120,6 @@ import { MCP_APP_OUTPUT_KEY } from "@t3tools/shared/mcpApp";
 import { threadHtmlRenderAttachmentIds } from "../attachmentStore.ts";
 import { readableSearchText } from "./messageSearchIndex.ts";
 import {
-  isFoldableWorkItem,
   isThreadHistoryUserTurn,
   isConversationHistoryItem,
   THREAD_HISTORY_MAX_RAW_TURNS,
@@ -138,8 +136,6 @@ import {
   THREAD_HISTORY_PAGE_POLICY,
   THREAD_HISTORY_INLINE_WORK_ITEM_LIMIT,
   THREAD_HISTORY_TURN_SNAPSHOT_ROW_LIMIT,
-  type SelectTimelinePageResult,
-  type ThreadHistoryPrefix,
 } from "./threadHistoryPaging.ts";
 
 export class ProjectionStoreApplyEventError extends Schema.TaggedError<ProjectionStoreApplyEventError>()(
@@ -3780,6 +3776,7 @@ export function makeProjectionShells(reader: ProjectionShellRows) {
             activityRunStatus: state.activityRunStatus,
             latestRunCompletedAt: state.latestRunCompletedAt,
             latestRunStopRequested: state.latestRunStopRequested,
+            latestRunBackgroundWake: state.latestRunBackgroundWake,
             pendingRuntimeRequest: state.pendingRuntimeRequest,
             pendingBackgroundTasks: state.pendingBackgroundTasks,
           })),
@@ -4869,50 +4866,10 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       END
     `;
 
-    type TimelineIndexItem = Pick<
-      OrchestrationV2TurnItem,
-      "id" | "threadId" | "runId" | "nodeId" | "parentItemId" | "type" | "status" | "ordinal"
-    > & {
-      readonly inputIntent?: Extract<
-        OrchestrationV2TurnItem,
-        { type: "user_message" }
-      >["inputIntent"];
-      readonly createdBy?: "user" | "agent" | "system";
-      readonly messageId?: MessageId;
-      readonly runStatus?: string | undefined;
-      readonly attemptId?: string | null;
-      readonly attemptStatus?: string | null;
-      readonly persistentOutput?: boolean;
-      readonly deferredWork?: OrchestrationV2TurnItem["deferredWork"];
-    };
-    type TimelineIndexRow = {
-      readonly sourceThreadId: ThreadId;
-      readonly sourceItemId: TurnItemId;
-      readonly visibility: OrchestrationV2ProjectedTurnItem["visibility"];
-      readonly item: TimelineIndexItem;
-      readonly synthetic?: OrchestrationV2TurnItem;
-    };
-    type TimelineIndex = {
-      readonly records: ProjectionRecords<"runs" | "attempts">;
-      /** The thread and every fork source the index read. */
-      readonly threadIds: ReadonlyArray<ThreadId>;
-      readonly local: ReadonlyArray<TimelineIndexRow>;
-      readonly visible: ReadonlyArray<TimelineIndexRow>;
-    };
-    // Least recently used first; a few cover clients scrolling side by side without pinning every thread.
-    const TIMELINE_INDEX_CACHE_LIMIT = 8;
-    const timelineIndexes = new Map<
-      string,
-      { readonly sequence: number; readonly index: TimelineIndex }
-    >();
-
     const apply: ProjectionStoreV2Shape["apply"] =
       /* This helper runs for individual orchestration events; the enclosing operation owns the span. */
       Effect.fnUntraced(
         function* (event) {
-          for (const [key, cached] of timelineIndexes) {
-            if (cached.index.threadIds.includes(event.threadId)) timelineIndexes.delete(key);
-          }
           switch (event.type) {
             case "thread.pull-request-link-updated": {
               const thread = yield* getThread(event.threadId);
@@ -7109,10 +7066,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getUnreadableThreadIds,
     } = makeProjectionRecovery(yield* SqliteProjectionRecoveryRows.make);
 
-    // SQLite trim defaults to ASCII spaces; compact recognition uses JavaScript trim.
-    const javascriptTrimWhitespace =
-      " \t\n\r\v\f\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff";
-
     const {
       getTurnStartContext,
       getRuntimeRecoveryProjection,
@@ -7154,7 +7107,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           ),
       });
 
-    const { getThread, requireThread } = lookups;
+    const { getThread } = lookups;
     const controlReadError = (threadId: ThreadId) => (cause: unknown) =>
       isProjectionStoreThreadNotFoundError(cause)
         ? cause
@@ -7231,39 +7184,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         ORDER BY item.ordinal ASC, item.turn_item_id ASC`.pipe(
           Effect.mapError((cause) => new ProjectionRecordRowsError({ cause })),
         ),
-    );
-
-    // Every committed projection write appends a thread event, so the newest event across the
-    // index's threads identifies its snapshot; apply also drops entries for replayed writes. Call
-    // inside the read transaction. Without the index hint SQLite walks every newer V2 event.
-    const latestThreadEventSequence = (threadId: ThreadId, threadIds: ReadonlyArray<ThreadId>) =>
-      sql<{ sequence: number }>`SELECT COALESCE(MAX(sequence), 0) AS sequence
-        FROM orchestration_events INDEXED BY idx_orchestration_events_agent_stream_sequence
-        WHERE application_event_version = 2
-        AND aggregate_kind = 'thread' AND stream_id IN ${sql.in(threadIds)}`.pipe(
-        Effect.map((rows) => rows[0]?.sequence ?? 0),
-        Effect.mapError((cause) => new ProjectionStoreReadError({ threadId, cause })),
-      );
-    const readSnapshotTimelineIndex = Effect.fn("ProjectionStore.readSnapshotTimelineIndex")(
-      function* (threadId: ThreadId, includeAttempts: boolean) {
-        const key = `${includeAttempts ? "work" : "plain"}:${threadId}`;
-        const cached = timelineIndexes.get(key);
-        const index =
-          cached !== undefined &&
-          (yield* latestThreadEventSequence(threadId, cached.index.threadIds)) === cached.sequence
-            ? cached.index
-            : yield* readTimelineIndex(threadId, new Set(), includeAttempts);
-        const sequence =
-          index === cached?.index
-            ? cached.sequence
-            : yield* latestThreadEventSequence(threadId, index.threadIds);
-        timelineIndexes.delete(key);
-        timelineIndexes.set(key, { sequence, index });
-        const oldest = timelineIndexes.keys().next();
-        if (timelineIndexes.size > TIMELINE_INDEX_CACHE_LIMIT && oldest.done !== true)
-          timelineIndexes.delete(oldest.value);
-        return index;
-      },
     );
 
     const { searchThread, searchThreadStream } = yield* makeThreadFind((threadId) =>

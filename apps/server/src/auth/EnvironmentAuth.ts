@@ -1472,7 +1472,7 @@ const revokePairedClientsThePolicyDisallows = Effect.fn(
   }
 });
 
-export const layerFromStores = Layer.effect(EnvironmentAuth, make).pipe(
+const layerFromStores = Layer.effect(EnvironmentAuth, make).pipe(
   Layer.provideMerge(EnvironmentAuthPolicy.layer),
 );
 export const layer = layerFromStores.pipe(
@@ -1495,10 +1495,20 @@ export const layerSelected = Layer.suspend(() =>
     ),
   ),
 );
-const layerCliSelected = Layer.suspend(() => layerFromStores.pipe(
-  Layer.provideMerge(PairingGrantStore.layerFromRepository.pipe(Layer.provideMerge(SelectedPersistence.cliAuthPairing))),
-  Layer.provideMerge(SessionStore.layerFromRepository.pipe(Layer.provideMerge(SelectedPersistence.cliAuthSessions))),
-));
+const layerCliSelected = Layer.suspend(() =>
+  layerFromStores.pipe(
+    Layer.provideMerge(
+      PairingGrantStore.layerFromRepository.pipe(
+        Layer.provideMerge(SelectedPersistence.cliAuthPairing),
+      ),
+    ),
+    Layer.provideMerge(
+      SessionStore.layerFromRepository.pipe(
+        Layer.provideMerge(SelectedPersistence.cliAuthSessions),
+      ),
+    ),
+  ),
+);
 const layerStorage = Layer.suspend(() =>
   Layer.mergeAll(ServerSecretStore.layer, SelectedPersistence.cliLayerConfig),
 );

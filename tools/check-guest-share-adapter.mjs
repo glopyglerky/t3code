@@ -38,6 +38,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as ServerSecretStore from "../apps/server/src/auth/ServerSecretStore.ts";
 import { CloudManagedEndpointRuntime } from "../apps/server/src/cloud/ManagedEndpointRuntime.ts";
 import * as ServerConfig from "../apps/server/src/config.ts";
+import * as DeviceService from "../apps/server/src/device/DeviceService.ts";
 import * as GuestShareService from "../apps/server/src/guest/GuestShareService.ts";
 import { CodexProviderCapabilitiesV2 } from "../apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts";
 import * as CommandOutputHub from "../apps/server/src/orchestration-v2/CommandOutputHub.ts";
@@ -105,6 +106,10 @@ function serviceLayer(name, filename, copyCalls) {
       Layer.mergeAll(
         Layer.mock(TerminalManager.TerminalManager)({ close: () => Effect.void }),
         Layer.mock(PreviewManager.PreviewManager)({ close: () => Effect.void }),
+        Layer.mock(DeviceService.DeviceService)({
+          sessionsForThread: () => Effect.succeed([]),
+          close: () => Effect.die("This guest-share fixture has no device sessions to close"),
+        }),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({
           deleteForThread: () => Effect.void,
         }),
@@ -456,7 +461,9 @@ async function lifecycle(selection, label) {
           statuses: sent.thread.guestShare.messages.map((item) => item.status),
           text: sent.messages[0].text,
           attachmentNames: sent.messages[0].attachments.map((attachment) => attachment.name),
-          attachmentMimeTypes: sent.messages[0].attachments.map((attachment) => attachment.mimeType),
+          attachmentMimeTypes: sent.messages[0].attachments.map(
+            (attachment) => attachment.mimeType,
+          ),
           runs: sent.runs.length,
           events: (yield* snapshot()).events.map((row) => row.event.type),
           finalFrame: frames.at(-1).type,
@@ -1164,7 +1171,11 @@ const directUploadRoundTrip = Effect.gen(function* () {
       { type: "file", name: "file", mimeType: "application/octet-stream", sizeBytes: 2 },
     ],
   });
-  NodeAssert.deepEqual(inspected, before, "native classification must not mutate inspected uploads");
+  NodeAssert.deepEqual(
+    inspected,
+    before,
+    "native classification must not mutate inspected uploads",
+  );
 });
 
 async function uploadClassificationChecks(control) {
@@ -1173,15 +1184,23 @@ async function uploadClassificationChecks(control) {
     Effect.gen(function* () {
       yield* control.setMode();
       const { guestShares, token, shareId } = yield* join();
-      const image = yield* uploads(" ../invoice\u202e.png ", PNG.length, " IMAGE/PNG; charset=ignored");
+      const image = yield* uploads(
+        " ../invoice\u202e.png ",
+        PNG.length,
+        " IMAGE/PNG; charset=ignored",
+      );
       const file = yield* uploads(" report.txt ", PNG.length + 1, "TEXT/PLAIN; charset=utf-8");
       yield* control.setMode();
-      yield* guestShares.submit(token, { shareId, text: "Classify both files" }, [...image, ...file]);
+      yield* guestShares.submit(token, { shareId, text: "Classify both files" }, [
+        ...image,
+        ...file,
+      ]);
       const calls = yield* control.calls;
       const classifyIndex = calls.findIndex((call) => call.operation === "classify-uploads");
       NodeAssert.notEqual(classifyIndex, -1, "real guest upload must invoke the native classifier");
       NodeAssert.ok(
-        calls.findIndex((call) => call.commandType === "thread.guest-message.submit") > classifyIndex,
+        calls.findIndex((call) => call.commandType === "thread.guest-message.submit") >
+          classifyIndex,
       );
       NodeAssert.equal(calls.filter((call) => call.operation === "classify-uploads").length, 1);
       NodeAssert.deepEqual(
@@ -1196,10 +1215,13 @@ async function uploadClassificationChecks(control) {
         "native request contains inspected bytes and metadata, without host file paths",
       );
       const attachments = (yield* projection()).thread.guestShare.messages[0].attachments;
-      NodeAssert.deepEqual(attachments.map(({ id: _id, ...draft }) => draft), [
-        { type: "image", name: ".._invoice_.png", mimeType: "image/png", sizeBytes: PNG.length },
-        { type: "file", name: "report.txt", mimeType: "text/plain", sizeBytes: PNG.length + 1 },
-      ]);
+      NodeAssert.deepEqual(
+        attachments.map(({ id: _id, ...draft }) => draft),
+        [
+          { type: "image", name: ".._invoice_.png", mimeType: "image/png", sizeBytes: PNG.length },
+          { type: "file", name: "report.txt", mimeType: "text/plain", sizeBytes: PNG.length + 1 },
+        ],
+      );
       NodeAssert.equal(copies.length, 2, "both classified files must use real upload copies");
       scenarios.push(
         "guest service invokes native upload classification before dispatch and stores ordered image/file metadata",
@@ -1215,37 +1237,65 @@ async function uploadClassificationChecks(control) {
             guestShares.submit(token, { shareId, text: label }, supplied),
           );
           NodeAssert.equal(error.reason, reason, label);
-          NodeAssert.equal(copies.length, copyCount, `${label}: classifier must fail before copying`);
+          NodeAssert.equal(
+            copies.length,
+            copyCount,
+            `${label}: classifier must fail before copying`,
+          );
           NodeAssert.deepEqual(yield* storedFiles, files, `${label}: retained attachments changed`);
-          NodeAssert.deepEqual(yield* snapshot(), before, `${label}: classifier committed durable changes`);
+          NodeAssert.deepEqual(
+            yield* snapshot(),
+            before,
+            `${label}: classifier committed durable changes`,
+          );
           const calls = yield* control.calls;
           NodeAssert.equal(
-            calls.filter((call) => call.operation === "classify-uploads").length, 1, label,
+            calls.filter((call) => call.operation === "classify-uploads").length,
+            1,
+            label,
           );
           NodeAssert.equal(
-            calls.some((call) => call.commandType === "thread.guest-message.submit"), false, label,
+            calls.some((call) => call.commandType === "thread.guest-message.submit"),
+            false,
+            label,
           );
         },
       );
       yield* expectNoWrite("too many files", Array(5).fill(image[0]), "too_many_files");
-      yield* expectNoWrite("too many bytes", yield* uploads("large.png", 10 * MIB + 1), "too_large");
       yield* expectNoWrite(
-        "unsupported image", [{ ...image[0], contentType: "image/svg+xml" }], "unsupported_file",
+        "too many bytes",
+        yield* uploads("large.png", 10 * MIB + 1),
+        "too_large",
+      );
+      yield* expectNoWrite(
+        "unsupported image",
+        [{ ...image[0], contentType: "image/svg+xml" }],
+        "unsupported_file",
       );
       scenarios.push(
         "native count, byte and MIME rejections copy nothing and leave all SQLite records and prior files unchanged",
       );
       for (const kind of [
-        "upload-count", "upload-order", "upload-size", "upload-type", "upload-units",
-        "upload-reason", "upload-changed", "invalid-json", "exit",
+        "upload-count",
+        "upload-order",
+        "upload-size",
+        "upload-type",
+        "upload-units",
+        "upload-reason",
+        "upload-changed",
+        "invalid-json",
+        "exit",
       ]) {
         yield* expectNoWrite(`classifier ${kind}`, [...image, ...file], "rejected", kind);
-        scenarios.push(`${kind}: classifier failure rejects before copy or dispatch without upstream fallback`);
+        scenarios.push(
+          `${kind}: classifier failure rejects before copy or dispatch without upstream fallback`,
+        );
       }
       yield* control.setMode();
       yield* guestShares.submit(token, { shareId, text: "Text after classifier failures" }, []);
       NodeAssert.equal(
-        (yield* control.calls).some((call) => call.operation === "classify-uploads"), false,
+        (yield* control.calls).some((call) => call.operation === "classify-uploads"),
+        false,
       );
       NodeAssert.equal(copies.length, 2, "text-only submission does not inspect or copy uploads");
     }),
@@ -1649,7 +1699,11 @@ async function nativeFailureChecks() {
           const pid = yield* Effect.promise(() => ready);
           NodeAssert.ok(Number.isSafeInteger(pid) && pid > 0);
           const expectedCopies = operation === "decide" ? 1 : 0;
-          NodeAssert.equal(copies.length, expectedCopies, `${operation}: incorrect upload copy boundary`);
+          NodeAssert.equal(
+            copies.length,
+            expectedCopies,
+            `${operation}: incorrect upload copy boundary`,
+          );
           NodeAssert.equal((yield* storedFiles).length, files.length + expectedCopies);
           yield* Fiber.interrupt(running);
           const outcome = yield* Fiber.await(running);
@@ -1664,11 +1718,21 @@ async function nativeFailureChecks() {
             before,
             "interruption must not commit a decision or a rejected receipt",
           );
-          NodeAssert.deepEqual(yield* storedFiles, files, "interrupted submit must retain no new files");
-          NodeAssert.equal(copies.length, expectedCopies, "interruption must not retry through upstream");
+          NodeAssert.deepEqual(
+            yield* storedFiles,
+            files,
+            "interrupted submit must retain no new files",
+          );
+          NodeAssert.equal(
+            copies.length,
+            expectedCopies,
+            "interruption must not retry through upstream",
+          );
           if (operation === "classify-uploads") {
             NodeAssert.equal(
-              (yield* control.calls).some((call) => call.commandType === "thread.guest-message.submit"),
+              (yield* control.calls).some(
+                (call) => call.commandType === "thread.guest-message.submit",
+              ),
               false,
               "interrupted classification must never dispatch the submission",
             );

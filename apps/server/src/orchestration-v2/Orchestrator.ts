@@ -107,13 +107,7 @@ import {
   SHARED_WORKSPACE_RESTORE_MESSAGE,
 } from "./CheckpointRestoreSafety.ts";
 import { CheckpointServiceV2 } from "./CheckpointService.ts";
-import {
-  CommandPolicyV2,
-  goalCommandStopsActiveRun,
-  isActiveRun,
-  isNativeMaintenanceCommand,
-  resolveMessageDispatchIntent,
-} from "./CommandPolicy.ts";
+import { CommandPolicyV2, isActiveRun, isNativeMaintenanceCommand } from "./CommandPolicy.ts";
 import { CommandReceiptStoreV2, type CommandReceiptV2 } from "./CommandReceiptStore.ts";
 import {
   ContextHandoffServiceV2,

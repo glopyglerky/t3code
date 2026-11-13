@@ -76,6 +76,7 @@ export function isNativeMaintenanceCommand(message: {
  * A goal command sent into active work stops that work when it starts or
  * replaces goal work, or ends a goal that is driving the run.
  */
+/** @public Retained upstream policy contract for upstream-selected composition. */
 export function goalCommandStopsActiveRun(
   command: OrchestrationV2GoalCommand,
   goalStatus: OrchestrationV2ProviderGoalStatus | null,

@@ -71,7 +71,7 @@ const Result = Schema.Struct({
   ),
 });
 
-export const makeRows = Effect.gen(function* () {
+const makeRows = Effect.gen(function* () {
   const client = yield* RedbClient;
   while (!(yield* client.prepareProjectionReads).prepared) yield* Effect.yieldNow;
   return {
@@ -101,9 +101,9 @@ export const makeRows = Effect.gen(function* () {
 
 /** The complete unwindowed selected-record API; timeline and window APIs remain separate. */
 export const make = makeRows.pipe(Effect.map(makeProjectionRecords));
-export const makeCanonical = makeRows.pipe(Effect.map(makeCanonicalProjection));
+const makeCanonical = makeRows.pipe(Effect.map(makeCanonicalProjection));
 
-export const makeHistoryRows = Effect.gen(function* () {
+const makeHistoryRows = Effect.gen(function* () {
   const client = yield* RedbClient;
   while (!(yield* client.prepareProjectionReads).prepared) yield* Effect.yieldNow;
   const failure = (cause: unknown) => new ProjectionRecordRowsError({ cause });
@@ -167,7 +167,7 @@ export const makeTimelineIndex = Effect.gen(function* () {
   return timelineIndex(records, rows.timeline);
 });
 
-export const makeProjection = Effect.gen(function* () {
+const makeProjection = Effect.gen(function* () {
   const canonical = yield* makeCanonical;
   const history = yield* makeHistoryRows;
   return makeProjectionReader(canonical, history);

@@ -63,15 +63,30 @@ export const make = Effect.fn("Omdb.make")(
       ),
     );
     const exists = yield* fs.exists(options.databasePath);
-    const needsUpgrade = exists && (yield* Effect.scoped(Effect.gen(function* () {
-      const inspection = yield* NativeDatabase.make({ ...options, mode: "read-only-local" });
-      const schema = yield* inspection.request({ operation: "application_schema" }, Schema.NullOr(RedbClient.ApplicationSchema));
-      if (schema === null) return false;
-      const migrations = yield* inspection.request({ operation: "application_migrations" }, Bootstrap.fields.migrations);
-      return migrations.length !== currentSchema.migrations.length || migrations.some((migration, index) =>
-        migration.id !== currentSchema.migrations[index]?.id || migration.name !== currentSchema.migrations[index]?.name,
-      );
-    })));
+    const needsUpgrade =
+      exists &&
+      (yield* Effect.scoped(
+        Effect.gen(function* () {
+          const inspection = yield* NativeDatabase.make({ ...options, mode: "read-only-local" });
+          const schema = yield* inspection.request(
+            { operation: "application_schema" },
+            Schema.NullOr(RedbClient.ApplicationSchema),
+          );
+          if (schema === null) return false;
+          const migrations = yield* inspection.request(
+            { operation: "application_migrations" },
+            Bootstrap.fields.migrations,
+          );
+          return (
+            migrations.length !== currentSchema.migrations.length ||
+            migrations.some(
+              (migration, index) =>
+                migration.id !== currentSchema.migrations[index]?.id ||
+                migration.name !== currentSchema.migrations[index]?.name,
+            )
+          );
+        }),
+      ));
     const leaseScope = yield* Effect.acquireRelease(Scope.make(), (scope) =>
       Scope.close(scope, Exit.void),
     );
@@ -153,18 +168,21 @@ export const make = Effect.fn("Omdb.make")(
             });
           }
           const adapter = yield* loadMigrationAdapter;
-          const sourceDigest = yield* adapter.snapshotForNativeImport(source, { migrate: false }).pipe(
-            Effect.map((snapshot) => snapshot.sha256),
-            Effect.scoped,
-          );
+          const sourceDigest = yield* adapter
+            .snapshotForNativeImport(source, { migrate: false })
+            .pipe(
+              Effect.map((snapshot) => snapshot.sha256),
+              Effect.scoped,
+            );
           // An older candidate can have an exact schema-80 source. Verify that
           // immutable export before applying this build's private migrations.
-          const currentDigest = sourceDigest === prior.receipt.summary.export_sha256
-            ? sourceDigest
-            : yield* adapter.snapshotForNativeImport(source).pipe(
-                Effect.map((snapshot) => snapshot.sha256),
-                Effect.scoped,
-              );
+          const currentDigest =
+            sourceDigest === prior.receipt.summary.export_sha256
+              ? sourceDigest
+              : yield* adapter.snapshotForNativeImport(source).pipe(
+                  Effect.map((snapshot) => snapshot.sha256),
+                  Effect.scoped,
+                );
           if (currentDigest !== prior.receipt.summary.export_sha256) {
             return yield* new OmdbStartupError({
               path: options.databasePath,
@@ -179,10 +197,17 @@ export const make = Effect.fn("Omdb.make")(
         // An offline omdb handle excludes every server/CLI reader and writer,
         // including old executables which do not know this migration. Staging
         // retains the current generation until the atomic catalog publication.
-        yield* Effect.scoped(Effect.gen(function* () {
-          const upgrade = yield* NativeDatabase.make({ ...options, mode: "exclusive-local", reconnect: false, requestTimeout: "60 minutes" });
-          yield* upgrade.request({ operation: "application_bootstrap" }, Bootstrap);
-        }));
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const upgrade = yield* NativeDatabase.make({
+              ...options,
+              mode: "exclusive-local",
+              reconnect: false,
+              requestTimeout: "60 minutes",
+            });
+            yield* upgrade.request({ operation: "application_bootstrap" }, Bootstrap);
+          }),
+        );
       }
       const database = yield* NativeDatabase.make({
         ...options,
@@ -257,7 +282,7 @@ export const make = Effect.fn("Omdb.make")(
     ),
 );
 
-export const layerFromPath = (databasePath: string, executable: string) =>
+const layerFromPath = (databasePath: string, executable: string) =>
   Layer.unwrap(
     Effect.gen(function* () {
       const { database, client } = yield* make({ databasePath, executable });

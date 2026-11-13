@@ -16,17 +16,19 @@ import {
 const encodeTime = Schema.encodeEffect(Schema.DateTimeUtcFromString);
 
 /** The production SQLite projection implementation remains the mutation oracle. */
-export const make = Effect.gen(function* () {
+const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const projections = yield* ProjectionStoreV2;
   return ProjectionCommitStore.of({
     apply: (event) =>
       projections.apply(event).pipe(Effect.mapError(toProjectionCommitStoreError("apply"))),
     getThread: (threadId) =>
-      projections.getThread(threadId).pipe(
-        Effect.catchTag("ProjectionStoreThreadNotFoundError", () => Effect.undefined),
-        Effect.mapError(toProjectionCommitStoreError("get-thread")),
-      ),
+      projections
+        .getThread(threadId)
+        .pipe(
+          Effect.catchTags({ ProjectionStoreThreadNotFoundError: () => Effect.undefined }),
+          Effect.mapError(toProjectionCommitStoreError("get-thread")),
+        ),
     getRuntimeRequest: (threadId, requestId) =>
       projections
         .getRuntimeRequest(threadId, requestId)

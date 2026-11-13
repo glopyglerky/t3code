@@ -65,7 +65,7 @@ const ActiveShellIndexRow = Schema.Struct({
   has_remote_tasks: Schema.Number,
 });
 
-export const makeRows = Effect.gen(function* () {
+const makeRows = Effect.gen(function* () {
   const client = yield* RedbClient;
   while (!(yield* client.prepareProjectionReads).prepared) yield* Effect.yieldNow;
   while (!(yield* client.prepareEvents).prepared) yield* Effect.yieldNow;

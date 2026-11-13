@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-import * as Assert from "node:assert/strict";
-import * as FS from "node:fs/promises";
-import * as Path from "node:path";
+import * as NodeAssert from "node:assert/strict";
+import * as NodeFSP from "node:fs/promises";
+import * as NodePath from "node:path";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
@@ -29,8 +29,11 @@ import {
 } from "./redb-domain-fixture.mjs";
 
 const [executable, proofPath] = process.argv.slice(2);
-Assert.ok(executable && Path.isAbsolute(executable), "Pass an absolute native database executable");
-await FS.access(executable, FS.constants.X_OK);
+NodeAssert.ok(
+  executable && NodePath.isAbsolute(executable),
+  "Pass an absolute native database executable",
+);
+await NodeFSP.access(executable, NodeFSP.constants.X_OK);
 const findOracle = await loadUpstreamModule("apps/server/src/orchestration-v2/ThreadFind.ts");
 const oracle = await loadUpstreamModule("apps/server/src/orchestration-v2/ProjectionStore.ts", {
   "./ThreadFind.ts": findOracle.url,
@@ -195,109 +198,115 @@ async function withServices(kind, filename, use) {
         });
       }),
     );
+  const module = kind === "upstream" ? oracle.module : ProjectionStore;
   return withSqlite(filename, (sql) =>
     Effect.gen(function* () {
-      const module = kind === "upstream" ? oracle.module : ProjectionStore;
-      const store = yield* module.ProjectionStoreV2.pipe(Effect.provide(module.layer));
-      const events = yield* OrchestrationEventStore.OrchestrationEventStore.pipe(
-        Effect.provide(OrchestrationEventStore.layer),
-      );
+      const store = yield* module.ProjectionStoreV2;
+      const events = yield* OrchestrationEventStore.OrchestrationEventStore;
       return yield* use({
         find: store,
         transaction: (effect) => sql.withTransaction(effect),
         apply: store.apply,
         events,
       });
-    }),
+    }).pipe(
+      // Find borrows scoped caches for the whole stream. Keep their owning layer
+      // alive until the service consumer, including every frame, has completed.
+      Effect.provide(module.layer),
+      Effect.provide(OrchestrationEventStore.layer),
+    ),
   );
 }
 
-function exercise({ find, transaction, apply, events }) {
-  return Effect.gen(function* () {
-    const output = [];
-    for (const threadId of [main, child, grandchild]) {
-      for (const query of queries) {
-        const frames = yield* Stream.runCollect(find.searchThreadStream({ threadId, ...query }));
-        Assert.ok(frames.length >= 1);
-        output.push(normalized(frames));
-      }
+const exercise = Effect.fn("checkRedbThreadFind.exercise")(function* ({
+  find,
+  transaction,
+  apply,
+  events,
+}) {
+  const output = [];
+  for (const threadId of [main, child, grandchild]) {
+    for (const query of queries) {
+      const frames = yield* Stream.runCollect(find.searchThreadStream({ threadId, ...query }));
+      NodeAssert.ok(frames.length >= 1);
+      output.push(normalized(frames));
     }
-    const before = yield* find.searchThread({ threadId: grandchild, query: "needle" });
-    const mutation = {
-      ...item("item:find:000", 1, "needle changed needle needle"),
-      id: "event:find:changed",
-    };
-    const commit = (next) =>
-      transaction(
-        Effect.gen(function* () {
-          yield* events.appendAgentEvents({ events: [next] });
-          yield* apply(next);
-        }),
-      );
-    yield* commit(mutation);
-    const after = yield* find.searchThread({ threadId: grandchild, query: "needle" });
-    Assert.ok(
-      after.snapshotSequence > before.snapshotSequence,
-      "Ancestor event invalidates descendant cache revision",
+  }
+  const before = yield* find.searchThread({ threadId: grandchild, query: "needle" });
+  const mutation = {
+    ...item("item:find:000", 1, "needle changed needle needle"),
+    id: "event:find:changed",
+  };
+  const commit = (next) =>
+    transaction(
+      Effect.gen(function* () {
+        yield* events.appendAgentEvents({ events: [next] });
+        yield* apply(next);
+      }),
     );
-    Assert.notEqual(after.totalMatches, before.totalMatches);
-    output.push(normalized(after));
-    const failed = yield* Effect.exit(
-      transaction(
-        Effect.gen(function* () {
-          const discarded = item("item:discarded", 999, "needle needle needle");
-          yield* events.appendAgentEvents({ events: [discarded] });
-          yield* apply(discarded);
-          Assert.ok(
-            (yield* find.searchThread({ threadId: main, query: "needle" })).totalMatches >
-              after.totalMatches - 3,
-          );
-          return yield* Effect.fail("rollback find state");
-        }),
-      ),
-    );
-    Assert.ok(Exit.isFailure(failed));
-    output.push(normalized(yield* find.searchThread({ threadId: grandchild, query: "needle" })));
-    const missing = yield* Effect.exit(find.searchThread({ threadId: "missing", query: "needle" }));
-    Assert.ok(Exit.isFailure(missing));
-    return output;
-  });
-}
+  yield* commit(mutation);
+  const after = yield* find.searchThread({ threadId: grandchild, query: "needle" });
+  NodeAssert.ok(
+    after.snapshotSequence > before.snapshotSequence,
+    "Ancestor event invalidates descendant cache revision",
+  );
+  NodeAssert.notEqual(after.totalMatches, before.totalMatches);
+  output.push(normalized(after));
+  const failed = yield* Effect.exit(
+    transaction(
+      Effect.gen(function* () {
+        const discarded = item("item:discarded", 999, "needle needle needle");
+        yield* events.appendAgentEvents({ events: [discarded] });
+        yield* apply(discarded);
+        NodeAssert.ok(
+          (yield* find.searchThread({ threadId: main, query: "needle" })).totalMatches >
+            after.totalMatches - 3,
+        );
+        return yield* Effect.fail("rollback find state");
+      }),
+    ),
+  );
+  NodeAssert.ok(Exit.isFailure(failed));
+  output.push(normalized(yield* find.searchThread({ threadId: grandchild, query: "needle" })));
+  const missing = yield* Effect.exit(find.searchThread({ threadId: "missing", query: "needle" }));
+  NodeAssert.ok(Exit.isFailure(missing));
+  return output;
+});
 
 try {
-  const source = Path.join(fixture.root, "source.sqlite");
+  const source = NodePath.join(fixture.root, "source.sqlite");
   await createMigratedSqlite(source, () =>
     Effect.gen(function* () {
-      const projects = yield* ProjectStore.ProjectStoreV2.pipe(Effect.provide(ProjectStore.layer));
-      const store = yield* oracle.module.ProjectionStoreV2.pipe(
-        Effect.provide(oracle.module.layer),
-      );
-      const events = yield* OrchestrationEventStore.OrchestrationEventStore.pipe(
-        Effect.provide(OrchestrationEventStore.layer),
-      );
+      const projects = yield* ProjectStore.ProjectStoreV2;
+      const store = yield* oracle.module.ProjectionStoreV2;
+      const events = yield* OrchestrationEventStore.OrchestrationEventStore;
       yield* projects.apply(projectEvent);
       yield* events.appendAgentEvents({ events: seedEvents });
       for (const next of seedEvents) yield* store.apply(next);
-    }),
+    }).pipe(
+      Effect.provide(ProjectStore.layer),
+      Effect.provide(oracle.module.layer),
+      Effect.provide(OrchestrationEventStore.layer),
+    ),
   );
-  const upstream = Path.join(fixture.root, "upstream.sqlite");
-  const retained = Path.join(fixture.root, "retained.sqlite");
-  await FS.copyFile(source, upstream);
-  await FS.copyFile(source, retained);
-  const sourceHash = hash(await FS.readFile(source));
-  const exported = Path.join(fixture.root, "source.ndjson");
+  const upstream = NodePath.join(fixture.root, "upstream.sqlite");
+  const retained = NodePath.join(fixture.root, "retained.sqlite");
+  await NodeFSP.copyFile(source, upstream);
+  await NodeFSP.copyFile(source, retained);
+  const sourceHash = hash(await NodeFSP.readFile(source));
+  const exported = NodePath.join(fixture.root, "source.ndjson");
   exportSqliteState({ source, destination: exported });
   nativeRequest(executable, fixture, "initialize", {
     operation: "import_sqlite_application",
     path: exported,
   });
   const expected = await withServices("upstream", upstream, exercise);
-  Assert.deepEqual(
+  NodeAssert.deepEqual(
     await withServices("sqlite", retained, exercise),
     expected,
     "Retained find matches immutable upstream module",
   );
-  Assert.deepEqual(
+  NodeAssert.deepEqual(
     await withServices("native", source, exercise),
     expected,
     "Native find matches immutable upstream module",
@@ -310,7 +319,7 @@ try {
   );
   await withServices("native", source, ({ find }) =>
     Effect.gen(function* () {
-      Assert.deepEqual(
+      NodeAssert.deepEqual(
         normalized(yield* find.searchThread({ threadId: grandchild, query: "needle" })),
         expected.at(-1),
       );
@@ -319,7 +328,7 @@ try {
   checks.push(
     "A reopened helper reproduces committed find results from native rows without SQLite",
   );
-  Assert.equal(hash(await FS.readFile(source)), sourceHash);
+  NodeAssert.equal(hash(await NodeFSP.readFile(source)), sourceHash);
   await finishProof({
     executable,
     fixture,

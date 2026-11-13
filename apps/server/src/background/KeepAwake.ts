@@ -185,6 +185,7 @@ export const layerWithPersistenceReads = Layer.effectDiscard(
   }),
 );
 
+/** @public Retained SQLite composition for upstream-selected platforms. */
 export const layer = layerWithPersistenceReads.pipe(
   Layer.provide(SqliteAuxiliaryPersistenceReads.layer),
 );

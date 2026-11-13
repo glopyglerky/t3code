@@ -229,6 +229,7 @@ async fn query(session: &mut Session, input: ProjectionControlQuery) -> Result<C
             provider_turn_id,
             node_ids,
         } => {
+            let uses_thread_index = node_ids.len() > 2;
             let mut nodes = Vec::new();
             for id in node_ids.into_iter().collect::<BTreeSet<_>>() {
                 for row in related(session, NODES, "node_id", &id).await? {
@@ -237,7 +238,26 @@ async fn query(session: &mut Session, input: ProjectionControlQuery) -> Result<C
                     }
                 }
             }
-            // The source IN lookup walks unique node IDs in primary-key order.
+            // The pinned SQLite planner uses the primary key for at most two IN
+            // bindings and migration 83's thread/settled-leaf index otherwise.
+            // Duplicates count as bindings even though each node is returned once.
+            if uses_thread_index {
+                let mut ordered = nodes
+                    .into_iter()
+                    .map(|row| {
+                        let settled_leaf = matches!(
+                            text(&row.row, "kind")?.as_str(),
+                            "tool_call" | "assistant_message" | "reasoning"
+                        ) && matches!(
+                            text(&row.row, "status")?.as_str(),
+                            "completed" | "interrupted" | "failed" | "cancelled" | "rolled_back"
+                        ) && nullable(&row.row, "run_id")?.is_some();
+                        Ok((settled_leaf, row.order, row))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                ordered.sort_by_key(|(settled_leaf, order, _)| (*settled_leaf, *order));
+                nodes = ordered.into_iter().map(|(_, _, row)| row).collect();
+            }
             result.nodes = payloads(session, NODES, nodes).await?;
             let mut items = Vec::new();
             for row in related(session, ITEMS, "provider_turn_id", &provider_turn_id).await? {

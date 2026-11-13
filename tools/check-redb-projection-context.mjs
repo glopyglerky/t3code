@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-import * as Assert from "node:assert/strict";
-import * as FS from "node:fs/promises";
-import * as Path from "node:path";
+import * as NodeAssert from "node:assert/strict";
+import * as NodeFSP from "node:fs/promises";
+import * as NodePath from "node:path";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as ProjectionStore from "../apps/server/src/orchestration-v2/ProjectionStore.ts";
@@ -23,8 +23,11 @@ import {
 import { jsonPayloads, sampleEvents, makeEvent, fixedTime } from "./redb-event-sink-fixtures.mjs";
 
 const [executable, proofPath] = process.argv.slice(2);
-Assert.ok(executable && Path.isAbsolute(executable), "Pass an absolute native database executable");
-await FS.access(executable, FS.constants.X_OK);
+NodeAssert.ok(
+  executable && NodePath.isAbsolute(executable),
+  "Pass an absolute native database executable",
+);
+await NodeFSP.access(executable, NodeFSP.constants.X_OK);
 const oracle = await loadUpstreamModule("apps/server/src/orchestration-v2/ProjectionStore.ts");
 const fixture = await createFixture();
 const checks = [];
@@ -41,6 +44,29 @@ const file = (id) => ({
   mimeType: "text/plain",
   sizeBytes: 1,
 });
+const guestShare = {
+  id: "share:main",
+  host: "fixture.invalid",
+  createdAt: fixedTime,
+  expiresAt: "2026-11-11T12:00:00.000Z",
+  guestName: null,
+  messages: [
+    {
+      id: "guest:pending",
+      status: "pending",
+      submittedAt: fixedTime,
+      text: "Pending",
+      attachments: [file("guest"), file("duplicate")],
+    },
+    {
+      id: "guest:sent",
+      status: "sent",
+      submittedAt: fixedTime,
+      text: "Sent",
+      attachments: [file("guest_sent")],
+    },
+  ],
+};
 const ownHtml = "thread-main-00000000-0000-4000-8000-000000000001-html";
 const foreignHtml = "thread-other-00000000-0000-4000-8000-000000000001-html";
 const threadEvent = (id, extra = {}) =>
@@ -56,7 +82,7 @@ const threadEvent = (id, extra = {}) =>
     { threadId: id },
   );
 const itemEvent = (id, type, ordinal, extra = {}) => {
-  const { text, streaming, ...base } = jsonPayloads.turnItem;
+  const { text: _text, streaming: _streaming, ...base } = jsonPayloads.turnItem;
   return makeEvent("turn-item.updated", { ...base, id, type, ordinal, ...extra });
 };
 const userMessage = (id, text, extra = {}) =>
@@ -71,7 +97,9 @@ const userMessage = (id, text, extra = {}) =>
     ...extra,
   });
 const failed = (body) =>
-  Effect.exit(body).pipe(Effect.tap((exit) => Effect.sync(() => Assert.ok(Exit.isFailure(exit)))));
+  Effect.exit(body).pipe(
+    Effect.tap((exit) => Effect.sync(() => NodeAssert.ok(Exit.isFailure(exit)))),
+  );
 
 async function withServices(kind, filename, use, databaseFixture = fixture) {
   if (kind === "redb")
@@ -97,503 +125,486 @@ async function withServices(kind, filename, use, databaseFixture = fixture) {
   );
 }
 
-const seed = (store) =>
-  Effect.gen(function* () {
-    for (const event of sampleEvents) yield* store.apply(event);
-    yield* store.apply(threadEvent("thread:other"));
-    // Reverse insertion makes implicit row order distinct from id/ordinal order.
-    for (const [suffix, ordinal, status] of [
-      ["z", 3, "rolled_back"],
-      ["a", 2, "completed"],
-      ["b", 4, "rolled_back"],
-    ]) {
-      const runId = `run:${suffix}`,
-        nodeId = `node:${suffix}`,
-        attemptId = `attempt:${suffix}`;
+const seed = Effect.fn("checkRedbProjectionContext.seed")(function* (store) {
+  for (const event of sampleEvents) yield* store.apply(event);
+  yield* store.apply(threadEvent("thread:other"));
+  // Reverse insertion makes implicit row order distinct from id/ordinal order.
+  for (const [suffix, ordinal, status] of [
+    ["z", 3, "rolled_back"],
+    ["a", 2, "completed"],
+    ["b", 4, "rolled_back"],
+  ]) {
+    const runId = `run:${suffix}`,
+      nodeId = `node:${suffix}`,
+      attemptId = `attempt:${suffix}`;
+    yield* store.apply(
+      makeEvent("run.created", {
+        ...jsonPayloads.run,
+        id: runId,
+        ordinal,
+        status,
+        rootNodeId: nodeId,
+        activeAttemptId: attemptId,
+        completedAt: fixedTime,
+        userMessageId: `message:${suffix}`,
+      }),
+    );
+    yield* store.apply(
+      makeEvent("node.updated", {
+        ...jsonPayloads.node,
+        id: nodeId,
+        rootNodeId: nodeId,
+        runId,
+        status: "completed",
+        completedAt: fixedTime,
+      }),
+    );
+    for (const attemptOrdinal of [2, 1])
       yield* store.apply(
-        makeEvent("run.created", {
-          ...jsonPayloads.run,
-          id: runId,
-          ordinal,
-          status,
-          rootNodeId: nodeId,
-          activeAttemptId: attemptId,
-          completedAt: fixedTime,
-          userMessageId: `message:${suffix}`,
-        }),
-      );
-      yield* store.apply(
-        makeEvent("node.updated", {
-          ...jsonPayloads.node,
-          id: nodeId,
-          rootNodeId: nodeId,
+        makeEvent("run-attempt.created", {
+          ...jsonPayloads.attempt,
+          id: attemptOrdinal === 1 ? attemptId : `${attemptId}:second`,
           runId,
+          rootNodeId: nodeId,
+          attemptOrdinal,
           status: "completed",
           completedAt: fixedTime,
         }),
       );
-      for (const attemptOrdinal of [2, 1])
-        yield* store.apply(
-          makeEvent("run-attempt.created", {
-            ...jsonPayloads.attempt,
-            id: attemptOrdinal === 1 ? attemptId : `${attemptId}:second`,
-            runId,
-            rootNodeId: nodeId,
-            attemptOrdinal,
-            status: "completed",
-            completedAt: fixedTime,
-          }),
-        );
-      yield* store.apply(
-        makeEvent("checkpoint.captured", {
-          ...jsonPayloads.checkpoint,
-          id: `checkpoint:${suffix}`,
-          runId,
-          nodeId,
-          ordinalWithinScope: ordinal,
-          appRunOrdinal: ordinal,
-        }),
-      );
-    }
     yield* store.apply(
       makeEvent("checkpoint.captured", {
         ...jsonPayloads.checkpoint,
-        id: "checkpoint:failed",
-        ordinalWithinScope: 5,
-        appRunOrdinal: 5,
-        status: "error",
+        id: `checkpoint:${suffix}`,
+        runId,
+        nodeId,
+        ordinalWithinScope: ordinal,
+        appRunOrdinal: ordinal,
       }),
     );
-    yield* store.apply(
-      makeEvent("checkpoint-scope.created", {
-        ...jsonPayloads.checkpointScope,
-        id: "scope:unused",
-        ordinalWithinParent: 1,
-        cwd: "/fixture/other",
-      }),
-    );
-    yield* store.apply(
-      makeEvent("context-handoff.updated", { ...jsonPayloads.contextHandoff, id: "handoff:z" }),
-    );
-    yield* store.apply(
-      makeEvent("context-handoff.updated", { ...jsonPayloads.contextHandoff, id: "handoff:a" }),
-    );
-    yield* store.apply(
-      makeEvent("context-transfer.created", {
-        ...jsonPayloads.contextTransfer,
-        id: "transfer:incoming",
-        sourceThreadId: "thread:other",
-      }),
-    );
-    yield* store.apply(
-      makeEvent("context-transfer.created", {
-        ...jsonPayloads.contextTransfer,
-        id: "transfer:outgoing",
-        targetThreadId: "thread:other",
-      }),
-    );
-    yield* store.apply(
-      userMessage("message:z", "\u2000/CoMpAcT\ufeff", {
-        attachments: [file("message_z"), file("duplicate")],
-      }),
-    );
-    yield* store.apply(userMessage("message:a", "/goalfoo", { attachments: [file("message_a")] }));
-    yield* store.apply(userMessage("message:ordinary", "Unrelated history", { runId: "run:a" }));
-    yield* store.apply(userMessage("message:uppercase-goal", "/GOAL ignore"));
-    yield* store.apply(
-      itemEvent("item:answer-z", "user_input_request", 99, {
+  }
+  yield* store.apply(
+    makeEvent("checkpoint.captured", {
+      ...jsonPayloads.checkpoint,
+      id: "checkpoint:failed",
+      ordinalWithinScope: 5,
+      appRunOrdinal: 5,
+      status: "error",
+    }),
+  );
+  yield* store.apply(
+    makeEvent("checkpoint-scope.created", {
+      ...jsonPayloads.checkpointScope,
+      id: "scope:unused",
+      ordinalWithinParent: 1,
+      cwd: "/fixture/other",
+    }),
+  );
+  yield* store.apply(
+    makeEvent("context-handoff.updated", { ...jsonPayloads.contextHandoff, id: "handoff:z" }),
+  );
+  yield* store.apply(
+    makeEvent("context-handoff.updated", { ...jsonPayloads.contextHandoff, id: "handoff:a" }),
+  );
+  yield* store.apply(
+    makeEvent("context-transfer.created", {
+      ...jsonPayloads.contextTransfer,
+      id: "transfer:incoming",
+      sourceThreadId: "thread:other",
+    }),
+  );
+  yield* store.apply(
+    makeEvent("context-transfer.created", {
+      ...jsonPayloads.contextTransfer,
+      id: "transfer:outgoing",
+      targetThreadId: "thread:other",
+    }),
+  );
+  yield* store.apply(
+    userMessage("message:z", "\u2000/CoMpAcT\ufeff", {
+      attachments: [file("message_z"), file("duplicate")],
+    }),
+  );
+  yield* store.apply(userMessage("message:a", "/goalfoo", { attachments: [file("message_a")] }));
+  yield* store.apply(userMessage("message:ordinary", "Unrelated history", { runId: "run:a" }));
+  yield* store.apply(userMessage("message:uppercase-goal", "/GOAL ignore"));
+  yield* store.apply(
+    itemEvent("item:answer-z", "user_input_request", 99, {
+      requestId: "request:main",
+      questions: [],
+      questionAnswer: {
         requestId: "request:main",
-        questions: [],
-        questionAnswer: {
-          requestId: "request:main",
-          answers: {},
-          attachmentsByQuestionId: {
-            z: [file("answer_z"), file("duplicate")],
-            a: [file("answer_a")],
+        answers: {},
+        attachmentsByQuestionId: {
+          z: [file("answer_z"), file("duplicate")],
+          a: [file("answer_a")],
+        },
+      },
+    }),
+  );
+  yield* store.apply(
+    itemEvent("item:answer-a", "user_input_request", 2, {
+      requestId: "request:main",
+      questions: [],
+      questionAnswer: {
+        requestId: "request:main",
+        answers: {},
+        attachmentsByQuestionId: { q: [file("answer_second")] },
+      },
+    }),
+  );
+  for (const [id, attachmentId, ordinal] of [
+    ["item:render", ownHtml, 90],
+    ["item:foreign-render", foreignHtml, 91],
+  ]) {
+    yield* store.apply(
+      itemEvent(id, "dynamic_tool", ordinal, {
+        toolName: "mcp__t3-code__html_render",
+        input: {},
+        output: [
+          {
+            type: "text",
+            text: JSON.stringify({ htmlRender: { attachmentId, title: "Fixture", height: 300 } }),
           },
-        },
+        ],
       }),
     );
-    yield* store.apply(
-      itemEvent("item:answer-a", "user_input_request", 2, {
-        requestId: "request:main",
-        questions: [],
-        questionAnswer: {
-          requestId: "request:main",
-          answers: {},
-          attachmentsByQuestionId: { q: [file("answer_second")] },
-        },
-      }),
-    );
-    for (const [id, attachmentId, ordinal] of [
-      ["item:render", ownHtml, 90],
-      ["item:foreign-render", foreignHtml, 91],
-    ]) {
-      yield* store.apply(
-        itemEvent(id, "dynamic_tool", ordinal, {
-          toolName: "mcp__t3-code__html_render",
-          input: {},
-          output: [
-            {
-              type: "text",
-              text: JSON.stringify({ htmlRender: { attachmentId, title: "Fixture", height: 300 } }),
-            },
-          ],
-        }),
-      );
-    }
-    yield* store.apply(
-      makeEvent("thread.metadata-updated", {
-        ...jsonPayloads.thread,
-        guestShare: {
-          id: "share:main",
-          host: "fixture.invalid",
-          createdAt: fixedTime,
-          expiresAt: "2026-11-11T12:00:00.000Z",
-          guestName: null,
-          messages: [
-            {
-              id: "guest:pending",
-              status: "pending",
-              submittedAt: fixedTime,
-              text: "Pending",
-              attachments: [file("guest"), file("duplicate")],
-            },
-            {
-              id: "guest:sent",
-              status: "sent",
-              submittedAt: fixedTime,
-              text: "Sent",
-              attachments: [file("guest_sent")],
-            },
-          ],
-        },
-      }),
-    );
-  });
+  }
+  yield* store.apply(
+    makeEvent("thread.metadata-updated", {
+      ...jsonPayloads.thread,
+      guestShare,
+    }),
+  );
+});
 
-function exercise({ store, apply, transaction }) {
-  return Effect.gen(function* () {
-    const result = {};
-    result.turn = yield* store.getTurnStartContext("thread:main", "run:main");
-    result.recovery = yield* store.getRuntimeRecoveryProjection("thread:main");
-    result.checkpoint = yield* store.getCheckpointContext("thread:main");
-    result.capture = yield* store.getCheckpointCaptureContext("thread:main", captureTarget);
-    result.rollbackEarly = yield* store.getCheckpointRollbackContext("thread:main", rollbackTarget);
-    result.attachments = yield* store.getThreadAttachmentIds("thread:main");
-    Assert.equal(result.rollbackEarly.targetAttempt, undefined);
-    Assert.equal(result.turn.hasConversation, true);
-    Assert.deepEqual(
-      result.turn.nodes.map((v) => v.id),
-      ["node:main"],
+const exercise = Effect.fn("checkRedbProjectionContext.exercise")(function* ({
+  store,
+  apply,
+  transaction,
+}) {
+  const result = {};
+  result.turn = yield* store.getTurnStartContext("thread:main", "run:main");
+  result.recovery = yield* store.getRuntimeRecoveryProjection("thread:main");
+  result.checkpoint = yield* store.getCheckpointContext("thread:main");
+  result.capture = yield* store.getCheckpointCaptureContext("thread:main", captureTarget);
+  result.rollbackEarly = yield* store.getCheckpointRollbackContext("thread:main", rollbackTarget);
+  result.attachments = yield* store.getThreadAttachmentIds("thread:main");
+  NodeAssert.equal(result.rollbackEarly.targetAttempt, undefined);
+  NodeAssert.equal(result.turn.hasConversation, true);
+  NodeAssert.deepEqual(
+    result.turn.nodes.map((v) => v.id),
+    ["node:main"],
+  );
+  NodeAssert.deepEqual(
+    result.turn.checkpointScopes.map((v) => v.id),
+    ["scope:main"],
+  );
+  NodeAssert.deepEqual(
+    result.turn.messages.map((v) => v.id),
+    ["message:a", "message:main", "message:z"],
+  );
+  NodeAssert.ok(result.attachments.includes(ownHtml));
+  NodeAssert.ok(result.attachments.includes("guest"));
+  NodeAssert.ok(!result.attachments.includes(foreignHtml));
+  NodeAssert.ok(!result.attachments.includes("guest_sent"));
+  NodeAssert.equal(result.attachments.filter((id) => id === "duplicate").length, 1);
+  for (const [method, arg] of [
+    ["getTurnStartContext", "run:main"],
+    ["getRuntimeRecoveryProjection"],
+    ["getCheckpointContext"],
+    ["getCheckpointCaptureContext", captureTarget],
+    ["getCheckpointRollbackContext", rollbackTarget],
+  ])
+    NodeAssert.equal(
+      (yield* store[method]("missing", arg).pipe(Effect.flip))._tag,
+      "ProjectionStoreThreadNotFoundError",
     );
-    Assert.deepEqual(
-      result.turn.checkpointScopes.map((v) => v.id),
-      ["scope:main"],
-    );
-    Assert.deepEqual(
-      result.turn.messages.map((v) => v.id),
-      ["message:a", "message:main", "message:z"],
-    );
-    Assert.ok(result.attachments.includes(ownHtml));
-    Assert.ok(!result.attachments.includes(foreignHtml));
-    Assert.ok(!result.attachments.includes("guest_sent"));
-    Assert.equal(result.attachments.filter((id) => id === "duplicate").length, 1);
-    for (const [method, arg] of [
-      ["getTurnStartContext", "run:main"],
-      ["getRuntimeRecoveryProjection"],
-      ["getCheckpointContext"],
-      ["getCheckpointCaptureContext", captureTarget],
-      ["getCheckpointRollbackContext", rollbackTarget],
-    ])
-      Assert.equal(
-        (yield* store[method]("missing", arg).pipe(Effect.flip))._tag,
-        "ProjectionStoreThreadNotFoundError",
-      );
-    Assert.deepEqual(yield* store.getThreadAttachmentIds("missing"), []);
-    result.foreignCapture = yield* store.getCheckpointCaptureContext("thread:other", captureTarget);
-    Assert.equal(result.foreignCapture.run, undefined);
-    result.missingRun = yield* store.getTurnStartContext("thread:main", "missing");
-    Assert.deepEqual(result.missingRun.nodes, []);
+  NodeAssert.deepEqual(yield* store.getThreadAttachmentIds("missing"), []);
+  result.foreignCapture = yield* store.getCheckpointCaptureContext("thread:other", captureTarget);
+  NodeAssert.equal(result.foreignCapture.run, undefined);
+  result.missingRun = yield* store.getTurnStartContext("thread:main", "missing");
+  NodeAssert.deepEqual(result.missingRun.nodes, []);
 
-    yield* apply(
-      makeEvent("thread.metadata-updated", {
-        ...jsonPayloads.thread,
-        activeProviderThreadId: "provider:main",
-        lineage: { ...jsonPayloads.thread.lineage, sideChat: true },
-      }),
-    );
-    result.rollback = yield* store.getCheckpointRollbackContext("thread:main", rollbackTarget);
-    result.sideChat = yield* store.getCheckpointCaptureContext("thread:main", captureTarget);
-    Assert.equal(result.rollback.targetAttempt.id, "attempt:main");
-    Assert.equal(result.rollback.providerSession.id, "session:main");
-    Assert.deepEqual(
-      result.rollback.runsToRollback.map((run) => run.id),
-      ["run:a"],
-    );
-    Assert.equal(result.sideChat.sideChat, true);
-    Assert.equal(result.rollback.rolledBackAttemptIds.length, 4);
+  yield* apply(
+    makeEvent("thread.metadata-updated", {
+      ...jsonPayloads.thread,
+      activeProviderThreadId: "provider:main",
+      lineage: { ...jsonPayloads.thread.lineage, sideChat: true },
+      guestShare,
+    }),
+  );
+  result.rollback = yield* store.getCheckpointRollbackContext("thread:main", rollbackTarget);
+  result.sideChat = yield* store.getCheckpointCaptureContext("thread:main", captureTarget);
+  NodeAssert.equal(result.rollback.targetAttempt.id, "attempt:main");
+  NodeAssert.equal(result.rollback.providerSession.id, "session:main");
+  NodeAssert.deepEqual(
+    result.rollback.runsToRollback.map((run) => run.id),
+    ["run:a"],
+  );
+  NodeAssert.equal(result.sideChat.sideChat, true);
+  NodeAssert.equal(result.rollback.rolledBackAttemptIds.length, 4);
 
-    // Missing snapshots still anchor a run, while unowned missing slots may rebaseline.
-    yield* failed(
-      transaction(
-        Effect.gen(function* () {
-          for (const [id, ordinalWithinScope, runId] of [
-            ["checkpoint:missing-owned", 901, "run:main"],
-            ["checkpoint:missing-unowned", 902, null],
-          ])
-            yield* apply(
-              makeEvent("checkpoint.captured", {
-                ...jsonPayloads.checkpoint,
-                id,
-                ordinalWithinScope,
-                runId,
-                status: "missing",
-              }),
-            );
-          result.missingCapture = yield* store.getCheckpointCaptureContext(
-            "thread:main",
-            captureTarget,
-          );
+  // Missing snapshots still anchor a run, while unowned missing slots may rebaseline.
+  yield* failed(
+    transaction(
+      Effect.gen(function* () {
+        for (const [id, ordinalWithinScope, runId] of [
+          ["checkpoint:missing-owned", 901, "run:main"],
+          ["checkpoint:missing-unowned", 902, null],
+        ])
           yield* apply(
-            makeEvent("checkpoint.captured", { ...jsonPayloads.checkpoint, status: "missing" }),
-          );
-          result.missingRollback = yield* store.getCheckpointRollbackContext(
-            "thread:main",
-            rollbackTarget,
-          );
-          return yield* Effect.fail("missing-checkpoint fixture rollback");
-        }),
-      ),
-    );
-    Assert.ok(result.missingCapture.preservedCheckpointOrdinals.includes(901));
-    Assert.ok(!result.missingCapture.preservedCheckpointOrdinals.includes(902));
-    Assert.equal(result.missingRollback.targetAttempt.id, "attempt:main");
-
-    // Deleting a source preserves files still visible in an active run fork, including runless files.
-    yield* failed(
-      transaction(
-        Effect.gen(function* () {
-          yield* apply(
-            userMessage("message:runless-attachment", "runless", {
-              runId: null,
-              attachments: [file("runless_shared")],
+            makeEvent("checkpoint.captured", {
+              ...jsonPayloads.checkpoint,
+              id,
+              ordinalWithinScope,
+              runId,
+              status: "missing",
             }),
           );
-          yield* apply(
-            threadEvent("thread:attachment-fork", {
-              forkedFrom: { type: "run", threadId: "thread:main", runId: "run:z" },
-              lineage: {
-                parentThreadId: "thread:main",
-                relationshipToParent: "fork",
-                rootThreadId: "thread:main",
-              },
-            }),
-          );
-          result.liveForkAttachments = yield* store.getThreadAttachmentIds("thread:main");
-          yield* apply(
-            threadEvent("thread:attachment-fork", {
-              forkedFrom: { type: "run", threadId: "thread:main", runId: "run:z" },
-              lineage: {
-                parentThreadId: "thread:main",
-                relationshipToParent: "fork",
-                rootThreadId: "thread:main",
-                sideChat: true,
-              },
-            }),
-          );
-          result.sideChatAttachments = yield* store.getThreadAttachmentIds("thread:main");
-          return yield* Effect.fail("live-fork attachment fixture rollback");
-        }),
-      ),
-    );
-    Assert.ok(!result.liveForkAttachments.includes("runless_shared"));
-    Assert.ok(!result.liveForkAttachments.includes(ownHtml));
-    Assert.ok(result.liveForkAttachments.includes("guest"));
-    Assert.ok(result.sideChatAttachments.includes("runless_shared"));
-    Assert.ok(result.sideChatAttachments.includes(ownHtml));
+        result.missingCapture = yield* store.getCheckpointCaptureContext(
+          "thread:main",
+          captureTarget,
+        );
+        yield* apply(
+          makeEvent("checkpoint.captured", { ...jsonPayloads.checkpoint, status: "missing" }),
+        );
+        result.missingRollback = yield* store.getCheckpointRollbackContext(
+          "thread:main",
+          rollbackTarget,
+        );
+        return yield* Effect.fail("missing-checkpoint fixture rollback");
+      }),
+    ),
+  );
+  NodeAssert.ok(result.missingCapture.preservedCheckpointOrdinals.includes(901));
+  NodeAssert.ok(!result.missingCapture.preservedCheckpointOrdinals.includes(902));
+  NodeAssert.equal(result.missingRollback.targetAttempt.id, "attempt:main");
 
-    // Recovery keeps live work owners, pending input nodes and orphan root turns.
-    for (const [suffix, ordinal, status] of [
-      ["work", 5, "completed"],
-      ["background", 6, "failed"],
-      ["never", 7, "failed"],
-      ["latest", 8, "completed"],
-    ]) {
-      yield* apply(
-        makeEvent("run.created", {
-          ...jsonPayloads.run,
-          id: `run:${suffix}`,
-          ordinal,
-          status,
-          providerThreadId:
-            suffix === "background" || suffix === "never" ? "provider:background" : "provider:main",
-          rootNodeId: `node:${suffix}`,
-          activeAttemptId: null,
-          completedAt: fixedTime,
-          startedAt: suffix === "never" ? null : fixedTime,
-        }),
-      );
-      yield* apply(
-        makeEvent("node.updated", {
-          ...jsonPayloads.node,
-          id: `node:${suffix}`,
-          runId: `run:${suffix}`,
-          rootNodeId: `node:${suffix}`,
-        }),
-      );
-    }
-    yield* apply(
-      makeEvent("provider-thread.updated", {
-        ...jsonPayloads.providerThread,
-        id: "provider:background",
-        status: "idle",
-        nativeThreadRef: null,
-        pendingBackgroundTasks: [{ taskId: "watch", kind: "monitor", awaited: true }],
+  // Deleting a source preserves files still visible in an active run fork, including runless files.
+  yield* failed(
+    transaction(
+      Effect.gen(function* () {
+        yield* apply(
+          userMessage("message:runless-attachment", "runless", {
+            runId: null,
+            attachments: [file("runless_shared")],
+          }),
+        );
+        yield* apply(
+          threadEvent("thread:attachment-fork", {
+            forkedFrom: { type: "run", threadId: "thread:main", runId: "run:z" },
+            lineage: {
+              parentThreadId: "thread:main",
+              relationshipToParent: "fork",
+              rootThreadId: "thread:main",
+            },
+          }),
+        );
+        result.liveForkAttachments = yield* store.getThreadAttachmentIds("thread:main");
+        yield* apply(
+          threadEvent("thread:attachment-fork", {
+            forkedFrom: { type: "run", threadId: "thread:main", runId: "run:z" },
+            lineage: {
+              parentThreadId: "thread:main",
+              relationshipToParent: "fork",
+              rootThreadId: "thread:main",
+              sideChat: true,
+            },
+          }),
+        );
+        result.sideChatAttachments = yield* store.getThreadAttachmentIds("thread:main");
+        return yield* Effect.fail("live-fork attachment fixture rollback");
       }),
-    );
+    ),
+  );
+  NodeAssert.ok(!result.liveForkAttachments.includes("runless_shared"));
+  NodeAssert.ok(!result.liveForkAttachments.includes(ownHtml));
+  NodeAssert.ok(result.liveForkAttachments.includes("guest"));
+  NodeAssert.ok(result.sideChatAttachments.includes("runless_shared"));
+  NodeAssert.ok(result.sideChatAttachments.includes(ownHtml));
+
+  // Recovery keeps live work owners, pending input nodes and orphan root turns.
+  for (const [suffix, ordinal, status] of [
+    ["work", 5, "completed"],
+    ["background", 6, "failed"],
+    ["never", 7, "failed"],
+    ["latest", 8, "completed"],
+  ]) {
     yield* apply(
-      itemEvent("item:work", "command_execution", 130, {
-        runId: "run:work",
-        nodeId: "node:work",
-        input: "fixture",
-        status: "waiting",
-      }),
-    );
-    yield* apply(
-      itemEvent("item:input", "user_input_request", 140, {
-        runId: "run:never",
-        nodeId: "node:never",
-        requestId: "request:input",
-        questions: [],
-      }),
-    );
-    yield* apply(
-      makeEvent("runtime-request.updated", {
-        ...jsonPayloads.request,
-        id: "request:input",
-        nodeId: "node:never",
+      makeEvent("run.created", {
+        ...jsonPayloads.run,
+        id: `run:${suffix}`,
+        ordinal,
+        status,
+        providerThreadId:
+          suffix === "background" || suffix === "never" ? "provider:background" : "provider:main",
+        rootNodeId: `node:${suffix}`,
+        activeAttemptId: null,
+        completedAt: fixedTime,
+        startedAt: suffix === "never" ? null : fixedTime,
       }),
     );
     yield* apply(
       makeEvent("node.updated", {
         ...jsonPayloads.node,
-        id: "node:orphan",
-        runId: null,
-        rootNodeId: "node:orphan",
+        id: `node:${suffix}`,
+        runId: `run:${suffix}`,
+        rootNodeId: `node:${suffix}`,
       }),
     );
-    yield* apply(
-      makeEvent("provider-turn.updated", {
-        ...jsonPayloads.providerTurn,
-        id: "turn:orphan",
-        ordinal: 4,
-        runAttemptId: null,
-        nodeId: "node:orphan",
-      }),
-    );
-    yield* apply(
-      itemEvent("item:orphan", "reasoning", 150, {
-        runId: null,
-        nodeId: "node:orphan",
-        text: "Orphan",
-        streaming: true,
-      }),
-    );
-    yield* apply(
-      makeEvent("provider-session.attached", {
-        ...jsonPayloads.providerSession,
-        id: "session:detached",
-      }),
-    );
-    yield* apply(
-      makeEvent("provider-session.detached", {
-        providerSessionId: "session:detached",
-        detachedAt: fixedTime,
-      }),
-    );
-    yield* apply(
-      makeEvent("subagent.updated", {
-        ...jsonPayloads.subagent,
-        id: "subagent:failed",
-        status: "failed",
-        completedAt: fixedTime,
-      }),
-    );
-    result.liveRecovery = yield* store.getRuntimeRecoveryProjection("thread:main");
-    Assert.ok(result.liveRecovery.runs.some((run) => run.id === "run:background"));
-    Assert.ok(!result.liveRecovery.runs.some((run) => run.id === "run:never"));
-    Assert.ok(result.liveRecovery.runs.some((run) => run.id === "run:work"));
-    Assert.ok(result.liveRecovery.nodes.some((node) => node.id === "node:never"));
-    Assert.ok(result.liveRecovery.providerTurns.some((turn) => turn.id === "turn:orphan"));
-    Assert.ok(
-      result.liveRecovery.providerSessions.some((session) => session.id === "session:detached"),
-    );
-    Assert.ok(!result.liveRecovery.subagents.some((subagent) => subagent.id === "subagent:failed"));
+  }
+  yield* apply(
+    makeEvent("provider-thread.updated", {
+      ...jsonPayloads.providerThread,
+      id: "provider:background",
+      status: "idle",
+      nativeThreadRef: null,
+      pendingBackgroundTasks: [{ taskId: "watch", kind: "monitor", awaited: true }],
+    }),
+  );
+  yield* apply(
+    itemEvent("item:work", "command_execution", 130, {
+      runId: "run:work",
+      nodeId: "node:work",
+      input: "fixture",
+      status: "waiting",
+    }),
+  );
+  yield* apply(
+    itemEvent("item:input", "user_input_request", 140, {
+      runId: "run:never",
+      nodeId: "node:never",
+      requestId: "request:input",
+      questions: [],
+    }),
+  );
+  yield* apply(
+    makeEvent("runtime-request.updated", {
+      ...jsonPayloads.request,
+      id: "request:input",
+      nodeId: "node:never",
+    }),
+  );
+  yield* apply(
+    makeEvent("node.updated", {
+      ...jsonPayloads.node,
+      id: "node:orphan",
+      runId: null,
+      rootNodeId: "node:orphan",
+    }),
+  );
+  yield* apply(
+    makeEvent("provider-turn.updated", {
+      ...jsonPayloads.providerTurn,
+      id: "turn:orphan",
+      ordinal: 4,
+      runAttemptId: null,
+      nodeId: "node:orphan",
+    }),
+  );
+  yield* apply(
+    itemEvent("item:orphan", "reasoning", 150, {
+      runId: null,
+      nodeId: "node:orphan",
+      text: "Orphan",
+      streaming: true,
+    }),
+  );
+  yield* apply(
+    makeEvent("provider-session.attached", {
+      ...jsonPayloads.providerSession,
+      id: "session:detached",
+    }),
+  );
+  yield* apply(
+    makeEvent("provider-session.detached", {
+      providerSessionId: "session:detached",
+      detachedAt: fixedTime,
+    }),
+  );
+  yield* apply(
+    makeEvent("subagent.updated", {
+      ...jsonPayloads.subagent,
+      id: "subagent:failed",
+      status: "failed",
+      completedAt: fixedTime,
+    }),
+  );
+  result.liveRecovery = yield* store.getRuntimeRecoveryProjection("thread:main");
+  NodeAssert.ok(result.liveRecovery.runs.some((run) => run.id === "run:background"));
+  NodeAssert.ok(!result.liveRecovery.runs.some((run) => run.id === "run:never"));
+  NodeAssert.ok(result.liveRecovery.runs.some((run) => run.id === "run:work"));
+  NodeAssert.ok(result.liveRecovery.nodes.some((node) => node.id === "node:never"));
+  NodeAssert.ok(result.liveRecovery.providerTurns.some((turn) => turn.id === "turn:orphan"));
+  NodeAssert.ok(
+    result.liveRecovery.providerSessions.some((session) => session.id === "session:detached"),
+  );
+  NodeAssert.ok(
+    !result.liveRecovery.subagents.some((subagent) => subagent.id === "subagent:failed"),
+  );
 
-    // Compaction alone is not conversation, while its attachments are.
-    yield* apply(threadEvent("thread:compact"));
-    const compact = (attachments) =>
-      makeEvent(
-        "message.updated",
-        {
-          ...jsonPayloads.message,
-          id: "message:compact-only",
-          threadId: "thread:compact",
-          runId: null,
-          nodeId: null,
-          role: "user",
-          text: "\u00a0 /COMPACT \ufeff",
-          attachments,
-          streaming: false,
-        },
-        { threadId: "thread:compact" },
+  // Compaction alone is not conversation, while its attachments are.
+  yield* apply(threadEvent("thread:compact"));
+  const compact = (attachments) =>
+    makeEvent(
+      "message.updated",
+      {
+        ...jsonPayloads.message,
+        id: "message:compact-only",
+        threadId: "thread:compact",
+        runId: null,
+        nodeId: null,
+        role: "user",
+        text: "\u00a0 /COMPACT \ufeff",
+        attachments,
+        streaming: false,
+      },
+      { threadId: "thread:compact" },
+    );
+  yield* apply(compact([]));
+  result.compactOnly = yield* store.getTurnStartContext("thread:compact", "missing");
+  NodeAssert.equal(result.compactOnly.hasConversation, false);
+  yield* apply(compact([file("compact_file")]));
+  result.compactFile = yield* store.getTurnStartContext("thread:compact", "missing");
+  NodeAssert.equal(result.compactFile.hasConversation, true);
+
+  yield* transaction(
+    Effect.gen(function* () {
+      yield* failed(
+        transaction(
+          Effect.gen(function* () {
+            yield* apply(
+              makeEvent("checkpoint.captured", {
+                ...jsonPayloads.checkpoint,
+                id: "checkpoint:abort",
+                ordinalWithinScope: 999,
+                appRunOrdinal: 999,
+              }),
+            );
+            NodeAssert.ok(
+              (yield* store.getCheckpointCaptureContext(
+                "thread:main",
+                captureTarget,
+              )).preservedCheckpointOrdinals.includes(999),
+            );
+            return yield* Effect.fail("rollback fixture checkpoint");
+          }),
+        ),
       );
-    yield* apply(compact([]));
-    result.compactOnly = yield* store.getTurnStartContext("thread:compact", "missing");
-    Assert.equal(result.compactOnly.hasConversation, false);
-    yield* apply(compact([file("compact_file")]));
-    result.compactFile = yield* store.getTurnStartContext("thread:compact", "missing");
-    Assert.equal(result.compactFile.hasConversation, true);
-
-    yield* transaction(
-      Effect.gen(function* () {
-        yield* failed(
-          transaction(
-            Effect.gen(function* () {
-              yield* apply(
-                makeEvent("checkpoint.captured", {
-                  ...jsonPayloads.checkpoint,
-                  id: "checkpoint:abort",
-                  ordinalWithinScope: 999,
-                  appRunOrdinal: 999,
-                }),
-              );
-              Assert.ok(
-                (yield* store.getCheckpointCaptureContext(
-                  "thread:main",
-                  captureTarget,
-                )).preservedCheckpointOrdinals.includes(999),
-              );
-              return yield* Effect.fail("rollback fixture checkpoint");
-            }),
-          ),
-        );
-        Assert.ok(
-          !(yield* store.getCheckpointCaptureContext(
-            "thread:main",
-            captureTarget,
-          )).preservedCheckpointOrdinals.includes(999),
-        );
-      }),
-    );
-    result.finalCapture = yield* store.getCheckpointCaptureContext("thread:main", captureTarget);
-    return normalized(result);
-  });
-}
+      NodeAssert.ok(
+        !(yield* store.getCheckpointCaptureContext(
+          "thread:main",
+          captureTarget,
+        )).preservedCheckpointOrdinals.includes(999),
+      );
+    }),
+  );
+  result.finalCapture = yield* store.getCheckpointCaptureContext("thread:main", captureTarget);
+  return normalized(result);
+});
 
 try {
-  const source = Path.join(fixture.root, "source.sqlite");
+  const source = NodePath.join(fixture.root, "source.sqlite");
   await createMigratedSqlite(source, () =>
     Effect.gen(function* () {
       const store = yield* oracle.module.ProjectionStoreV2.pipe(
@@ -602,12 +613,12 @@ try {
       yield* seed(store);
     }),
   );
-  const upstream = Path.join(fixture.root, "upstream.sqlite"),
-    retained = Path.join(fixture.root, "retained.sqlite");
-  await FS.copyFile(source, upstream);
-  await FS.copyFile(source, retained);
-  const sourceHash = hash(await FS.readFile(source));
-  const exported = Path.join(fixture.root, "source.ndjson");
+  const upstream = NodePath.join(fixture.root, "upstream.sqlite"),
+    retained = NodePath.join(fixture.root, "retained.sqlite");
+  await NodeFSP.copyFile(source, upstream);
+  await NodeFSP.copyFile(source, retained);
+  const sourceHash = hash(await NodeFSP.readFile(source));
+  const exported = NodePath.join(fixture.root, "source.ndjson");
   exportSqliteState({ source, destination: exported });
   nativeRequest(executable, fixture, "initialize", {
     operation: "import_sqlite_application",
@@ -619,13 +630,13 @@ try {
     const failures = [];
     for (const key of Object.keys(expected)) {
       try {
-        Assert.deepEqual(actual[key], expected[key], `${kind} ${key} matches immutable source`);
+        NodeAssert.deepEqual(actual[key], expected[key], `${kind} ${key} matches immutable source`);
       } catch (error) {
         failures.push(key);
         console.error(error.message);
       }
     }
-    Assert.deepEqual(failures, [], `${kind} context methods match immutable source`);
+    NodeAssert.deepEqual(failures, [], `${kind} context methods match immutable source`);
   }
   checks.push(
     "Six context methods match immutable upstream and retained SQLite with imported and live projection rows",
@@ -639,11 +650,11 @@ try {
   );
   await withServices("redb", source, ({ store }) =>
     Effect.gen(function* () {
-      Assert.deepEqual(
+      NodeAssert.deepEqual(
         normalized(yield* store.getCheckpointCaptureContext("thread:main", captureTarget)),
         expected.finalCapture,
       );
-      Assert.deepEqual(
+      NodeAssert.deepEqual(
         normalized(yield* store.getRuntimeRecoveryProjection("thread:main")),
         expected.liveRecovery,
       );
@@ -728,7 +739,7 @@ try {
   ]) {
     const damaged = await createFixture();
     try {
-      const input = Path.join(damaged.root, "source.sqlite");
+      const input = NodePath.join(damaged.root, "source.sqlite");
       await createMigratedSqlite(input, (sql) =>
         Effect.gen(function* () {
           const store = yield* oracle.module.ProjectionStoreV2.pipe(
@@ -752,7 +763,7 @@ try {
           ]);
         }),
       );
-      const exported = Path.join(damaged.root, "source.ndjson");
+      const exported = NodePath.join(damaged.root, "source.ndjson");
       exportSqliteState({ source: input, destination: exported });
       nativeRequest(executable, damaged, "initialize", {
         operation: "import_sqlite_application",
@@ -764,7 +775,7 @@ try {
           Effect.gen(function* () {
             const result = yield* Effect.exit(store[test.method]("thread:main", test.argument));
             if (test.fails) {
-              Assert.equal(result._tag, "Failure", `${backend}: ${test.name}`);
+              NodeAssert.equal(result._tag, "Failure", `${backend}: ${test.name}`);
               const reasons = result.cause.reasons.map((reason) =>
                 reason._tag === "Fail"
                   ? { kind: "failure", name: reason.error._tag }
@@ -772,7 +783,7 @@ try {
                     ? { kind: "defect", name: reason.defect.name }
                     : { kind: "interruption" },
               );
-              Assert.deepEqual(
+              NodeAssert.deepEqual(
                 reasons,
                 [
                   test.method === "getThreadAttachmentIds"
@@ -783,16 +794,16 @@ try {
               );
               return reasons;
             }
-            Assert.equal(result._tag, "Success", `${backend}: ${test.name}`);
+            NodeAssert.equal(result._tag, "Success", `${backend}: ${test.name}`);
             return normalized(result.value);
           });
       const expected = await withServices("upstream", input, observe("upstream"));
-      Assert.deepEqual(
+      NodeAssert.deepEqual(
         await withServices("sqlite", input, observe("sqlite")),
         expected,
         `SQLite ${test.name}`,
       );
-      Assert.deepEqual(
+      NodeAssert.deepEqual(
         await withServices("redb", input, observe("redb"), damaged),
         expected,
         `Native ${test.name}`,
@@ -804,7 +815,7 @@ try {
   checks.push(
     "Malformed user predicates and selected renders fail, while unrelated assistant/tool rows and json_valid-guarded runtime rows stay excluded",
   );
-  Assert.equal(hash(await FS.readFile(source)), sourceHash);
+  NodeAssert.equal(hash(await NodeFSP.readFile(source)), sourceHash);
   await finishProof({
     executable,
     fixture,
