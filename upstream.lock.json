@@ -4,9 +4,9 @@
     "repository": "pingdotgg/t3code",
     "channel": "default-branch",
     "branch": "main",
-    "source_url": "https://github.com/pingdotgg/t3code/commit/2d8a843e6be9ca170f3bce98cc92ad76617b00c4",
-    "commit": "2d8a843e6be9ca170f3bce98cc92ad76617b00c4",
-    "root_tree": "06437d8c0d1420db0db0d7ed0129c620cae907cf"
+    "source_url": "https://github.com/pingdotgg/t3code/commit/c7a3f02e3851923ced8ebd000db79f641e11b038",
+    "commit": "c7a3f02e3851923ced8ebd000db79f641e11b038",
+    "root_tree": "f68ccc29fad051614b6c072bf176bb0938628443"
   },
   "qualification": {
     "status": "unqualified",
@@ -39,7 +39,7 @@
     "desktop": {
       "path_prefixes": ["apps/desktop/"],
       "entries": 306,
-      "inventory_sha256": "9f1a9f51e9010b742e181989e3bfda25e1990527e448b6c7b6a4511c169ea965"
+      "inventory_sha256": "31631477aee765c8e9edec4725f16f3f94234af3bc286216be2e2e62c167b710"
     },
     "mobile": {
       "path_prefixes": ["apps/mobile/"],
@@ -80,17 +80,17 @@
     "repository": "pingdotgg/t3code",
     "channel": "default-branch",
     "branch": "main",
-    "source_url": "https://github.com/pingdotgg/t3code/commit/2d8a843e6be9ca170f3bce98cc92ad76617b00c4",
-    "commit": "2d8a843e6be9ca170f3bce98cc92ad76617b00c4",
+    "source_url": "https://github.com/pingdotgg/t3code/commit/c7a3f02e3851923ced8ebd000db79f641e11b038",
+    "commit": "c7a3f02e3851923ced8ebd000db79f641e11b038",
     "status": "integrated"
   },
   "integration": {
-    "commit": "2d8a843e6be9ca170f3bce98cc92ad76617b00c4",
+    "commit": "c7a3f02e3851923ced8ebd000db79f641e11b038",
     "recovered_from": "d29a94f3a175eac1f26c548023fedd8695cedfaf",
     "preserved_rust_base": "0be60f85268daece83e616b97f6fc421ec83ee6b",
     "meaning": "The upstream field pins the integrated implementation. Source integration does not establish full Rust or cross-platform acceptance.",
-    "previous_commit": "4aec277f79b2d4dabd88f13cfab264d9f80cbcef",
-    "report": "docs/porting/default-2d8a843e.md"
+    "previous_commit": "2d8a843e6be9ca170f3bce98cc92ad76617b00c4",
+    "report": "docs/porting/default-c7a3f02e.md"
   },
   "nightly_reference": {
     "repository": "pingdotgg/t3code",
