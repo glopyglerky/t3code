@@ -55,6 +55,7 @@ pub struct Selection {
     pub reasoning: String,
     pub service_tier: Option<String>,
     pub launch_args: Vec<String>,
+    pub mcp_launch_args: Vec<String>,
 }
 
 fn js_space(character: char) -> bool {
@@ -126,16 +127,31 @@ pub fn tokenize_launch_args(input: &str) -> Vec<String> {
     tokens
 }
 
-pub fn exec_launch_args(input: &str) -> Vec<String> {
+fn filter_launch_args(input: &str, mcp: bool) -> Vec<String> {
     let tokens = tokenize_launch_args(input);
     let mut result = Vec::new();
     let mut index = 0;
     while index < tokens.len() {
         let token = &tokens[index];
-        if token == "--strict-config" || token.starts_with("--config=") || token.starts_with("-c=")
-        {
+        let switch = !mcp && matches!(token.as_str(), "--strict-config" | "--oss");
+        let value_flag = matches!(
+            token.as_str(),
+            "--config" | "-c" | "--enable" | "--disable" | "--profile" | "-p"
+        ) || (!mcp && token == "--local-provider");
+        let inline = [
+            "--config=",
+            "-c=",
+            "--enable=",
+            "--disable=",
+            "--profile=",
+            "-p=",
+        ]
+        .iter()
+        .any(|prefix| token.starts_with(prefix))
+            || (!mcp && token.starts_with("--local-provider="));
+        if switch {
             result.push(token.clone());
-        } else if matches!(token.as_str(), "--config" | "-c" | "--enable" | "--disable") {
+        } else if value_flag {
             if let Some(value) = tokens.get(index + 1)
                 && !value.starts_with('-')
             {
@@ -143,12 +159,20 @@ pub fn exec_launch_args(input: &str) -> Vec<String> {
                 result.push(value.clone());
                 index += 1;
             }
-        } else if token.starts_with("--enable=") || token.starts_with("--disable=") {
+        } else if inline {
             result.push(token.clone());
         }
         index += 1;
     }
     result
+}
+
+pub fn exec_launch_args(input: &str) -> Vec<String> {
+    filter_launch_args(input, false)
+}
+
+pub fn mcp_launch_args(input: &str) -> Vec<String> {
+    filter_launch_args(input, true)
 }
 
 fn family(model: &str) -> &str {
@@ -244,6 +268,7 @@ pub fn select(request: &Request, environment_launch_args: Option<&str>) -> Selec
         reasoning,
         service_tier,
         launch_args: exec_launch_args(raw_args),
+        mcp_launch_args: mcp_launch_args(raw_args),
     }
 }
 
@@ -259,12 +284,7 @@ fn plugin_args(args: &mut Vec<String>) {
 }
 
 pub fn mcp_args(selection: &Selection) -> Vec<String> {
-    let mut args: Vec<String> = selection
-        .launch_args
-        .iter()
-        .filter(|argument| argument.as_str() != "--strict-config")
-        .cloned()
-        .collect();
+    let mut args = selection.mcp_launch_args.clone();
     plugin_args(&mut args);
     args.extend(["mcp".to_owned(), "list".to_owned(), "--json".to_owned()]);
     args

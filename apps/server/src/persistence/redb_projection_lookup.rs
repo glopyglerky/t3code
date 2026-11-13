@@ -36,6 +36,17 @@ pub enum ProjectionLookup {
         thread_id: String,
         run_id: String,
     },
+    Run {
+        thread_id: String,
+        run_id: String,
+    },
+    TranscriptByteFloor {
+        thread_id: String,
+        limit: u64,
+    },
+    PendingDelegatedCompletion {
+        thread_id: String,
+    },
     CanStartQueuedRun {
         thread_id: String,
     },
@@ -144,6 +155,55 @@ fn is_one(value: Option<&Value>) -> bool {
     matches!(value, Some(Value::Bool(true))) || value.and_then(Value::as_f64) == Some(1.0)
 }
 
+fn transcript_output_bytes(raw: &str) -> Result<i64> {
+    use t3_code_ls_core::json::{self, Value as Json};
+    let value = match json::parse_with_limits(
+        raw,
+        json::Limits {
+            max_bytes: crate::MAX_BATCH_BYTES,
+            max_depth: 1000,
+            max_values: 1_048_576,
+        },
+    ) {
+        Ok(value) => value,
+        Err(error) if error.message == "JSON exceeds value limit" => {
+            return Err(invalid(
+                "transcript payload exceeds the native JSON value budget",
+            ));
+        }
+        Err(_) => return Ok(0), // SQLite json_valid is false for invalid/deeper JSON.
+    };
+    // SQLite selects the first matching object member and counts every nested
+    // string leaf, including duplicate keys. Do not collapse object entries.
+    let output = match &value {
+        Json::Object(fields) => fields
+            .iter()
+            .find(|(name, _)| name == "output")
+            .map(|(_, value)| value),
+        _ => None,
+    };
+    let mut pending: Vec<_> = output.into_iter().collect();
+    let mut bytes = 0_i64;
+    while let Some(value) = pending.pop() {
+        match value {
+            Json::String(value) => {
+                bytes = bytes
+                    .checked_add(
+                        value
+                            .len()
+                            .try_into()
+                            .map_err(|_| Error::IncompatibleStore)?,
+                    )
+                    .ok_or(Error::IncompatibleStore)?
+            }
+            Json::Array(values) => pending.extend(values),
+            Json::Object(values) => pending.extend(values.iter().map(|(_, value)| value)),
+            _ => (),
+        }
+    }
+    Ok(bytes)
+}
+
 async fn query(session: &mut Session, query: ProjectionLookup) -> Result<LookupResult> {
     ready(session).await?;
     let mut result = LookupResult {
@@ -215,6 +275,92 @@ async fn query(session: &mut Session, query: ProjectionLookup) -> Result<LookupR
                             );
                         }
                     }
+                }
+            }
+        }
+        ProjectionLookup::Run { thread_id, run_id } => {
+            return required_payload(session, RUNS, &thread_id, &run_id).await;
+        }
+        ProjectionLookup::PendingDelegatedCompletion { thread_id } => {
+            for task in read_index::equal_rows(
+                session,
+                SUBAGENTS,
+                "child_thread_id",
+                &text_cell(&thread_id),
+            )
+            .await?
+            {
+                if text(&task.row, "origin")? != "app_owned" {
+                    continue;
+                }
+                if payload(&task.row)?.get("result").is_none_or(Value::is_null) {
+                    result.found = true;
+                    break;
+                }
+                if nullable(&task.row, "completion_delivery_state")?.as_deref() == Some("claimed") {
+                    if let Some(run_id) = nullable(&task.row, "run_id")? {
+                        if let Some(owner) = owned_payload(session, RUNS, &run_id, None).await? {
+                            let owner: Value = serde_json::from_str(&owner)
+                                .map_err(|_| Error::IncompatibleStore)?;
+                            let completion = &owner["delegatedCompletion"];
+                            if completion["disposition"].as_str() == Some("open")
+                                && completion["delivery"].is_object()
+                            {
+                                result.found = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        ProjectionLookup::TranscriptByteFloor { thread_id, limit } => {
+            let mut rolled_back = HashSet::new();
+            for run in read_index::window::equal_metadata(
+                session,
+                RUNS,
+                "thread_id",
+                &text_cell(&thread_id),
+            )
+            .await?
+            {
+                if text(&run.row, "status")? == "rolled_back" {
+                    rolled_back.insert(text(&run.row, "run_id")?);
+                }
+            }
+            let mut bytes = 0_u64;
+            let mut selected = Vec::new();
+            for item in read_index::window::equal_metadata(
+                session,
+                ITEMS,
+                "thread_id",
+                &text_cell(&thread_id),
+            )
+            .await?
+            {
+                if !matches!(
+                    text(&item.row, "type")?.as_str(),
+                    "command_execution" | "dynamic_tool"
+                ) || nullable(&item.row, "run_id")?
+                    .is_some_and(|run_id| rolled_back.contains(&run_id))
+                {
+                    continue;
+                }
+                let size = integer(&item.row, "_native_payload_bytes")?;
+                bytes = bytes
+                    .checked_add(size.try_into().map_err(|_| Error::IncompatibleStore)?)
+                    .ok_or(Error::IncompatibleStore)?;
+                selected.push(text(&item.row, "turn_item_id")?);
+            }
+            if bytes > limit {
+                for id in selected {
+                    let raw = owned_payload(session, ITEMS, &id, Some(&thread_id))
+                        .await?
+                        .ok_or(Error::IncompatibleStore)?;
+                    result.count = result
+                        .count
+                        .checked_add(transcript_output_bytes(&raw)?)
+                        .ok_or(Error::IncompatibleStore)?;
                 }
             }
         }
@@ -395,5 +541,27 @@ impl ApplicationTransactions {
         }
         .await;
         self.finish(id, session, result).await
+    }
+}
+
+#[cfg(test)]
+mod output_tests {
+    use super::*;
+    #[test]
+    fn transcript_floor_counts_nested_utf8_leaves_with_sqlite_object_semantics() {
+        assert_eq!(
+            transcript_output_bytes(
+                r#"{"output":{"a":"🦊","a":"xy","items":[42,true,"é"]},"output":"ignored"}"#
+            )
+            .unwrap(),
+            8
+        );
+        let nested = format!(
+            "{{\"output\":{}\"🦊\"{}}}",
+            "[".repeat(200),
+            "]".repeat(200)
+        );
+        assert_eq!(transcript_output_bytes(&nested).unwrap(), 4);
+        assert_eq!(transcript_output_bytes("{broken").unwrap(), 0);
     }
 }

@@ -15,6 +15,7 @@ export const make = Effect.gen(function* () {
       SELECT
         project_id AS "projectId",
         title,
+        has_custom_title AS "hasCustomTitle",
         workspace_root AS "workspaceRoot",
         default_model_selection_json AS "defaultModelSelection",
         default_thread_env_mode AS "defaultThreadEnvMode",
@@ -42,19 +43,21 @@ export const make = Effect.gen(function* () {
     select: Effect.fn("ProjectRows.select")((input) => selectRows(input).pipe(NodeSqliteClient.readOnly, Effect.mapError(toProjectRowsError("select")))),
     upsert: Effect.fn("ProjectRows.upsert")((encoded) => sql`
       INSERT INTO projection_projects (
-        project_id, title, workspace_root, default_model_selection_json, default_thread_env_mode,
+        project_id, title, has_custom_title, workspace_root, default_model_selection_json, default_thread_env_mode,
         auto_pull, favicon_path, project_icon_json, scripts_json, pinned_at, archived_at,
         created_at, updated_at, deleted_at
       )
       VALUES (
-        ${encoded.projectId}, ${encoded.title}, ${encoded.workspaceRoot}, ${encoded.defaultModelSelection},
+        ${encoded.projectId}, ${encoded.title}, ${encoded.hasCustomTitle}, ${encoded.workspaceRoot}, ${encoded.defaultModelSelection},
         ${encoded.defaultThreadEnvMode}, ${encoded.autoPull}, ${encoded.faviconPath}, ${encoded.projectIcon},
         ${encoded.scripts}, ${encoded.pinnedAt}, ${encoded.archivedAt}, ${encoded.createdAt},
         ${encoded.updatedAt}, ${encoded.deletedAt}
       )
       ON CONFLICT (project_id)
       DO UPDATE SET
-        title = excluded.title,
+        title = CASE WHEN projection_projects.has_custom_title = 1 AND excluded.has_custom_title = 0
+          THEN projection_projects.title ELSE excluded.title END,
+        has_custom_title = max(projection_projects.has_custom_title, excluded.has_custom_title),
         workspace_root = excluded.workspace_root,
         default_model_selection_json = excluded.default_model_selection_json,
         default_thread_env_mode = excluded.default_thread_env_mode,

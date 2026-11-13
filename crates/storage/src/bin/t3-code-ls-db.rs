@@ -15,7 +15,7 @@ use t3_code_ls_storage::application_events::{
 };
 use t3_code_ls_storage::application_legacy_v1::{LegacyV1Read, LegacyV1Write};
 use t3_code_ls_storage::application_peers::PeerOperation;
-use t3_code_ls_storage::application_positions::PositionAllocate;
+use t3_code_ls_storage::application_positions::{PositionAllocate, PositionPlacement};
 use t3_code_ls_storage::application_projections::records::ProjectionRecordsQuery;
 use t3_code_ls_storage::application_projections::records::window::ProjectionWindowQuery;
 use t3_code_ls_storage::application_projections::{
@@ -250,6 +250,7 @@ enum Request {
         turn_item_id: String,
         run_id: Option<String>,
         run_ordinal: Option<i64>,
+        placement: Option<PositionPlacement>,
     },
     ApplicationProjectsPrepare {},
     ApplicationProjectsSelect {
@@ -336,6 +337,8 @@ enum Request {
         now: String,
         #[serde(default)]
         exclude_restart_continuations: bool,
+        #[serde(default)]
+        max_running_title_generations: Option<f64>,
     },
     ApplicationOutboxClaimOnce {
         transaction_id: String,
@@ -344,9 +347,12 @@ enum Request {
         worker_id: String,
         now: String,
         exclude_restart_continuations: bool,
+        #[serde(default)]
+        max_running_title_generations: Option<f64>,
     },
     ApplicationOutboxNextClaimableAt {
         transaction_id: String,
+        max_running_title_generations: Option<f64>,
     },
     ApplicationOutboxSucceed {
         transaction_id: String,
@@ -406,6 +412,8 @@ enum Request {
         worker_id: String,
         now: String,
         exclude_restart_continuations: bool,
+        #[serde(default)]
+        max_running_title_generations: Option<f64>,
     },
     OutboxClaimOnce {
         stream_id: String,
@@ -413,8 +421,10 @@ enum Request {
         worker_id: String,
         now: String,
         exclude_restart_continuations: bool,
+        #[serde(default)]
+        max_running_title_generations: Option<f64>,
     },
-    OutboxNextClaimableAt {},
+    OutboxNextClaimableAt { max_running_title_generations: Option<f64> },
     OutboxSucceed {
         effect_id: String,
         worker_id: String,
@@ -867,6 +877,7 @@ async fn evaluate(
             turn_item_id,
             run_id,
             run_ordinal,
+            placement,
         } => serde_json::to_value(
             transactions
                 .positions_allocate(
@@ -876,6 +887,7 @@ async fn evaluate(
                         turn_item_id,
                         run_id,
                         run_ordinal,
+                        placement,
                     },
                 )
                 .await?,
@@ -1147,6 +1159,7 @@ async fn evaluate(
             worker_id,
             now,
             exclude_restart_continuations,
+            max_running_title_generations,
         } => serde_json::to_value(
             transactions
                 .outbox_claim(
@@ -1155,6 +1168,7 @@ async fn evaluate(
                         worker_id,
                         now,
                         exclude_restart_continuations,
+                        max_running_title_generations,
                     },
                 )
                 .await?,
@@ -1166,6 +1180,7 @@ async fn evaluate(
             worker_id,
             now,
             exclude_restart_continuations,
+            max_running_title_generations,
         } => serde_json::to_value(
             transactions
                 .outbox_claim_once(
@@ -1177,14 +1192,15 @@ async fn evaluate(
                             worker_id,
                             now,
                             exclude_restart_continuations,
+                            max_running_title_generations,
                         },
                     },
                 )
                 .await?,
         ),
-        Request::ApplicationOutboxNextClaimableAt { transaction_id } => serde_json::to_value(
+        Request::ApplicationOutboxNextClaimableAt { transaction_id, max_running_title_generations } => serde_json::to_value(
             transactions
-                .outbox_next_claimable_at(&transaction_id)
+                .outbox_next_claimable_at_limited(&transaction_id, max_running_title_generations)
                 .await?,
         ),
         Request::ApplicationOutboxSucceed {
@@ -1283,12 +1299,14 @@ async fn evaluate(
             worker_id,
             now,
             exclude_restart_continuations,
+            max_running_title_generations,
         } => serde_json::to_value(
             store
                 .outbox_claim_next(&outbox::Claim {
                     worker_id,
                     now,
                     exclude_restart_continuations,
+                    max_running_title_generations,
                 })
                 .await?,
         ),
@@ -1298,6 +1316,7 @@ async fn evaluate(
             worker_id,
             now,
             exclude_restart_continuations,
+            max_running_title_generations,
         } => serde_json::to_value(
             store
                 .outbox_claim_once(&outbox::ClaimOnce {
@@ -1307,12 +1326,13 @@ async fn evaluate(
                         worker_id,
                         now,
                         exclude_restart_continuations,
+                        max_running_title_generations,
                     },
                 })
                 .await?,
         ),
-        Request::OutboxNextClaimableAt {} => {
-            serde_json::to_value(store.outbox_next_claimable_at().await?)
+        Request::OutboxNextClaimableAt { max_running_title_generations } => {
+            serde_json::to_value(store.outbox_next_claimable_at_limited(max_running_title_generations).await?)
         }
         Request::OutboxSucceed {
             effect_id,

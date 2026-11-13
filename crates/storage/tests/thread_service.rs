@@ -343,6 +343,7 @@ async fn archive_replay_keeps_a_completed_cleanup_and_rearchive_creates_a_new_ob
             worker_id: "test-worker".into(),
             now: LATER.into(),
             exclude_restart_continuations: false,
+            max_running_title_generations: None,
         })
         .await
         .unwrap()

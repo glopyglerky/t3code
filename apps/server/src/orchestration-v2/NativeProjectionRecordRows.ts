@@ -1,4 +1,5 @@
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
 import { ThreadId } from "@t3tools/contracts";
 
@@ -33,6 +34,8 @@ const wireWindow = (window: ProjectionRecordWindow) =>
       deferWork: window.deferWork,
       anchorItemId: window.anchorItemId,
       requiredRunId: window.requiredRunId,
+      forkCreatedAt:
+        window.forkCreatedAt === undefined ? undefined : DateTime.formatIso(window.forkCreatedAt),
     }).filter(([, value]) => value !== undefined),
   );
 const Result = Schema.Struct({

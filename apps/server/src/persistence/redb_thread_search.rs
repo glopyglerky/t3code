@@ -375,6 +375,20 @@ impl Store {
 fn payload(row: &Map<String, Value>) -> Result<Value> {
     serde_json::from_str(&text(row, "payload_json")?).map_err(|_| Error::IncompatibleStore)
 }
+fn readable_text(row: &Map<String, Value>, payload: &Value) -> Result<Value> {
+    Ok(
+        match crate::application_rows::nullable(row, "search_text")? {
+            Some(text) => Value::String(text),
+            None => extracted(payload.get("text")),
+        },
+    )
+}
+fn folded_readable_text(row: &Map<String, Value>, payload: &Value) -> Result<Value> {
+    Ok(match sql_text(&readable_text(row, payload)?) {
+        Some(text) => Value::String(text.replace(['’', '‘'], "'")),
+        None => Value::Null,
+    })
+}
 fn extracted(value: Option<&Value>) -> Value {
     match value {
         Some(Value::Array(_) | Value::Object(_)) => json!(value.unwrap().to_string()),
@@ -484,8 +498,8 @@ pub(crate) async fn replace_message(
         if old_streaming == new_streaming
             && text(old, "role")? == text(new, "role")?
             && sql_is(
-                extracted(old_payload.get("text")),
-                extracted(new_payload.get("text")),
+                folded_readable_text(old, &old_payload)?,
+                folded_readable_text(new, &new_payload)?,
             )
             && sql_is(
                 extracted(old_payload.get("createdBy")),
@@ -501,7 +515,7 @@ pub(crate) async fn replace_message(
     if let Some(new) = new {
         if indexable(tx, catalog, new).await? {
             let value = payload(new)?;
-            if let Some(text) = sql_text(&extracted(value.get("text"))) {
+            if let Some(text) = sql_text(&readable_text(new, &value)?) {
                 // Even an insertion with fewer than three folded characters
                 // owns a generation. Its later DELETE must not remove older
                 // postings merely because its own vocabulary is empty.
@@ -1092,7 +1106,7 @@ async fn message_hits(
         {
             continue;
         }
-        let raw_text = extracted(value.get("text"));
+        let raw_text = readable_text(&row, &value)?;
         let text = sql_text(&raw_text).unwrap_or_default();
         let lower = text.to_ascii_lowercase();
         if substrings.iter().any(|token| !lower.contains(token))

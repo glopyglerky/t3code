@@ -17,6 +17,24 @@ import {
 export const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   return AuxiliaryPersistenceReads.of({
+    hasActiveRun: sql<{ readonly active: number }>`
+      SELECT EXISTS (
+        SELECT 1 FROM orchestration_v2_projection_runs
+        WHERE status IN ('preparing', 'starting', 'running')
+      ) AS active
+    `.pipe(
+      NodeSqliteClient.readOnly,
+      Effect.map((rows) => rows[0]?.active === 1),
+      Effect.mapError(toAuxiliaryReadError("hasActiveRun")),
+    ),
+    legacySubagentThreadIds: sql<{ readonly threadId: string }>`
+      SELECT thread_id AS "threadId" FROM orchestration_v2_projection_threads
+      WHERE thread_id LIKE 'thread:provider:%'
+    `.pipe(
+      NodeSqliteClient.readOnly,
+      Effect.map((rows) => rows.map((row) => row.threadId)),
+      Effect.mapError(toAuxiliaryReadError("legacySubagentThreadIds")),
+    ),
     providerHistory: sql<typeof ProviderHistoryRow.Type>`
       SELECT DISTINCT provider_name AS "providerName", provider_instance_id AS "providerInstanceId"
       FROM projection_thread_sessions WHERE provider_name IN ('cursor', 'grok', 'opencode')

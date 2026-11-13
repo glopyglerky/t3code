@@ -33,6 +33,11 @@ export const toAuxiliaryReadError = (operation: string) => (cause: unknown) =>
 export class AuxiliaryPersistenceReads extends Context.Service<
   AuxiliaryPersistenceReads,
   {
+    readonly hasActiveRun: Effect.Effect<boolean, AuxiliaryPersistenceReadError>;
+    readonly legacySubagentThreadIds: Effect.Effect<
+      ReadonlyArray<string>,
+      AuxiliaryPersistenceReadError
+    >;
     readonly providerHistory: Effect.Effect<
       ReadonlyArray<typeof ProviderHistoryRow.Type>,
       AuxiliaryPersistenceReadError

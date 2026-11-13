@@ -12,6 +12,7 @@ import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as NativeThreadSearch from "../orchestration-v2/NativeThreadSearch.ts";
 import * as ThreadSearch from "../orchestration-v2/ThreadSearch.ts";
 import * as NativeAuxiliaryPersistenceReads from "./NativeAuxiliaryPersistenceReads.ts";
+import * as SqliteAuxiliaryPersistenceReads from "./SqliteAuxiliaryPersistenceReads.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as StorageCleanup from "../storageCleanup.ts";
 import * as DatabaseStorage from "./DatabaseStorage.ts";
@@ -52,6 +53,10 @@ const sqlite = <A, E, R>(layer: Layer.Layer<A, E, R>) =>
 export const layerConfig = select(
   native(Layer.mergeAll(PersistenceTransactions.redbLayer, NativeLinkedThreads.layer)),
   sqlite(Layer.mergeAll(PersistenceTransactions.sqliteLayer, LinkedPullRequestThreads.layerSqlite)),
+);
+export const auxiliaryReads = select(
+  native(NativeAuxiliaryPersistenceReads.layer),
+  sqlite(SqliteAuxiliaryPersistenceReads.layer),
 );
 export const projections = select(
   native(NativeProjectionStore.layer),
@@ -111,4 +116,35 @@ export const authSessions = select(native(NativeAuthSessions.layer), sqlite(Auth
 export const authPairing = select(
   native(NativeAuthPairingLinks.layer),
   sqlite(AuthPairingLinks.layer),
+);
+
+// CLI readers may share a current server's schema, but pending migrations need
+// the same exclusive ownership check as upstream's CLI persistence layer.
+const sqliteCli = <A, E, R>(layer: Layer.Layer<A, E, R>) =>
+  layer.pipe(Layer.provide(Sqlite.layerCliConfig));
+export const cliLayerConfig = select(
+  native(Layer.mergeAll(PersistenceTransactions.redbLayer, NativeLinkedThreads.layer)),
+  sqliteCli(
+    Layer.mergeAll(PersistenceTransactions.sqliteLayer, LinkedPullRequestThreads.layerSqlite),
+  ),
+);
+export const cliPeers = select(
+  native(PeerLinks.layerWithRows.pipe(Layer.provide(NativePeerLinkRows.layer))),
+  sqliteCli(PeerLinks.layer),
+);
+export const cliSettings = select(
+  native(
+    ServerSettings.layerWithPersistenceReads.pipe(
+      Layer.provide(NativeAuxiliaryPersistenceReads.layer),
+    ),
+  ),
+  sqliteCli(ServerSettings.layer),
+);
+export const cliAuthSessions = select(
+  native(NativeAuthSessions.layer),
+  sqliteCli(AuthSessions.layer),
+);
+export const cliAuthPairing = select(
+  native(NativeAuthPairingLinks.layer),
+  sqliteCli(AuthPairingLinks.layer),
 );

@@ -120,6 +120,7 @@ async fn outbox_commit_replays_enqueues_and_cancellations_without_reapplying_the
             worker_id: "worker-old".into(),
             now: now.into(),
             exclude_restart_continuations: false,
+            max_running_title_generations: None,
         })
         .await
         .unwrap()
@@ -159,6 +160,7 @@ async fn outbox_commit_replays_enqueues_and_cancellations_without_reapplying_the
             worker_id: "worker-new".into(),
             now: now.into(),
             exclude_restart_continuations: false,
+            max_running_title_generations: None,
         })
         .await
         .unwrap()

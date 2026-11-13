@@ -104,6 +104,7 @@ function exercise({ projects, raw, transaction }) {
     result.written = yield* transaction(Effect.gen(function* () {
       yield* projects.apply(created("written"));
       const defaults = Option.getOrThrow(yield* projects.get("written"));
+      Assert.equal(defaults.hasCustomTitle, false);
       Assert.equal(defaults.autoPull, false);
       Assert.equal(defaults.defaultThreadEnvMode, null);
       Assert.equal(defaults.projectIcon, null);
@@ -118,6 +119,7 @@ function exercise({ projects, raw, transaction }) {
       }));
       yield* projects.apply(updated("written", { title: "Renamed only" }));
       const retained = Option.getOrThrow(yield* projects.get("written"));
+      Assert.equal(retained.hasCustomTitle, true);
       Assert.equal(retained.pinnedAt, at);
       Assert.equal(retained.archivedAt, at);
       Assert.equal(retained.autoPull, true);
@@ -153,6 +155,8 @@ function exercise({ projects, raw, transaction }) {
       const recreated = Option.getOrThrow(yield* projects.get("written"));
       Assert.equal(recreated.deletedAt, null);
       Assert.equal(recreated.createdAt, "2021-01-01T00:00:00.000Z");
+      Assert.equal(recreated.title, "Still deleted", "automatic recreation retains a user-chosen title");
+      Assert.equal(recreated.hasCustomTitle, true);
       yield* projects.apply(updated("missing", { title: "Ignored" }));
       yield* projects.apply(deleted("missing"));
       Assert.ok(Option.isNone(yield* projects.get("missing", { includeDeleted: true })));
@@ -203,6 +207,7 @@ try {
     "Full migrated fixtures retain imported project rows, raw JSON lexemes, auto-pull bits and legacy icon decoding",
     "Ordered project lists cross native index pages, deduplicate ID filters and preserve empty filters and exact workspace matching",
     "Shared event application preserves creation defaults, omitted updates, explicit nulls, pin/archive state, deletion and recreation",
+    "Explicit titles remain custom through automatic recreation instead of reverting to a directory-derived title",
     "Changing workspace, creation order or deleted status updates all access paths in the same transaction",
     "Nested failures and root defects restore both project rows and every ordered index",
   );

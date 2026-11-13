@@ -202,6 +202,9 @@ function comparePolicy(input, before, after, result, label) {
           now: input.now,
           workerId: input.worker_id,
           excludeRestartContinuations: input.exclude_restart_continuations,
+          ...(input.max_running_title_generations === undefined
+            ? {}
+            : { maxRunningTitleGenerations: input.max_running_title_generations }),
         }),
         result === null
           ? { index: null, row: null }
@@ -211,7 +214,13 @@ function comparePolicy(input, before, after, result, label) {
       break;
     case "outbox_next_claimable_at":
       NodeAssert.deepEqual(
-        invokePolicy({ ...base, operation: "next" }),
+        invokePolicy({
+          ...base,
+          operation: "next",
+          ...(input.max_running_title_generations === undefined
+            ? {}
+            : { maxRunningTitleGenerations: input.max_running_title_generations }),
+        }),
         { availableAt: result },
         label,
       );
@@ -356,6 +365,12 @@ const requests = [
     providerThreadId: "provider-thread:one",
     providerTurnId: "turn:one",
     messageId: "message:one",
+    modelSelection: {
+      instanceId: "codex",
+      model: "model",
+      options: [{ id: "effort", value: "high" }],
+    },
+    steerFollowUpAfterRunOrdinal: 7,
   }),
   request("provider-turn.restart", {
     providerSessionId: "session:one",
@@ -379,8 +394,17 @@ const requests = [
   request("attachment.cleanup", { attachmentIds: ["attachment:one", "attachment:é💬"] }),
   title,
   request("delegated-tasks.stop", { reason: "parent stopped é\n💬" }),
+  request("provider-session.apply-model-selection", {
+    providerSessionId: "session:one",
+    providerThreadId: "provider-thread:one",
+    modelSelection: {
+      instanceId: "codex",
+      model: "model",
+      options: [{ id: "effort", value: "high" }],
+    },
+  }),
 ];
-NodeAssert.equal(requests.length, 15);
+NodeAssert.equal(requests.length, 16);
 NodeAssert.deepEqual(
   new Set(requests.map(({ type }) => type)),
   new Set([
@@ -707,6 +731,43 @@ try {
     expect(claim("worker:three", iso(1000)), "b-start"),
     expect(cancel("thread:a", [start.type, title.type], iso(1001)), ["b-start", "title-2"]),
     expect(settle("succeed", "b-start", "worker:three", iso(1002)), false),
+  ]);
+
+  const limitedClaim = (limit, worker = "worker:one", now = iso()) => ({
+    ...claim(worker, now),
+    max_running_title_generations: limit,
+  });
+  const limitedNext = (limit) => ({ ...next(), max_running_title_generations: limit });
+  await runScenario("title concurrency is global and releases on settle, cancel and recovery", [
+    enqueue([
+      effect("a-title", "thread:a", title),
+      effect("b-title", "thread:b", title),
+      effect("c-ordinary", "thread:c", cleanup),
+      effect("d-later", "thread:d", cleanup, iso(1000)),
+    ]),
+    expect(limitedClaim(0), "c-ordinary"),
+    expect(limitedNext(0), iso(1000)),
+    expect(limitedClaim(1), "a-title"),
+    expect(limitedClaim(1, "worker:two"), null),
+    expect(limitedNext(1), iso(1000)),
+    expect(settle("succeed", "a-title", "wrong-worker"), false),
+    expect(limitedClaim(1), null),
+    settle("succeed", "a-title"),
+    expect(limitedNext(1), iso()),
+    expect(limitedClaim(1, "worker:two"), "b-title"),
+    enqueue([effect("e-title", "thread:e", title)]),
+    expect(limitedClaim(1), null),
+    cancel("thread:b", [title.type]),
+    expect(limitedClaim(1), "e-title"),
+    enqueue([effect("f-title", "thread:f", title)]),
+    { operation: "reopen", abrupt: true },
+    expect(limitedClaim(1), null),
+    reconcile(),
+    expect(limitedClaim(1), "c-ordinary"),
+    expect(limitedClaim(1), "e-title"),
+    expect(limitedClaim(1), null),
+    settle("fail", "e-title"),
+    expect(limitedClaim(1), "f-title"),
   ]);
 
   await runScenario("claim order is availability, creation time, then binary identifier", [

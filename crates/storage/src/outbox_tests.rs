@@ -53,6 +53,7 @@ fn claim(worker: &str, now: &str) -> Claim {
         worker_id: worker.into(),
         now: now.into(),
         exclude_restart_continuations: false,
+        max_running_title_generations: None,
     }
 }
 
@@ -172,6 +173,7 @@ async fn empty_claims_pin_their_result_and_one_cursor_rejects_reuse_and_sequence
         ClaimOnce {
             claim: Claim {
                 exclude_restart_continuations: true,
+                max_running_title_generations: None,
                 ..first.claim.clone()
             },
             ..first.clone()
@@ -1113,11 +1115,11 @@ async fn independent_writers_cannot_claim_the_same_snapshot_effect() {
     let other = fixture.connect().await;
     let mut a = store.db.begin().await.unwrap();
     let mut b = other.db.begin().await.unwrap();
-    let a_row = candidate(&mut a, Repository::Legacy, Some(NOW), false)
+    let a_row = candidate(&mut a, Repository::Legacy, Some(NOW), false, None)
         .await
         .unwrap()
         .unwrap();
-    let b_row = candidate(&mut b, Repository::Legacy, Some(NOW), false)
+    let b_row = candidate(&mut b, Repository::Legacy, Some(NOW), false, None)
         .await
         .unwrap()
         .unwrap();
@@ -1159,7 +1161,7 @@ async fn a_concurrent_enqueue_changes_the_claim_range_and_conflicts() {
         .await
         .unwrap();
     let mut transaction = store.db.begin().await.unwrap();
-    let selected = candidate(&mut transaction, Repository::Legacy, Some(NOW), false)
+    let selected = candidate(&mut transaction, Repository::Legacy, Some(NOW), false, None)
         .await
         .unwrap()
         .unwrap();

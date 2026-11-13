@@ -208,47 +208,45 @@ export function resolveLatestProviderUpdateAction(
   return makeTargetedProviderUpdateAction(capabilities, latestVersion) ?? update;
 }
 
-export const selectProviderUpdateAction = Effect.fn("selectProviderUpdateAction")(
-  function* (
-    capabilities: ProviderMaintenanceCapabilities,
-    targetVersion: string | undefined,
-    latestVersion: string | null,
-  ) {
-    const environment = yield* HostProcess.Environment;
-    const executable = selectNativeExecutable(
-      "maintenance",
-      environment.T3_CODE_LS_MAINTENANCE_EXECUTABLE,
-      yield* HostProcess.Platform,
-      yield* HostProcess.Architecture,
-      environment.T3_CODE_LS_IMPLEMENTATION,
-    );
-    if (executable === undefined)
-      return targetVersion === undefined
-        ? resolveLatestProviderUpdateAction(capabilities, latestVersion)
-        : makeTargetedProviderUpdateAction(capabilities, targetVersion);
+export const selectProviderUpdateAction = Effect.fn("selectProviderUpdateAction")(function* (
+  capabilities: ProviderMaintenanceCapabilities,
+  targetVersion: string | undefined,
+  latestVersion: string | null,
+) {
+  const environment = yield* HostProcess.Environment;
+  const executable = selectNativeExecutable(
+    "maintenance",
+    environment.T3_CODE_LS_MAINTENANCE_EXECUTABLE,
+    yield* HostProcess.Platform,
+    yield* HostProcess.Architecture,
+    environment.T3_CODE_LS_IMPLEMENTATION,
+  );
+  if (executable === undefined)
+    return targetVersion === undefined
+      ? resolveLatestProviderUpdateAction(capabilities, latestVersion)
+      : makeTargetedProviderUpdateAction(capabilities, targetVersion);
 
-    // The host retains the authorized executable, environment and lock. Rust
-    // chooses only the argument list and display command before any update runs.
-    const update = capabilities.update;
-    const action = yield* NativeMaintenancePolicy.selectUpdateAction(executable, {
-      mode: targetVersion === undefined ? "latest" : "target",
-      packageName: capabilities.packageName,
-      update:
-        update === null
-          ? null
-          : {
-              command: update.command,
-              args: update.args,
-              lockKey: update.lockKey,
-            },
-      versionValue: targetVersion ?? latestVersion,
-    });
-    if (action === null) return null;
-    if (update === null)
-      return yield* new NativeMaintenancePolicy.NativeMaintenancePolicyError({ stage: "response" });
-    return { ...update, command: action.command, args: action.args };
-  },
-);
+  // The host retains the authorized executable, environment and lock. Rust
+  // chooses only the argument list and display command before any update runs.
+  const update = capabilities.update;
+  const action = yield* NativeMaintenancePolicy.selectUpdateAction(executable, {
+    mode: targetVersion === undefined ? "latest" : "target",
+    packageName: capabilities.packageName,
+    update:
+      update === null
+        ? null
+        : {
+            command: update.command,
+            args: update.args,
+            lockKey: update.lockKey,
+          },
+    versionValue: targetVersion ?? latestVersion,
+  });
+  if (action === null) return null;
+  if (update === null)
+    return yield* new NativeMaintenancePolicy.NativeMaintenancePolicyError({ stage: "response" });
+  return { ...update, command: action.command, args: action.args };
+});
 
 export function makeManualOnlyProviderMaintenanceCapabilities(input: {
   readonly provider: ProviderDriverKind;
@@ -312,6 +310,11 @@ function isMiseCommandPath(commandPath: string): boolean {
 /** A mise shim or command wrapper is a link to mise itself, wherever mise keeps its data. */
 function isMiseExecutablePath(commandPath: string): boolean {
   return /(?:^|\/)mise(?:\.exe)?$/.test(normalizeCommandPath(commandPath));
+}
+
+/** The Nix store is read-only, so no updater can replace a CLI that lives there. */
+export function isNixStoreCommandPath(commandPath: string): boolean {
+  return normalizeCommandPath(commandPath).startsWith("/nix/store/");
 }
 
 const winGetClaudeCommandPath =
@@ -522,6 +525,80 @@ const resolvePnpmGlobalLatestVersion = Effect.fn("resolvePnpmGlobalLatestVersion
   return nonEmptyString(listedEntries?.[0]?.dependencies?.[packageName]?.version);
 });
 
+// npm names the tarball `${name}-${version}.tgz`, dropping a scope's `@` and its `/`.
+function parseNpmPackVersion(stdout: string, packageName: string): string | null {
+  const prefix = `${packageName.replace(/^@/, "").replace("/", "-")}-`;
+  const filename = stdout.trim();
+  if (!filename.startsWith(prefix) || !filename.endsWith(".tgz")) return null;
+  const version = filename.slice(prefix.length, -".tgz".length);
+  return version && !/\s/.test(version) ? version : null;
+}
+
+const decodeVitePlusCurrentEnv = Schema.decodeUnknownOption(
+  Schema.fromJsonString(
+    Schema.Struct({
+      node: Schema.Struct({
+        source: Schema.String,
+        bin_path: Schema.String,
+        installed: Schema.Boolean,
+      }),
+    }),
+  ),
+);
+
+// `vp i -g` installs through the npm beside Vite+'s managed Node, even under `vp env off`, and
+// `vp env current` names that Node unless it reports a system one, which install does not use.
+// Pack honours npm's min-release-age and `before`, which `npm view` ignores, and resolves
+// `@latest` the way install does. `--json=false` keeps its output to the tarball name.
+const resolveVitePlusInstallableLatestVersion = Effect.fn(
+  "resolveVitePlusInstallableLatestVersion",
+)(function* (packageName: string, env: NodeJS.ProcessEnv, platform: NodeJS.Platform) {
+  const path = yield* Path.Path;
+  const current = yield* runProbe("vp", ["env", "current", "--json"], env);
+  const node = current ? Option.getOrUndefined(decodeVitePlusCurrentEnv(current))?.node : undefined;
+  if (!node?.installed || node.source === "system PATH" || !path.isAbsolute(node.bin_path)) {
+    return null;
+  }
+  const npmPath = path.join(path.dirname(node.bin_path), platform === "win32" ? "npm.cmd" : "npm");
+  const packed = yield* runProbe(
+    npmPath,
+    ["pack", "--dry-run", "--json=false", "--global", `${packageName}@latest`],
+    env,
+  );
+  return packed ? parseNpmPackVersion(packed, packageName) : null;
+});
+
+// `bun outdated` has no JSON output; its `Latest` column is what `@latest` installs
+// under minimumReleaseAge (marked `*`). `Update` is only the global package.json range.
+function parseBunOutdatedLatestVersion(output: string, packageName: string): string | null {
+  for (const line of output.split("\n")) {
+    const cells = line.split("|").map((cell) => cell.trim());
+    if (cells.length === 6 && cells[1] === packageName) {
+      return nonEmptyString(cells[4]?.replace(/ \*$/, ""));
+    }
+  }
+  return null;
+}
+
+// bun rejects an exact pin to a release inside minimumReleaseAge, so the update stays `@latest`.
+const resolveBunGlobalLatestVersion = Effect.fn("resolveBunGlobalLatestVersion")(function* (
+  packageName: string,
+  env: NodeJS.ProcessEnv,
+) {
+  // Match the updater's bun and environment.
+  const bunPath = yield* resolveCommandPath("bun", {
+    env: { ...(yield* HostProcess.Environment), ...env },
+  });
+  if (!bunPath) return null;
+  // FORCE_COLOR=1 draws the table with box characters and splits versions with ANSI codes.
+  const outdated = yield* runProbe(bunPath, ["outdated", "-g", packageName], {
+    ...env,
+    FORCE_COLOR: "0",
+  });
+  // A missing row reads the same whether bun is current or its registry failed, so npm decides.
+  return outdated ? parseBunOutdatedLatestVersion(outdated, packageName) : null;
+});
+
 const MiseInstall = Schema.Struct({
   install_path: Schema.String,
   requested_version: Schema.optional(Schema.NullOr(Schema.String)),
@@ -634,14 +711,6 @@ export const resolveMiseProviderMaintenance = Effect.fn("resolveMiseProviderMain
     }
     const args = ["upgrade", miseTool];
     const services = yield* Effect.context<ProviderMaintenanceResolverServices>();
-    // Mise reads its settings from this environment, so each one gets its own cached answer.
-    const envHash = NodeCrypto.createHash("sha256");
-    for (const [name, value] of Object.entries(context.env).toSorted(([a], [b]) =>
-      a < b ? -1 : 1,
-    )) {
-      envHash.update(`${name}\0${value ?? ""}\0`);
-    }
-    const envKey = envHash.digest("hex");
     const capabilities = makeProviderMaintenanceCapabilities({
       ...owner,
       updateExecutable: misePath,
@@ -664,17 +733,74 @@ export const resolveMiseProviderMaintenance = Effect.fn("resolveMiseProviderMain
     });
     return {
       ...capabilities,
-      latestVersionCacheKey: ["mise", misePath, miseTool, envKey].join("\0"),
+      latestVersionCacheKey: ["mise", misePath, miseTool, environmentCacheKey(context.env)].join(
+        "\0",
+      ),
     };
   },
 );
+
+const decodeVitePlusConfig = Schema.decodeUnknownOption(
+  Schema.fromJsonString(Schema.Struct({ shimMode: Schema.optional(Schema.Unknown) })),
+);
+
+/** With `shimMode: "system_first"` (`vp env off`), a Vite+ shim runs the next same-named command on PATH. */
+const followVitePlusSystemFirstShim = Effect.fn("followVitePlusSystemFirstShim")(function* (
+  context: ProviderMaintenanceResolutionContext,
+) {
+  if (!isVitePlusGlobalCommandPath(context.resolvedCommandPath)) return context;
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const shimDir = path.dirname(context.resolvedCommandPath);
+  const dataDir = path.dirname(shimDir);
+  // Without VP_HOME, the XDG layout keeps shims in `~/.local/share/vite-plus` and config in `$XDG_CONFIG_HOME/vite-plus`.
+  const home = context.env.VP_HOME
+    ? undefined
+    : /^(.*)\/\.local\/share\/vite-plus$/.exec(dataDir.replaceAll("\\", "/"))?.[1];
+  const configPaths = [
+    ...(home !== undefined
+      ? [path.join(context.env.XDG_CONFIG_HOME || path.join(home, ".config"), "vite-plus")]
+      : []),
+    dataDir,
+  ].map((dir) => path.join(dir, "config.json"));
+  const config = yield* Effect.firstSuccessOf(
+    configPaths.map((configPath) => fileSystem.readFileString(configPath)),
+  ).pipe(Effect.orElseSucceed(() => ""));
+  if (Option.getOrUndefined(decodeVitePlusConfig(config))?.shimMode !== "system_first") {
+    return context;
+  }
+  const delimiter = context.platform === "win32" ? ";" : ":";
+  const dirKey = (dir: string) => normalizeCommandPath(dir).replace(/\/+$/, "");
+  const shimDirKey = dirKey(shimDir);
+  const env = Object.fromEntries(
+    Object.entries(context.env).map(([name, value]) => [
+      name,
+      name.toLowerCase() === "path" && value
+        ? value
+            .split(delimiter)
+            .filter((entry) => dirKey(entry) !== shimDirKey)
+            .join(delimiter)
+        : value,
+    ]),
+  );
+  const command = path.basename(context.resolvedCommandPath).replace(/\.(?:exe|cmd|bat|ps1)$/i, "");
+  const resolvedCommandPath = yield* resolveCommandPath(command, { env });
+  if (!resolvedCommandPath) return context;
+  const realCommandPath = yield* fileSystem
+    .realPath(resolvedCommandPath)
+    .pipe(Effect.orElseSucceed(() => resolvedCommandPath));
+  return { ...context, resolvedCommandPath, realCommandPath };
+});
 
 export const resolvePackageManagedProviderMaintenance = Effect.fn(
   "resolvePackageManagedProviderMaintenance",
 )(function* (
   definition: PackageManagedProviderMaintenanceDefinition,
-  context: ProviderMaintenanceResolutionContext | null,
+  configuredContext: ProviderMaintenanceResolutionContext | null,
 ) {
+  const context = configuredContext
+    ? yield* followVitePlusSystemFirstShim(configuredContext)
+    : null;
   const executable = selectNativeExecutable(
     "maintenance",
     (yield* HostProcess.Environment).T3_CODE_LS_MAINTENANCE_EXECUTABLE,
@@ -750,6 +876,10 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
     context,
   );
   if (mise) return mise;
+  // After mise: a shim of a Nix-installed mise resolves into the store, yet its installs are writable.
+  if (commandPaths.some(isNixStoreCommandPath)) {
+    return manual;
+  }
 
   const nativeUpdate = definition.nativeUpdate;
   const nativeEnv = nativeUpdate?.env;
@@ -782,16 +912,31 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
       ? manual
       : native;
   if (commandPaths.some(isVitePlusGlobalCommandPath)) {
-    return makeProviderMaintenanceCapabilities({
+    const services = yield* Effect.context<ProviderMaintenanceResolverServices>();
+    const capabilities = makeProviderMaintenanceCapabilities({
       provider: definition.provider,
       packageName,
       updateExecutable: "vp",
       updateArgs: ["i", "-g", packageName],
       updateLockKey: "vite-plus-global",
       env: context.env,
+      lookupLatestVersion: resolveVitePlusInstallableLatestVersion(
+        packageName,
+        context.env,
+        context.platform,
+      ).pipe(Effect.provideContext(services)),
     });
+    return {
+      ...capabilities,
+      latestVersionCacheKey: [
+        "vite-plus-global",
+        packageName,
+        environmentCacheKey(context.env),
+      ].join("\0"),
+    };
   }
   if (commandPaths.some(isBunGlobalCommandPath)) {
+    const services = yield* Effect.context<ProviderMaintenanceResolverServices>();
     return makeProviderMaintenanceCapabilities({
       provider: definition.provider,
       packageName,
@@ -799,6 +944,9 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
       updateArgs: ["i", "-g", `${packageName}@latest`],
       updateLockKey: "bun-global",
       env: context.env,
+      lookupLatestVersion: resolveBunGlobalLatestVersion(packageName, context.env).pipe(
+        Effect.provideContext(services),
+      ),
     });
   }
   if (commandPaths.some(isPnpmGlobalCommandPath)) {
@@ -1031,7 +1179,9 @@ function sameNativeLookup(
         right.kind === "mise" && left.executable === right.executable && left.tool === right.tool
       );
     case "pnpm":
-      return right.kind === "pnpm" && left.packageName === right.packageName;
+    case "vite-plus":
+    case "bun":
+      return right.kind === left.kind && left.packageName === right.packageName;
     case "homebrew":
       return (
         right.kind === "homebrew" &&
@@ -1304,10 +1454,12 @@ const resolveNativeMaintenance = Effect.fn("resolveNativeMaintenance")(function*
       validUpdate =
         paths.some(isVitePlusGlobalCommandPath) &&
         generic("vp", "vite-plus-global", ["i", "-g", packageName]);
+      expectedLookup = { kind: "vite-plus", packageName };
     } else if (packageName !== null && update.lockKey === "bun-global") {
       validUpdate =
         paths.some(isBunGlobalCommandPath) &&
         generic("bun", "bun-global", ["i", "-g", `${packageName}@latest`]);
+      expectedLookup = { kind: "bun", packageName };
     } else if (packageName !== null && update.lockKey === "pnpm-global") {
       validUpdate =
         paths.some(isPnpmGlobalCommandPath) &&
@@ -1433,6 +1585,7 @@ const resolveNativeMaintenance = Effect.fn("resolveNativeMaintenance")(function*
   }
   if (
     !validUpdate ||
+    (update !== null && paths.some(isNixStoreCommandPath) && update.lockKey !== "mise") ||
     !sameNativeLookup(lookup, expectedLookup) ||
     (capabilities.installPath !== undefined &&
       capabilities.installPath !== context?.realCommandPath &&
@@ -1479,20 +1632,35 @@ const resolveNativeMaintenance = Effect.fn("resolveNativeMaintenance")(function*
         return version && /^\S+$/.test(version) ? version : null;
       }),
     );
-    const hash = NodeCrypto.createHash("sha256");
-    for (const [name, value] of Object.entries(context.env).toSorted(([a], [b]) =>
-      a < b ? -1 : 1,
-    ))
-      hash.update(`${name}\0${value ?? ""}\0`);
     return {
       ...hydrated,
       lookupLatestVersion: latest.pipe(Effect.provideContext(services)),
-      latestVersionCacheKey: ["mise", lookup.executable, lookup.tool, hash.digest("hex")].join(
-        "\0",
-      ),
+      latestVersionCacheKey: [
+        "mise",
+        lookup.executable,
+        lookup.tool,
+        environmentCacheKey(context.env),
+      ].join("\0"),
     };
   }
-  if (lookup.kind === "homebrew") {
+  if (lookup.kind === "vite-plus") {
+    return {
+      ...hydrated,
+      lookupLatestVersion: resolveVitePlusInstallableLatestVersion(
+        lookup.packageName,
+        context.env,
+        context.platform,
+      ).pipe(Effect.provideContext(services)),
+      latestVersionCacheKey: [
+        "vite-plus-global",
+        lookup.packageName,
+        environmentCacheKey(context.env),
+      ].join("\0"),
+    };
+  }
+  if (lookup.kind === "bun") {
+    latest = resolveBunGlobalLatestVersion(lookup.packageName, context.env);
+  } else if (lookup.kind === "homebrew") {
     latest = runProbe(lookup.executable, ["info", "--json=v2", lookup.name], context.env).pipe(
       Effect.map((info) =>
         info
@@ -1541,6 +1709,14 @@ const decodeNpmViewVersion = Schema.decodeUnknownOption(
   Schema.fromJsonString(Schema.Union([Schema.String, Schema.Tuple([Schema.String])])),
 );
 
+function environmentCacheKey(env: NodeJS.ProcessEnv): string {
+  return NodeCrypto.createHash("sha256")
+    .update(
+      JSON.stringify(Object.entries(env).toSorted(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))),
+    )
+    .digest("hex");
+}
+
 const withConfiguredNpmVersionLookup = Effect.fn("withConfiguredNpmVersionLookup")(function* (
   capabilities: ProviderMaintenanceCapabilities,
 ) {
@@ -1584,6 +1760,14 @@ const withConfiguredNpmVersionLookup = Effect.fn("withConfiguredNpmVersionLookup
     ...capabilities,
     // npm owns registry, scoped auth and proxy configuration; failure must not retry public npm.
     latestVersion: null,
+    latestVersionCacheKey: [
+      "configured-npm",
+      npmPath,
+      packageName,
+      prefix ?? "",
+      environmentCacheKey(env),
+      installerLatestVersionKey(capabilities) ?? "",
+    ].join("\0"),
     lookupLatestVersion: capabilities.lookupLatestVersion
       ? capabilities.lookupLatestVersion.pipe(
           Effect.filterOrElse(

@@ -18,9 +18,10 @@ use crate::backend::Transaction;
 use crate::{Error, Result, Store, request_digest, store_key};
 
 const PROJECTS: &str = "projection_projects";
-const COLUMNS: [&str; 14] = [
+const COLUMNS: [&str; 15] = [
     "project_id",
     "title",
+    "has_custom_title",
     "workspace_root",
     "default_model_selection_json",
     "default_thread_env_mode",
@@ -43,6 +44,7 @@ const MARKER: &str = "project-rows-v1";
 pub struct ProjectRecord {
     pub project_id: String,
     pub title: String,
+    pub has_custom_title: i64,
     pub workspace_root: String,
     pub default_model_selection: Option<String>,
     pub default_thread_env_mode: Option<String>,
@@ -116,7 +118,7 @@ fn prefix_end(prefix: &[u8]) -> Result<Vec<u8>> {
 
 impl ProjectRecord {
     fn validate(&self) -> Result<()> {
-        if !matches!(self.auto_pull, 0 | 1) {
+        if !matches!(self.auto_pull, 0 | 1) || !matches!(self.has_custom_title, 0 | 1) {
             return Err(invalid("project auto-pull must be a Boolean bit"));
         }
         Ok(())
@@ -126,6 +128,7 @@ impl ProjectRecord {
         let record = Self {
             project_id: text(row, "project_id")?,
             title: text(row, "title")?,
+            has_custom_title: integer(row, "has_custom_title")?,
             workspace_root: text(row, "workspace_root")?,
             default_model_selection: nullable(row, "default_model_selection_json")?,
             default_thread_env_mode: nullable(row, "default_thread_env_mode")?,
@@ -147,6 +150,7 @@ impl ProjectRecord {
         Map::from_iter([
             ("project_id".into(), text_cell(&self.project_id)),
             ("title".into(), text_cell(&self.title)),
+            ("has_custom_title".into(), int_cell(self.has_custom_title)),
             ("workspace_root".into(), text_cell(&self.workspace_root)),
             (
                 "default_model_selection_json".into(),
@@ -398,7 +402,7 @@ impl Store {
 }
 
 impl ApplicationTransactions {
-    pub async fn projects_upsert(&mut self, id: &str, record: ProjectRecord) -> Result<()> {
+    pub async fn projects_upsert(&mut self, id: &str, mut record: ProjectRecord) -> Result<()> {
         let mut session = self.take(id)?;
         let result = async {
             session.transaction.require_write()?;
@@ -412,12 +416,12 @@ impl ApplicationTransactions {
             )
             .await?
             {
-                remove_indexes(
-                    &mut session.transaction,
-                    &session.catalog,
-                    &ProjectRecord::from_row(&previous.row)?,
-                )
-                .await?;
+                let previous = ProjectRecord::from_row(&previous.row)?;
+                if previous.has_custom_title == 1 && record.has_custom_title == 0 {
+                    record.title.clone_from(&previous.title);
+                }
+                record.has_custom_title = record.has_custom_title.max(previous.has_custom_title);
+                remove_indexes(&mut session.transaction, &session.catalog, &previous).await?;
             }
             write_row(
                 &mut session.transaction,

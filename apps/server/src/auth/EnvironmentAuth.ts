@@ -1495,11 +1495,15 @@ export const layerSelected = Layer.suspend(() =>
     ),
   ),
 );
+const layerCliSelected = Layer.suspend(() => layerFromStores.pipe(
+  Layer.provideMerge(PairingGrantStore.layerFromRepository.pipe(Layer.provideMerge(SelectedPersistence.cliAuthPairing))),
+  Layer.provideMerge(SessionStore.layerFromRepository.pipe(Layer.provideMerge(SelectedPersistence.cliAuthSessions))),
+));
 const layerStorage = Layer.suspend(() =>
-  Layer.mergeAll(ServerSecretStore.layer, SelectedPersistence.layerConfig),
+  Layer.mergeAll(ServerSecretStore.layer, SelectedPersistence.cliLayerConfig),
 );
 
-export const layerRuntime = layerSelected.pipe(
+export const layerRuntime = layerCliSelected.pipe(
   Layer.provideMerge(ManagedPolicy.layer),
   Layer.provideMerge(layerStorage),
   Layer.provideMerge(ServerEnvironment.layerIdentity),

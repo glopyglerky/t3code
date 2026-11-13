@@ -5,6 +5,7 @@
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderSnapshot {
+    pub driver: Option<String>,
     pub checked_at: String,
     pub installed: bool,
     pub status: String,
@@ -38,13 +39,14 @@ pub enum UpdateVerification {
     CouldNotVerify,
     StillOutdated,
     Succeeded,
+    RestartOpenCodeServer,
 }
 
 impl UpdateVerification {
     pub fn status(self) -> &'static str {
         match self {
             Self::CouldNotVerify | Self::StillOutdated => "unchanged",
-            Self::Succeeded => "succeeded",
+            Self::Succeeded | Self::RestartOpenCodeServer => "succeeded",
         }
     }
 
@@ -57,6 +59,9 @@ impl UpdateVerification {
                 "Update command completed, but T3 Code still detects an outdated provider version."
             }
             Self::Succeeded => "Provider updated.",
+            Self::RestartOpenCodeServer => {
+                "OpenCode CLI updated. Restart the configured local OpenCode server to use the new version."
+            }
         }
     }
 }
@@ -89,6 +94,15 @@ pub fn verify_update(
             .any(|provider| provider.version_advisory_status.as_deref() == Some("behind_latest"));
     if still_outdated {
         UpdateVerification::StillOutdated
+    } else if providers.iter().any(|provider| {
+        provider.driver.as_deref() == Some("opencode")
+            && provider.version.is_some()
+            && provider
+                .installed_version
+                .as_ref()
+                .is_some_and(|installed| installed.is_some() && installed != &provider.version)
+    }) {
+        UpdateVerification::RestartOpenCodeServer
     } else {
         UpdateVerification::Succeeded
     }
@@ -100,6 +114,7 @@ mod tests {
 
     fn snapshot() -> ProviderSnapshot {
         ProviderSnapshot {
+            driver: None,
             checked_at: "2026-11-10T00:00:01Z".to_string(),
             installed: true,
             status: "ready".to_string(),

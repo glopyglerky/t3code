@@ -28,6 +28,7 @@ fn input(item: &str, run: Option<&str>, ordinal: Option<i64>) -> PositionAllocat
         turn_item_id: item.into(),
         run_id: run.map(str::to_owned),
         run_ordinal: ordinal,
+        placement: None,
     }
 }
 
@@ -421,4 +422,91 @@ async fn supplied_run_ordinal_rejects_invalid_domain_values_after_existing_item_
         2
     );
     app.commit("outer").await.unwrap();
+}
+
+#[tokio::test]
+async fn run_start_uses_reserved_slot_once_and_rollback_leaves_no_position_gap() {
+    let fixture = TestFixture::start().await;
+    let store = fixture.initialize().await;
+    let mut app = initialize(&store).await;
+    prepare(&store).await;
+    let start = |item: &str| PositionAllocate {
+        placement: Some(PositionPlacement::RunStart),
+        ..input(item, None, Some(1))
+    };
+    app.begin("write").await.unwrap();
+    assert_eq!(
+        app.positions_allocate("write", input("append", None, Some(1)))
+            .await
+            .unwrap(),
+        1_000_001
+    );
+    app.savepoint("write", "discard").await.unwrap();
+    assert_eq!(
+        app.positions_allocate("write", start("discarded"))
+            .await
+            .unwrap(),
+        1_000_000
+    );
+    assert_eq!(
+        app.positions_allocate("write", start("discarded-second"))
+            .await
+            .unwrap(),
+        1_000_002
+    );
+    app.rollback_to("write", "discard").await.unwrap();
+    app.release("write", "discard").await.unwrap();
+    assert_eq!(
+        app.positions_allocate("write", start("first"))
+            .await
+            .unwrap(),
+        1_000_000
+    );
+    assert_eq!(
+        app.positions_allocate("write", start("second"))
+            .await
+            .unwrap(),
+        1_000_002
+    );
+    assert_eq!(
+        app.positions_allocate(
+            "write",
+            PositionAllocate {
+                placement: Some(PositionPlacement::Append),
+                ..input("first", None, Some(9))
+            }
+        )
+        .await
+        .unwrap(),
+        1_000_000
+    );
+    app.commit("write").await.unwrap();
+    app.begin("rollback").await.unwrap();
+    assert_eq!(
+        app.positions_allocate("rollback", input("rolled-back", None, Some(1)))
+            .await
+            .unwrap(),
+        1_000_003
+    );
+    app.rollback("rollback").await.unwrap();
+    app.begin("check").await.unwrap();
+    assert_eq!(
+        app.positions_allocate("check", start("third"))
+            .await
+            .unwrap(),
+        1_000_003
+    );
+    assert_eq!(
+        app.positions_allocate(
+            "check",
+            PositionAllocate {
+                placement: Some(PositionPlacement::RunStart),
+                ..input("standalone", None, None)
+            }
+        )
+        .await
+        .unwrap(),
+        0
+    );
+    app.rollback("check").await.unwrap();
 }

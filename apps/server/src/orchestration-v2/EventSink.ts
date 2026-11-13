@@ -3,6 +3,7 @@ import {
   type OrchestrationV2Run,
   OrchestrationV2DomainEvent,
   type OrchestrationV2ProviderThread,
+  type OrchestrationV2TurnItem,
   OrchestrationV2StoredEvent,
   ProviderThreadId,
   RunAttemptId,
@@ -130,6 +131,11 @@ export interface EventSinkV2Shape {
     readonly runId: RunId;
     readonly activeAttemptId: RunAttemptId;
     readonly expectedStatus: OrchestrationV2Run["status"];
+    /** Also refuse while this run interrupt request is stored without its result. */
+    readonly unlessInterruptRequested?: {
+      readonly requestId: OrchestrationV2TurnItem["id"];
+      readonly resultId: OrchestrationV2TurnItem["id"];
+    };
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
     readonly effects?: ReadonlyArray<EffectOutbox.PendingOrchestrationEffectV2>;
   }) => Effect.Effect<
@@ -158,6 +164,17 @@ export interface EventSinkV2Shape {
   /** Commits only if the full provider row equals expected; some writers do not advance updatedAt. */
   readonly writeIfProviderThreadUnchanged: (input: {
     readonly expected: OrchestrationV2ProviderThread;
+    readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
+  }) => Effect.Effect<
+    {
+      readonly committed: boolean;
+      readonly storedEvents: ReadonlyArray<OrchestrationV2StoredEvent>;
+    },
+    EventSinkV2Error
+  >;
+  /** Commits only if the stored turn item still equals expected. */
+  readonly writeIfTurnItemUnchanged: (input: {
+    readonly expected: OrchestrationV2TurnItem;
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
   }) => Effect.Effect<
     {
@@ -490,6 +507,18 @@ const layerBase: Layer.Layer<
                 storedEvents: [] as ReadonlyArray<OrchestrationV2StoredEvent>,
               };
             }
+            if (
+              input.unlessInterruptRequested !== undefined &&
+              (yield* projectionStore.interruptPending({
+                threadId: input.threadId,
+                ...input.unlessInterruptRequested,
+              }))
+            ) {
+              return {
+                committed: false as const,
+                storedEvents: [] as ReadonlyArray<OrchestrationV2StoredEvent>,
+              };
+            }
 
             const normalized = yield* normalizeEvents(
               input.guardPendingUserInputCancellations === true
@@ -556,25 +585,21 @@ const layerBase: Layer.Layer<
       );
     });
 
-    const writeIfProviderThreadUnchangedEffect = Effect.fn(
-      "orchestrationV2.EventSink.writeIfProviderThreadUnchanged",
-    )(function* (input: Parameters<EventSinkV2Shape["writeIfProviderThreadUnchanged"]>[0]) {
-      yield* Effect.annotateCurrentSpan({
-        "orchestration_v2.event_count": input.events.length,
-        "orchestration_v2.provider_thread_id": input.expected.id,
-      });
-      const expectedJson = yield* ProjectionStore.encodeProviderThreadPayload(input.expected);
-
-      return yield* commitThenPublish(
+    // Appends the events only if the stored payload still matches, in one transaction.
+    const writeIfStoredPayloadMatches = <E>(
+      matchesStoredPayload: Effect.Effect<boolean, E>,
+      events: ReadonlyArray<OrchestrationV2DomainEvent>,
+    ) =>
+      commitThenPublish(
         Effect.gen(function* () {
-          if (!(yield* projectionStore.providerThreadUnchanged(input.expected.id, expectedJson))) {
+          if (!(yield* matchesStoredPayload)) {
             return {
               committed: false as const,
               storedEvents: [] as ReadonlyArray<OrchestrationV2StoredEvent>,
             };
           }
 
-          const normalized = yield* normalizeEvents(input.events);
+          const normalized = yield* normalizeEvents(events);
           const storedEvents = yield* eventStore.append({ events: normalized });
           const outcomes = yield* applyStoredEvents(storedEvents);
           return { committed: true as const, storedEvents, outcomes };
@@ -583,6 +608,33 @@ const layerBase: Layer.Layer<
           result.committed
             ? publishStoredEvents(result.storedEvents, result.outcomes)
             : Effect.void,
+      );
+
+    const writeIfProviderThreadUnchangedEffect = Effect.fn(
+      "orchestrationV2.EventSink.writeIfProviderThreadUnchanged",
+    )(function* (input: Parameters<EventSinkV2Shape["writeIfProviderThreadUnchanged"]>[0]) {
+      yield* Effect.annotateCurrentSpan({
+        "orchestration_v2.event_count": input.events.length,
+        "orchestration_v2.provider_thread_id": input.expected.id,
+      });
+      const expectedJson = yield* ProjectionStore.encodeProviderThreadPayload(input.expected);
+      return yield* writeIfStoredPayloadMatches(
+        projectionStore.providerThreadUnchanged(input.expected.id, expectedJson),
+        input.events,
+      );
+    });
+
+    const writeIfTurnItemUnchangedEffect = Effect.fn(
+      "orchestrationV2.EventSink.writeIfTurnItemUnchanged",
+    )(function* (input: Parameters<EventSinkV2Shape["writeIfTurnItemUnchanged"]>[0]) {
+      yield* Effect.annotateCurrentSpan({
+        "orchestration_v2.event_count": input.events.length,
+        "orchestration_v2.turn_item_id": input.expected.id,
+      });
+      const expectedJson = yield* ProjectionStore.encodeTurnItemPayload(input.expected);
+      return yield* writeIfStoredPayloadMatches(
+        projectionStore.turnItemUnchanged(input.expected.id, expectedJson),
+        input.events,
       );
     });
 
@@ -864,9 +916,15 @@ const layerBase: Layer.Layer<
                   ? Effect.sync(() => {
                       batch.publish.push(publish(committed));
                     })
-                  : transactions.afterCommit(publish(committed).pipe(
-                      Effect.tap(() => Effect.sync(() => { batch.nativePublishedWrites += 1; })),
-                    )),
+                  : transactions.afterCommit(
+                      publish(committed).pipe(
+                        Effect.tap(() =>
+                          Effect.sync(() => {
+                            batch.nativePublishedWrites += 1;
+                          }),
+                        ),
+                      ),
+                    ),
               ),
             ),
       );
@@ -875,7 +933,11 @@ const layerBase: Layer.Layer<
       "orchestrationV2.EventSink.providerBatch",
     )(function* <A, E, R>(effect: Effect.Effect<A, E, R>) {
       if ((yield* CurrentProviderBatch) !== undefined) return yield* effect;
-      const batch: ProviderBatchPublication = { publish: [], eventCount: 0, nativePublishedWrites: 0 };
+      const batch: ProviderBatchPublication = {
+        publish: [],
+        eventCount: 0,
+        nativePublishedWrites: 0,
+      };
       let started = false;
       const result = yield* commitThenPublishNow(
         Effect.sync(() => {
@@ -885,8 +947,7 @@ const layerBase: Layer.Layer<
       ).pipe(
         // Normalization mutates run-local state, so only retry before its transaction body starts.
         Effect.retry({
-          while: (cause) =>
-            !started && PersistenceTransactions.isLockTimeout(cause),
+          while: (cause) => !started && PersistenceTransactions.isLockTimeout(cause),
           times: 2,
         }),
         Effect.mapError((cause) =>
@@ -990,6 +1051,12 @@ const layerBase: Layer.Layer<
             (cause) => new EventSinkWriteError({ eventCount: input.events.length, cause }),
           ),
         ),
+      writeIfTurnItemUnchanged: (input) =>
+        writeIfTurnItemUnchangedEffect(input).pipe(
+          Effect.mapError(
+            (cause) => new EventSinkWriteError({ eventCount: input.events.length, cause }),
+          ),
+        ),
       commitCommand: (input) =>
         commitCommandEffect(input).pipe(
           Effect.mapError(
@@ -1066,10 +1133,9 @@ const layerBase: Layer.Layer<
 export const layerFromPersistence = layerBase;
 
 export const layerFromStores = layerBase.pipe(
-  Layer.provide(Layer.mergeAll(
-    PersistenceTransactions.sqliteLayer,
-    SqliteProjectionCommitStore.layer,
-  )),
+  Layer.provide(
+    Layer.mergeAll(PersistenceTransactions.sqliteLayer, SqliteProjectionCommitStore.layer),
+  ),
 );
 
 export const layer: Layer.Layer<

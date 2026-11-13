@@ -1,4 +1,4 @@
-import { OrchestrationV2TurnItem, ThreadId, TurnItemId } from "@t3tools/contracts";
+import { RunId, OrchestrationV2TurnItem, ThreadId, TurnItemId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
@@ -15,6 +15,8 @@ const Payloads = Schema.Array(
     turn_item_id: Schema.String,
     payload_json: Schema.String,
     entry_id: Schema.String,
+    run_id: Schema.NullOr(RunId),
+    empty_text: Schema.NullOr(Schema.Number),
     item_type: Schema.Union(OrchestrationV2TurnItem.members.map((item) => item.fields.type)),
   }),
 );

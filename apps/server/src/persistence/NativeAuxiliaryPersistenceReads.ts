@@ -22,6 +22,16 @@ export const make = Effect.gen(function* () {
   while (!(yield* client.prepareOutbox).prepared) yield* Effect.yieldNow;
   while (!(yield* client.prepareAuxiliary).prepared) yield* Effect.yieldNow;
   return AuxiliaryPersistenceReads.of({
+    hasActiveRun: client
+      .request("application_auxiliary_read", { query: { kind: "active_runs" } }, Schema.Boolean)
+      .pipe(Effect.mapError(toAuxiliaryReadError("hasActiveRun"))),
+    legacySubagentThreadIds: client
+      .request(
+        "application_auxiliary_read",
+        { query: { kind: "legacy_subagent_thread_ids" } },
+        Schema.Array(Schema.String),
+      )
+      .pipe(Effect.mapError(toAuxiliaryReadError("legacySubagentThreadIds"))),
     providerHistory: client
       .request(
         "application_auxiliary_read",

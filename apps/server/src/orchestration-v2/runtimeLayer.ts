@@ -12,6 +12,7 @@ import * as McpAppRequests from "../mcpApps/McpAppRequests.ts";
 import * as ProviderSessionRuntime from "../persistence/ProviderSessionRuntime.ts";
 import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
+import * as ProviderInstallationGate from "../provider/ProviderInstallationGate.ts";
 import * as AgentSessionImporter from "../project/AgentSessionImporter.ts";
 import * as AgentSessionScanner from "../project/AgentSessionScanner.ts";
 import * as ProjectService from "../project/ProjectService.ts";
@@ -220,6 +221,7 @@ export const makeRuntimeLayers = <
         IdAllocator.layer,
         layerProviderEventIngestorProvided,
         persistence.projections,
+        ProviderInstallationGate.layer,
       ),
     ),
   );
@@ -238,6 +240,7 @@ export const makeRuntimeLayers = <
         IdAllocator.layer,
         layerProviderEventIngestorProvided,
         persistence.positions,
+        ThreadCommandExecutor.layer,
       ),
     ),
   );
@@ -253,12 +256,15 @@ export const makeRuntimeLayers = <
         layerProviderAuthServiceProvided,
         layerRunExecutionServiceProvided,
         layerRuntimePolicyProvided,
+        persistence.positions,
       ),
     ),
   );
 
   const layerProviderTurnControlServiceProvided = ProviderTurnControlService.layer.pipe(
-    Layer.provide(Layer.merge(persistence.projections, layerProviderSessionManagerProvided)),
+    Layer.provide(
+      Layer.mergeAll(layerEventSink, persistence.projections, layerProviderSessionManagerProvided),
+    ),
   );
   const layerRuntimeRequestServiceProvided = RuntimeRequestService.layer.pipe(
     Layer.provide(Layer.merge(persistence.projections, layerProviderSessionManagerProvided)),
@@ -315,15 +321,20 @@ export const makeRuntimeLayers = <
     ),
   );
 
+  const layerAgentSessionScannerProvided = AgentSessionScanner.layer.pipe(
+    Layer.provide(persistence.providerRuntime),
+  );
   const layerAgentSessionImporterProvided = AgentSessionImporter.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
-        AgentSessionScanner.layer,
+        layerAgentSessionScannerProvided,
         layerProjectService,
         layerOrchestratorProvided,
         layerEventSink,
         IdAllocator.layer,
         persistence.providerRuntime,
+        ProviderAdapterRegistry.layerFromProviderInstanceRegistry,
+        ThreadCommandExecutor.layer,
       ),
     ),
   );
@@ -354,6 +365,7 @@ export const makeRuntimeLayers = <
         layerManagedProjectFoldersProvided,
         layerThreadManagementProvided,
         layerCommandReceiptStoreProvided,
+        layerEventSink,
         IdAllocator.layer,
       ),
     ),
@@ -392,7 +404,11 @@ export const makeRuntimeLayers = <
   );
   const layerThreadTitleRegenerationProvided = ThreadTitleRegenerationService.layer.pipe(
     Layer.provide(
-      Layer.mergeAll(layerThreadManagementProvided, persistence.projects, TextGeneration.layer),
+      Layer.mergeAll(
+        layerThreadManagementProvided,
+        persistence.projects,
+        TextGeneration.layer.pipe(Layer.provide(ProviderInstallationGate.layer)),
+      ),
     ),
   );
   const layerEffectExecutorProvided = EffectWorker.layerExecutor.pipe(
@@ -472,6 +488,7 @@ export const makeRuntimeLayers = <
       ),
     ),
     layerProviderContinuationWorkerProvided,
+    layerAgentSessionScannerProvided,
     layerAgentSessionImporterProvided,
     EffectOutbox.layerPruneWorker.pipe(Layer.provide(persistence.outbox)),
   ).pipe(

@@ -56,6 +56,7 @@ fn claim(stream: &str, sequence: u64, now: &str) -> outbox::ClaimOnce {
             worker_id: "worker".into(),
             now: now.into(),
             exclude_restart_continuations: false,
+            max_running_title_generations: None,
         },
     }
 }
@@ -572,4 +573,140 @@ async fn scoped_claims_follow_outer_and_savepoint_rollback_without_claim_stream_
     assert_eq!(second.id, "second");
     assert_eq!(second.attempt_count, 1);
     app.commit("standalone").await.unwrap();
+}
+
+#[tokio::test]
+async fn global_title_limit_counts_reserved_claims_and_rollbacks_release_capacity() {
+    let fixture = TestFixture::start().await;
+    let store = fixture.initialize().await;
+    let mut owner = ApplicationTransactions::new(store.clone());
+    owner.initialize(schema()).await.unwrap();
+    let mut competing = ApplicationTransactions::new(store.clone());
+    prepare(&store).await;
+    let title = |id: &str| outbox::EnqueueEffect {
+        request: json!({"type":"thread-title.generate","kind":{"type":"regenerate"}}),
+        ..pending(id, id)
+    };
+    let limited = outbox::Claim {
+        max_running_title_generations: Some(1.0),
+        ..claim("unused", 1, NOW).claim
+    };
+    owner.begin("write").await.unwrap();
+    owner
+        .outbox_enqueue(
+            "write",
+            &[
+                title("a-title"),
+                title("b-title"),
+                pending("c-ordinary", "ordinary"),
+                outbox::EnqueueEffect {
+                    available_at: Some(LATER.into()),
+                    ..pending("d-later", "later")
+                },
+            ],
+            NOW,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        owner
+            .outbox_claim("write", &limited)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        "a-title"
+    );
+    assert!(matches!(
+        competing
+            .begin_mode("competing", ApplicationTransactionMode::Write, Some(1))
+            .await,
+        Err(Error::WriterBusy)
+    ));
+    assert_eq!(
+        owner
+            .outbox_claim("write", &limited)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        "c-ordinary"
+    );
+    assert!(
+        owner
+            .outbox_claim("write", &limited)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        owner
+            .outbox_next_claimable_at_limited("write", Some(1.0))
+            .await
+            .unwrap(),
+        Some(LATER.into())
+    );
+    owner.commit("write").await.unwrap();
+    competing.begin("competing").await.unwrap();
+    assert!(
+        competing
+            .outbox_claim("competing", &limited)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        competing
+            .outbox_succeed(
+                "competing",
+                &outbox::Settle {
+                    effect_id: "a-title".into(),
+                    worker_id: "worker".into(),
+                    now: NOW.into()
+                }
+            )
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        competing
+            .outbox_claim("competing", &limited)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        "b-title"
+    );
+    competing.rollback("competing").await.unwrap();
+    owner.begin("check").await.unwrap();
+    assert!(
+        owner
+            .outbox_claim("check", &limited)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        owner
+            .outbox_cancel(
+                "check",
+                &outbox::CancelUnsettled {
+                    thread_id: "a-title".into(),
+                    effect_types: vec![outbox::EffectType::ThreadTitleGenerate],
+                    reason: "cancel".into(),
+                    now: NOW.into()
+                }
+            )
+            .await
+            .unwrap(),
+        vec!["a-title"]
+    );
+    let reclaimed = owner
+        .outbox_claim("check", &limited)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reclaimed.id, "b-title");
+    assert_eq!(reclaimed.attempt_count, 1);
+    owner.rollback("check").await.unwrap();
 }

@@ -460,12 +460,14 @@ pub(crate) async fn ensure_ready(session: &mut Session) -> Result<()> {
     Ok(())
 }
 
-pub(crate) async fn equal_rows(
+async fn visit_equal_rows(
     session: &mut Session,
     name: &str,
     column: &str,
     value: &Value,
-) -> Result<Vec<IndexedRow>> {
+    page_rows: usize,
+    mut visit: impl FnMut(IndexedRow) -> Result<bool>,
+) -> Result<()> {
     ensure_ready(session).await?;
     if !SPECS.iter().any(|spec| spec.name == name)
         || !(column == "all"
@@ -477,9 +479,8 @@ pub(crate) async fn equal_rows(
     let prefix = index_prefix(&session.catalog, name, column, value);
     let end = prefix_end(&prefix);
     let mut cursor = prefix.clone();
-    let mut result = Vec::new();
     loop {
-        let page = session.transaction.scan(&cursor, &end, 128).await?;
+        let page = session.transaction.scan(&cursor, &end, page_rows).await?;
         let count = page.len();
         for (key, bytes) in page {
             let witness: IndexRow = decode(&bytes)?;
@@ -510,18 +511,71 @@ pub(crate) async fn equal_rows(
                     return Err(Error::IncompatibleStore);
                 }
             }
-            result.push(IndexedRow {
+            if !visit(IndexedRow {
                 row: source.row,
                 order: witness.order,
-            });
+            })? {
+                return Ok(());
+            }
             cursor = key;
             cursor.push(0);
         }
-        if count < 128 {
+        if count < page_rows {
             break;
         }
     }
+    Ok(())
+}
+
+pub(crate) async fn equal_rows(
+    session: &mut Session,
+    name: &str,
+    column: &str,
+    value: &Value,
+) -> Result<Vec<IndexedRow>> {
+    let mut result = Vec::new();
+    visit_equal_rows(session, name, column, value, 128, |row| {
+        result.push(row);
+        Ok(true)
+    })
+    .await?;
     Ok(result)
+}
+
+/// Retain only selected values while scanning and validating one bounded page at a time.
+pub(crate) async fn filter_map_equal<T>(
+    session: &mut Session,
+    name: &str,
+    column: &str,
+    value: &Value,
+    mut project: impl FnMut(Map<String, Value>) -> Result<Option<T>>,
+) -> Result<Vec<T>> {
+    let mut result = Vec::new();
+    visit_equal_rows(session, name, column, value, 128, |row| {
+        if let Some(value) = project(row.row)? {
+            result.push(value);
+        }
+        Ok(true)
+    })
+    .await?;
+    Ok(result)
+}
+
+/// Validate rows incrementally, stopping at the first match without materializing the cohort.
+pub(crate) async fn any_equal(
+    session: &mut Session,
+    name: &str,
+    column: &str,
+    value: &Value,
+    mut predicate: impl FnMut(&Map<String, Value>) -> Result<bool>,
+) -> Result<bool> {
+    let mut found = false;
+    visit_equal_rows(session, name, column, value, 32, |row| {
+        found = predicate(&row.row)?;
+        Ok(!found)
+    })
+    .await?;
+    Ok(found)
 }
 
 pub(crate) async fn all_rows(session: &mut Session, name: &str) -> Result<Vec<IndexedRow>> {
@@ -624,23 +678,47 @@ impl Store {
         }
         let mut limit = PREPARE_ROWS;
         loop {
-            match self.prepare_projection_reads_batch(limit).await {
+            match self.prepare_projection_reads_batch(limit, None).await {
                 Err(Error::ResourceLimit(_)) if limit > 1 => limit = (limit / 2).max(1),
                 result => return result,
             }
         }
     }
 
-    async fn prepare_projection_reads_batch(&self, limit: usize) -> Result<ProjectionPreparation> {
+    pub(crate) async fn prepare_projection_reads_for_catalog(
+        &self,
+        catalog: &ApplicationCatalog,
+    ) -> Result<ProjectionPreparation> {
+        self.db.require_exclusive()?;
+        let mut limit = PREPARE_ROWS;
+        loop {
+            match self
+                .prepare_projection_reads_batch(limit, Some(catalog))
+                .await
+            {
+                Err(Error::ResourceLimit(_)) if limit > 1 => limit = (limit / 2).max(1),
+                result => return result,
+            }
+        }
+    }
+
+    async fn prepare_projection_reads_batch(
+        &self,
+        limit: usize,
+        target: Option<&ApplicationCatalog>,
+    ) -> Result<ProjectionPreparation> {
         let mut tx = self
             .db
             .begin_reserved(Duration::from_secs(5), Duration::from_secs(300))
             .await?;
-        let catalog = decode_catalog(
-            &tx.get(&schema_key())
-                .await?
-                .ok_or(Error::IncompatibleStore)?,
-        )?;
+        let catalog = match target {
+            Some(catalog) => catalog.clone(),
+            None => decode_catalog(
+                &tx.get(&schema_key())
+                    .await?
+                    .ok_or(Error::IncompatibleStore)?,
+            )?,
+        };
         let state_key = location(&catalog, "preparation");
         let mut state = match tx.get(&state_key).await? {
             Some(bytes) => decode::<ReadPreparation>(&bytes)?,

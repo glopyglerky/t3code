@@ -16,6 +16,7 @@ export class SqliteNativeMigrationError extends Schema.TaggedError<SqliteNativeM
 /** All SQL migrations run on a private backup. Never mutate the retained source. */
 export const snapshotForNativeImport = Effect.fn("snapshotForNativeImport")(function* (
   source: string,
+  options: { readonly migrate?: boolean } = {},
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -39,7 +40,9 @@ export const snapshotForNativeImport = Effect.fn("snapshotForNativeImport")(func
     },
     catch: (cause) => new SqliteNativeMigrationError({ path: source, cause }),
   });
-  yield* runMigrations().pipe(Effect.provide(NodeSqliteClient.layer({ filename: copied })));
+  if (options.migrate !== false) {
+    yield* runMigrations().pipe(Effect.provide(NodeSqliteClient.layer({ filename: copied })));
+  }
   const summary = yield* Effect.try({
     try: () => exportSqliteState({ source: copied, destination: exported }),
     catch: (cause) => new SqliteNativeMigrationError({ path: source, cause }),

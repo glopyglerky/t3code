@@ -265,8 +265,13 @@ pub fn evaluate(input: &Value) -> WireResult<Value> {
         .as_str()
         .ok_or(Error::InvalidRequest)?;
     let operation_keys: &[&str] = match operation {
-        "claim" => &["now", "workerId", "excludeRestartContinuations"],
-        "next" => &[],
+        "claim" => &[
+            "now",
+            "workerId",
+            "excludeRestartContinuations",
+            "maxRunningTitleGenerations",
+        ],
+        "next" => &["maxRunningTitleGenerations"],
         "transition" => &[
             "now",
             "effectId",
@@ -299,6 +304,17 @@ pub fn evaluate(input: &Value) -> WireResult<Value> {
         }
         rows.push(row);
     }
+    let title_limit = match input.get("maxRunningTitleGenerations") {
+        None => None,
+        Some(Value::Number(value)) => {
+            let value: f64 = value.parse().map_err(|_| Error::InvalidRequest)?;
+            if !value.is_finite() {
+                return Err(Error::InvalidRequest);
+            }
+            Some(value)
+        }
+        _ => return Err(Error::InvalidRequest),
+    };
     let output = match operation {
         "claim" => {
             let now = timestamp(field(input, "now")?)?;
@@ -306,7 +322,9 @@ pub fn evaluate(input: &Value) -> WireResult<Value> {
             let exclude = field(input, "excludeRestartContinuations")?
                 .as_bool()
                 .ok_or(Error::InvalidRequest)?;
-            if let Some(index) = outbox::claim_next(&rows, &now, exclude) {
+            if let Some(index) =
+                outbox::claim_next_with_title_limit(&rows, &now, exclude, title_limit)
+            {
                 let row = transition(&rows[index], Action::Claim { worker_id }, &now)?
                     .ok_or(Error::InvalidRequest)?;
                 change(index, &row)
@@ -316,7 +334,10 @@ pub fn evaluate(input: &Value) -> WireResult<Value> {
         }
         "next" => object(vec![(
             "availableAt",
-            nullable(&outbox::next_claimable_at(&rows)),
+            nullable(&outbox::next_claimable_at_with_title_limit(
+                &rows,
+                title_limit,
+            )),
         )]),
         "transition" => {
             let now = timestamp(field(input, "now")?)?;

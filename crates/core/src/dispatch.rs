@@ -132,9 +132,169 @@ pub fn evaluate(frame: &str) -> Result<&'static str, &'static str> {
     }
 }
 
+#[derive(Clone, Copy)]
+struct FollowUpRun {
+    index: usize,
+    ordinal: u64,
+    completed_at: Option<i64>,
+}
+
+/// Streaming selection keeps arbitrary thread history out of command-line arguments.
+#[derive(Default)]
+pub struct FollowUpOwner {
+    active: Option<FollowUpRun>,
+    executed: Option<FollowUpRun>,
+    count: usize,
+}
+
+impl FollowUpOwner {
+    pub fn push(&mut self, frame: &str) -> Result<(), &'static str> {
+        let fields: Vec<_> = frame.split('\t').collect();
+        if fields.len() != 5 || fields[0] != "t3ls-followup-v1" || frame.len() > 256 {
+            return Err("invalid follow-up frame");
+        }
+        let status = fields[1];
+        if !matches!(
+            status,
+            "preparing"
+                | "queued"
+                | "starting"
+                | "running"
+                | "waiting"
+                | "completed"
+                | "interrupted"
+                | "failed"
+                | "cancelled"
+                | "rolled_back"
+        ) {
+            return Err("invalid follow-up run status");
+        }
+        let ordinal: u64 = fields[2]
+            .parse()
+            .map_err(|_| "invalid follow-up run ordinal")?;
+        if ordinal > 9_007_199_254_740_991 {
+            return Err("invalid follow-up run ordinal");
+        }
+        let started = flag(fields[3])?;
+        let completed_at = if fields[4] == "-" {
+            None
+        } else {
+            Some(
+                fields[4]
+                    .parse::<i64>()
+                    .map_err(|_| "invalid follow-up completion time")?,
+            )
+        };
+        let run = FollowUpRun {
+            index: self.count,
+            ordinal,
+            completed_at,
+        };
+        self.count = self
+            .count
+            .checked_add(1)
+            .ok_or("follow-up run count overflow")?;
+        if active(status) && self.active.is_none_or(|old| ordinal > old.ordinal) {
+            self.active = Some(run);
+        }
+        if status != "queued" && !(status == "cancelled" && !started) {
+            let end = completed_at.unwrap_or(i64::MAX);
+            if self.executed.is_none_or(|old| {
+                (end, ordinal) > (old.completed_at.unwrap_or(i64::MAX), old.ordinal)
+            }) {
+                self.executed = Some(run);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn selected_index(&self) -> Option<usize> {
+        self.active.or(self.executed).map(|run| run.index)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn owner(rows: &[(&str, u64, bool, Option<i64>)]) -> Option<usize> {
+        let mut owner = FollowUpOwner::default();
+        for (status, ordinal, started, completed) in rows {
+            let completed = completed.map_or_else(|| "-".into(), |value| value.to_string());
+            owner
+                .push(&format!(
+                    "t3ls-followup-v1\t{status}\t{ordinal}\t{}\t{completed}",
+                    u8::from(*started)
+                ))
+                .unwrap();
+        }
+        owner.selected_index()
+    }
+
+    #[test]
+    fn follow_up_owner_prioritizes_highest_active_ordinal_and_stable_ties() {
+        assert_eq!(owner(&[]), None);
+        assert_eq!(
+            owner(&[
+                ("completed", 99, true, Some(100)),
+                ("running", 2, true, None),
+                ("preparing", 7, false, None),
+                ("waiting", 7, true, None)
+            ]),
+            Some(2)
+        );
+        assert_eq!(
+            owner(&[
+                ("queued", 9, false, None),
+                ("cancelled", 10, false, Some(200))
+            ]),
+            None
+        );
+    }
+
+    #[test]
+    fn follow_up_owner_uses_execution_time_then_ordinal_after_held_queues() {
+        assert_eq!(
+            owner(&[
+                ("completed", 9, true, Some(100)),
+                ("completed", 1, true, Some(200))
+            ]),
+            Some(1)
+        );
+        assert_eq!(
+            owner(&[("completed", 9, true, Some(100)), ("failed", 1, true, None)]),
+            Some(1)
+        );
+        assert_eq!(
+            owner(&[
+                ("interrupted", 2, true, Some(-100)),
+                ("cancelled", 3, true, Some(-100))
+            ]),
+            Some(1)
+        );
+        assert_eq!(
+            owner(&[("failed", 4, false, None), ("rolled_back", 4, true, None)]),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn follow_up_owner_rejects_invalid_frames_without_changing_selection() {
+        let mut owner = FollowUpOwner::default();
+        owner.push("t3ls-followup-v1\tcompleted\t1\t1\t0").unwrap();
+        for frame in [
+            "t3ls-followup-v2\tcompleted\t1\t1\t0",
+            "t3ls-followup-v1\tfuture\t1\t1\t0",
+            "t3ls-followup-v1\trunning\t-1\t1\t0",
+            "t3ls-followup-v1\trunning\t9007199254740992\t1\t0",
+            "t3ls-followup-v1\trunning\t1\ttrue\t0",
+            "t3ls-followup-v1\trunning\t1\t1\tNaN",
+            "t3ls-followup-v1\trunning\t1\t1\t0\textra",
+        ] {
+            assert!(owner.push(frame).is_err());
+            assert_eq!(owner.selected_index(), Some(0));
+        }
+    }
 
     #[test]
     fn automatic_delivery_preserves_steer_queue_restart_precedence() {

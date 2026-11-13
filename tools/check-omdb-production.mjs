@@ -23,6 +23,7 @@ import {
   makeEvent,
 } from "./redb-event-sink-fixtures.mjs";
 import { inspectNativeReplay } from "../apps/web/scripts/hybrid-client-database.ts";
+import { verifyNativeSchemaUpgrade } from "./omdb-schema-upgrade-fixture.mjs";
 
 const [executable, proofPath] = process.argv.slice(2);
 Assert.ok(executable && Path.isAbsolute(executable));
@@ -275,6 +276,7 @@ try {
   checks.push(
     "retained SQLite configuration refuses an authoritative omdb home instead of forking state",
   );
+  checks.push(await verifyNativeSchemaUpgrade(executable));
   await finishProof({
     executable,
     fixture,
@@ -286,6 +288,13 @@ try {
       "apps/server/src/server.ts",
       "apps/server/src/config.ts",
       "apps/server/src/persistence/Omdb.ts",
+      "apps/server/src/persistence/redb_schema_upgrade.rs",
+      "apps/server/src/persistence/redb_import.rs",
+      "apps/server/src/persistence/migrateSqliteToOmdb.ts",
+      "apps/server/src/persistence/redb_bootstrap.rs",
+      "apps/server/src/persistence/omdb-schema.json",
+      "apps/server/src/persistence/omdb-schema-80.json",
+      "tools/omdb-schema-upgrade-fixture.mjs",
       "apps/server/src/persistence/SelectedPersistence.ts",
       "apps/server/src/persistence/Sqlite.ts",
       "apps/server/src/auth/EnvironmentAuth.ts",

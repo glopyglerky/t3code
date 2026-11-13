@@ -7,6 +7,7 @@ import * as Schema from "effect/Schema";
 export const ProjectRecord = Schema.Struct({
   projectId: Schema.String,
   title: Schema.String,
+  hasCustomTitle: Schema.Literals([0, 1]),
   workspaceRoot: Schema.String,
   defaultModelSelection: Schema.NullOr(Schema.String),
   defaultThreadEnvMode: Schema.NullOr(Schema.String),

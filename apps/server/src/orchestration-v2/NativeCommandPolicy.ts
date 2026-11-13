@@ -1,6 +1,9 @@
 // @effect-diagnostics nodeBuiltinImport:off -- This existing policy adapter starts a bounded native executable on the host OS.
 import * as NodeChildProcess from "node:child_process";
 import * as NodePath from "node:path";
+import { once } from "node:events";
+import * as DateTime from "effect/DateTime";
+import type { OrchestrationV2Run } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import { makeNativeDispatchPolicy } from "./NativeDispatchPolicy.ts";
 
@@ -68,6 +71,76 @@ function execute(executable: string, args: ReadonlyArray<string>, signal: AbortS
   });
 }
 
+function selectFollowUpOwner(
+  executable: string,
+  runs: ReadonlyArray<OrchestrationV2Run>,
+  signal: AbortSignal,
+) {
+  return new Promise<OrchestrationV2Run | null>((resolve, reject) => {
+    const child = NodeChildProcess.execFile(
+      executable,
+      ["--follow-up-owner"],
+      {
+        encoding: "utf8",
+        shell: false,
+        windowsHide: true,
+        timeout: 5_000,
+        maxBuffer: 4_096,
+        killSignal: "SIGKILL",
+        signal,
+        env: {},
+      },
+      (error, stdout, stderr) => {
+        if (error || stderr !== "") {
+          reject(new Error("Native follow-up policy process failed", { cause: error }));
+          return;
+        }
+        const match = /^ok\t(-|0|[1-9][0-9]*)\n$/.exec(stdout);
+        if (match === null || match[0] !== stdout) {
+          reject(new Error("Native follow-up policy returned an invalid response"));
+          return;
+        }
+        if (match[1] === "-") {
+          resolve(null);
+          return;
+        }
+        const index = Number(match[1]);
+        const run = runs[index];
+        if (!Number.isSafeInteger(index) || run === undefined) {
+          reject(new Error("Native follow-up policy returned an invalid run index"));
+          return;
+        }
+        resolve(run);
+      },
+    );
+    const input = child.stdin;
+    if (input === null) {
+      reject(new Error("Native follow-up policy has no input pipe"));
+      return;
+    }
+    input.on("error", reject);
+    void (async () => {
+      for (const run of runs) {
+        const completed =
+          run.completedAt === null ? "-" : String(DateTime.toEpochMillis(run.completedAt));
+        const frame =
+          [
+            "t3ls-followup-v1",
+            run.status,
+            run.ordinal,
+            run.startedAt === null ? "0" : "1",
+            completed,
+          ].join("\t") + "\n";
+        if (!input.write(frame)) await once(input, "drain", { signal });
+      }
+      input.end();
+    })().catch((error: unknown) => {
+      child.kill("SIGKILL");
+      reject(error);
+    });
+  });
+}
+
 export function makeNativeCommandPolicy(
   executable: string,
   unsupported: Rejection,
@@ -114,6 +187,9 @@ export function makeNativeCommandPolicy(
   }
 
   return {
+    followUpOwnerRun: Effect.fn("NativeCommandPolicy.followUpOwnerRun")((runs) =>
+      Effect.promise((signal) => selectFollowUpOwner(executable, runs, signal)),
+    ),
     ...makeNativeDispatchPolicy((args, signal) => execute(executable, args, signal)),
     ensureQueuedMessages: Effect.fn("NativeCommandPolicy.ensureQueuedMessages")((input: Input) =>
       decide(input, "queued", [], ["-"], ["queued_messages"]).pipe(Effect.asVoid),

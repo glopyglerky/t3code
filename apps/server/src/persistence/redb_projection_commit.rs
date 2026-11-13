@@ -88,6 +88,9 @@ async fn write_row(
             .await?;
         }
     }
+    if name == ITEMS {
+        crate::application_turn_item_counts::replace(tx, catalog, previous.as_ref().map(|old| &old.row), Some(&row)).await?;
+    }
     read_index::replace(
         tx,
         catalog,
@@ -121,6 +124,9 @@ async fn delete_row(
                 )
                 .await?;
             }
+        }
+        if name == ITEMS {
+            crate::application_turn_item_counts::replace(tx, catalog, Some(&previous.row), None).await?;
         }
         read_index::replace(tx, catalog, name, Some(&previous.row), None).await?;
     }
@@ -213,6 +219,15 @@ pub enum ProjectionGuard {
     ProviderThreadUnchanged {
         provider_thread_id: String,
         expected_json: String,
+    },
+    TurnItemUnchanged {
+        turn_item_id: String,
+        expected_json: String,
+    },
+    InterruptPending {
+        thread_id: String,
+        request_id: String,
+        result_id: String,
     },
 }
 
@@ -548,6 +563,7 @@ const SPECS: &[TableSpec] = &[
             ("created_at", T),
             ("updated_at", T),
             ("payload_json", T),
+            ("search_text", NT),
         ],
         fields: &[
             ("message_id", P("id")),
@@ -767,6 +783,7 @@ fn spec(name: &str) -> &'static TableSpec {
         .expect("declared projection table")
 }
 fn validate_schema(catalog: &ApplicationCatalog) -> Result<()> {
+    crate::application_turn_item_counts::validate(catalog)?;
     for spec in SPECS {
         let columns: Vec<_> = spec.columns.iter().map(|(name, _)| *name).collect();
         validate_table(catalog, spec.name, &columns, spec.primary)?;
@@ -1183,6 +1200,7 @@ impl Store {
             }
             state
         } else {
+            tx.put(managed_marker(&catalog, crate::application_turn_item_counts::TABLE), encode(&OWNER)?).await?;
             for spec in SPECS {
                 let marker = managed_marker(&catalog, spec.name);
                 if tx.get(&marker).await?.is_some() {
@@ -1437,6 +1455,11 @@ async fn upsert_projection(
             )),
         };
         row.insert((*column).into(), value);
+    }
+    if name == MESSAGES {
+        let search_text = payload.get("text").and_then(Value::as_str)
+            .and_then(crate::application_message_search_text::readable_search_text);
+        row.insert("search_text".into(), nullable_cell(search_text.as_deref()));
     }
     if name == SUBAGENTS {
         let state = payload
@@ -1827,6 +1850,25 @@ async fn guard(session: &mut Session, guard: ProjectionGuard) -> Result<bool> {
                 return Ok(false);
             };
             Ok(text(&provider.row, "payload_json")? == expected_json)
+        }
+        ProjectionGuard::TurnItemUnchanged { turn_item_id, expected_json } => {
+            let Some(item) = read_row(tx, catalog, ITEMS, &[text_cell(&turn_item_id)]).await? else {
+                return Ok(false);
+            };
+            Ok(text(&item.row, "payload_json")? == expected_json)
+        }
+        ProjectionGuard::InterruptPending { thread_id, request_id, result_id } => {
+            let Some(request) = read_row(tx, catalog, ITEMS, &[text_cell(&request_id)]).await? else {
+                return Ok(false);
+            };
+            if text(&request.row, "thread_id")? != thread_id {
+                return Ok(false);
+            }
+            let result = read_row(tx, catalog, ITEMS, &[text_cell(&result_id)]).await?;
+            Ok(match result {
+                None => true,
+                Some(result) => text(&result.row, "thread_id")? != thread_id,
+            })
         }
     }
 }

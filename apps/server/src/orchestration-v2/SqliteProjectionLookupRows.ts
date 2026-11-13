@@ -86,6 +86,55 @@ export const make = Effect.gen(function* () {
           `,
             );
           }
+          case "run":
+            return yield* sql.withTransaction(
+              Effect.gen(function* () {
+                if (!(yield* exists(query.thread_id))) return { ...empty, owner_exists: false };
+                return payloads(
+                  yield* sql<{ readonly payload_json: string }>`
+                  SELECT payload_json FROM orchestration_v2_projection_runs
+                  WHERE run_id = ${query.run_id} AND thread_id = ${query.thread_id}
+                `,
+                );
+              }),
+            );
+          case "transcript_byte_floor": {
+            const rows = yield* sql<{ readonly bytes: number }>`
+              WITH tool_rows AS (
+                SELECT payload_json FROM orchestration_v2_projection_turn_items
+                WHERE thread_id = ${query.thread_id}
+                  AND type IN ('command_execution', 'dynamic_tool')
+                  AND (run_id IS NULL OR run_id NOT IN (
+                    SELECT run_id FROM orchestration_v2_projection_runs
+                    WHERE thread_id = ${query.thread_id} AND status = 'rolled_back'
+                  ))
+              )
+              SELECT CASE
+                WHEN (SELECT COALESCE(SUM(octet_length(payload_json)), 0) FROM tool_rows) <= ${query.limit}
+                  THEN 0
+                ELSE (
+                  SELECT COALESCE(SUM(CASE WHEN json_valid(payload_json) THEN (
+                    SELECT COALESCE(SUM(octet_length(leaf.value)), 0)
+                    FROM json_tree(tool_rows.payload_json, '$.output') AS leaf
+                    WHERE leaf.type = 'text'
+                  ) ELSE 0 END), 0)
+                  FROM tool_rows
+                )
+              END AS bytes
+            `;
+            return { ...empty, count: rows[0]?.bytes ?? 0 };
+          }
+          case "pending_delegated_completion": {
+            const rows = yield* sql`SELECT 1 FROM orchestration_v2_projection_subagents AS task
+              LEFT JOIN orchestration_v2_projection_runs AS owner ON owner.run_id = task.run_id
+              WHERE task.child_thread_id = ${query.thread_id} AND task.origin = 'app_owned'
+                AND (json_extract(task.payload_json, '$.result') IS NULL
+                  OR (task.completion_delivery_state = 'claimed'
+                    AND json_extract(owner.payload_json, '$.delegatedCompletion.disposition') = 'open'
+                    AND json_type(owner.payload_json, '$.delegatedCompletion.delivery') = 'object'))
+              LIMIT 1`;
+            return { ...empty, found: rows.length > 0 };
+          }
           case "run_message":
             return yield* sql.withTransaction(
               Effect.gen(function* () {

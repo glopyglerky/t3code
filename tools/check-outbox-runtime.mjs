@@ -169,11 +169,18 @@ export const invokeOracle = Effect.fn("OutboxOracle.invoke")(
           yield* outbox.claimNext({
             workerId: input.worker_id,
             excludeRestartContinuations: input.exclude_restart_continuations,
+            ...(input.max_running_title_generations === undefined
+              ? {}
+              : { maxRunningTitleGenerations: input.max_running_title_generations }),
           }),
         );
         break;
       case "outbox_next_claimable_at": {
-        const next = yield* outbox.nextClaimableAt;
+        const next = yield* outbox.nextClaimableAt(
+          input.max_running_title_generations === undefined
+            ? undefined
+            : { maxRunningTitleGenerations: input.max_running_title_generations },
+        );
         result = Option.isNone(next) ? null : DateTime.formatIso(next.value);
         break;
       }

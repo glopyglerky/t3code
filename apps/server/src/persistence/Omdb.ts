@@ -14,6 +14,7 @@ import * as ProcessRunner from "../processRunner.ts";
 import * as ServerOwnership from "../serverOwnership.ts";
 import * as NativeServerOwnershipLock from "./NativeServerOwnershipLock.ts";
 import * as RedbClient from "./RedbClient.ts";
+import currentSchema from "./omdb-schema.json" with { type: "json" };
 
 export class OmdbStartupError extends Schema.TaggedError<OmdbStartupError>()("OmdbStartupError", {
   path: Schema.String,
@@ -61,12 +62,22 @@ export const make = Effect.fn("Omdb.make")(
         () => Effect.succeed(""),
       ),
     );
+    const exists = yield* fs.exists(options.databasePath);
+    const needsUpgrade = exists && (yield* Effect.scoped(Effect.gen(function* () {
+      const inspection = yield* NativeDatabase.make({ ...options, mode: "read-only-local" });
+      const schema = yield* inspection.request({ operation: "application_schema" }, Schema.NullOr(RedbClient.ApplicationSchema));
+      if (schema === null) return false;
+      const migrations = yield* inspection.request({ operation: "application_migrations" }, Bootstrap.fields.migrations);
+      return migrations.length !== currentSchema.migrations.length || migrations.some((migration, index) =>
+        migration.id !== currentSchema.migrations[index]?.id || migration.name !== currentSchema.migrations[index]?.name,
+      );
+    })));
     const leaseScope = yield* Effect.acquireRelease(Scope.make(), (scope) =>
       Scope.close(scope, Exit.void),
     );
     let activate = suppliedOwnership?.activate;
     let awaitLost: Effect.Effect<never, ServerOwnership.ServerOwnershipError> | undefined;
-    if (activate === undefined && marker !== ACTIVE_MARKER) {
+    if (activate === undefined && (marker !== ACTIVE_MARKER || needsUpgrade)) {
       // CLI cutover must use the same pre-lock PID and old boot-service checks as
       // server startup. A byte-range lock alone cannot exclude older releases
       // which never acquired that lock and can still write the SQLite source.
@@ -89,7 +100,6 @@ export const make = Effect.fn("Omdb.make")(
       awaitLost = ownership.awaitLost;
     }
     const bootstrap = Effect.gen(function* () {
-      const exists = yield* fs.exists(options.databasePath);
       if (!exists && marker === ACTIVE_MARKER)
         return yield* new OmdbStartupError({
           path: options.databasePath,
@@ -143,10 +153,18 @@ export const make = Effect.fn("Omdb.make")(
             });
           }
           const adapter = yield* loadMigrationAdapter;
-          const currentDigest = yield* adapter.snapshotForNativeImport(source).pipe(
+          const sourceDigest = yield* adapter.snapshotForNativeImport(source, { migrate: false }).pipe(
             Effect.map((snapshot) => snapshot.sha256),
             Effect.scoped,
           );
+          // An older candidate can have an exact schema-80 source. Verify that
+          // immutable export before applying this build's private migrations.
+          const currentDigest = sourceDigest === prior.receipt.summary.export_sha256
+            ? sourceDigest
+            : yield* adapter.snapshotForNativeImport(source).pipe(
+                Effect.map((snapshot) => snapshot.sha256),
+                Effect.scoped,
+              );
           if (currentDigest !== prior.receipt.summary.export_sha256) {
             return yield* new OmdbStartupError({
               path: options.databasePath,
@@ -156,6 +174,15 @@ export const make = Effect.fn("Omdb.make")(
             });
           }
         }
+      }
+      if (needsUpgrade) {
+        // An offline omdb handle excludes every server/CLI reader and writer,
+        // including old executables which do not know this migration. Staging
+        // retains the current generation until the atomic catalog publication.
+        yield* Effect.scoped(Effect.gen(function* () {
+          const upgrade = yield* NativeDatabase.make({ ...options, mode: "exclusive-local", reconnect: false, requestTimeout: "60 minutes" });
+          yield* upgrade.request({ operation: "application_bootstrap" }, Bootstrap);
+        }));
       }
       const database = yield* NativeDatabase.make({
         ...options,

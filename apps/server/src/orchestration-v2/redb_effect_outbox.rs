@@ -454,6 +454,7 @@ operation!(outbox_reconcile, stage_reconcile_in, true, (input: &outbox::Reconcil
 operation!(outbox_claim_once, stage_claim_once_in, true, (input: &outbox::ClaimOnce) -> outbox::ClaimOutcome);
 operation!(outbox_claim, stage_claim_in, true, (input: &outbox::Claim) -> Option<outbox::OutboxEffect>);
 operation!(outbox_next_claimable_at, stage_next_in, false, () -> Option<String>);
+operation!(outbox_next_claimable_at_limited, stage_next_limited_in, false, (max_running_title_generations: Option<f64>) -> Option<String>);
 operation!(outbox_succeed, stage_succeed_in, true, (input: &outbox::Settle) -> bool);
 operation!(outbox_retry, stage_retry_in, true, (input: &outbox::Retry) -> bool);
 operation!(outbox_fail, stage_fail_in, true, (input: &outbox::Failure) -> bool);

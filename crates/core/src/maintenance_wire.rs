@@ -474,8 +474,12 @@ fn verified_provider(value: &Value) -> Result<ProviderSnapshot> {
     if value.get("installedVersion").is_some() {
         allowed.push("installedVersion");
     }
+    if value.get("driver").is_some() {
+        allowed.push("driver");
+    }
     keys(value, &allowed)?;
     Ok(ProviderSnapshot {
+        driver: value.get("driver").map(text).transpose()?,
         checked_at: text(field(value, "checkedAt")?)?,
         installed: boolean(field(value, "installed")?)?,
         status: text(field(value, "status")?)?,
@@ -485,7 +489,10 @@ fn verified_provider(value: &Value) -> Result<ProviderSnapshot> {
             .get("installedVersion")
             .map(|version| optional_text(version, MAX_TEXT_BYTES))
             .transpose()?,
-        version_advisory_status: optional_text(field(value, "versionAdvisoryStatus")?, MAX_TEXT_BYTES)?,
+        version_advisory_status: optional_text(
+            field(value, "versionAdvisoryStatus")?,
+            MAX_TEXT_BYTES,
+        )?,
     })
 }
 
@@ -578,6 +585,14 @@ fn encode_lookup(value: &Lookup) -> Value {
         ]),
         Lookup::Pnpm { package_name } => object(vec![
             ("kind", Value::String("pnpm".to_string())),
+            ("packageName", Value::String(package_name.clone())),
+        ]),
+        Lookup::VitePlus { package_name } => object(vec![
+            ("kind", Value::String("vite-plus".to_string())),
+            ("packageName", Value::String(package_name.clone())),
+        ]),
+        Lookup::Bun { package_name } => object(vec![
+            ("kind", Value::String("bun".to_string())),
             ("packageName", Value::String(package_name.clone())),
         ]),
         Lookup::Chocolatey => object(vec![("kind", Value::String("chocolatey".to_string()))]),
@@ -816,7 +831,10 @@ mod tests {
                     ("status", Value::String("ready".to_string())),
                     ("authStatus", Value::String("authenticated".to_string())),
                     ("version", Value::String("1.2.3".to_string())),
-                    ("versionAdvisoryStatus", Value::String("current".to_string())),
+                    (
+                        "versionAdvisoryStatus",
+                        Value::String("current".to_string()),
+                    ),
                 ])]),
             ),
         ];

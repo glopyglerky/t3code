@@ -26,7 +26,7 @@ export type ProjectionContextKind =
   | "node"
   | "scope"
   | "provider"
-  | "ready_ordinals"
+  | "preserved_ordinals"
   | "checkpoint"
   | "rollback_target_attempt"
   | "rollback_runs"

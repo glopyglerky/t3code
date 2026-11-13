@@ -440,21 +440,17 @@ async fn projection_read_indexes_backfill_and_follow_updates_savepoints_and_reop
 }
 
 fn schema() -> ApplicationSchema {
-    ApplicationSchema {
-        version: 1,
-        tables: SPECS
-            .iter()
-            .map(|spec| ApplicationTable {
-                name: spec.name.into(),
-                columns: spec
-                    .columns
-                    .iter()
-                    .map(|(name, _)| (*name).into())
-                    .collect(),
-                primary_key: spec.primary.iter().map(|name| (*name).into()).collect(),
-            })
-            .collect(),
-    }
+    let mut tables: Vec<_> = SPECS.iter().map(|spec| ApplicationTable {
+        name: spec.name.into(),
+        columns: spec.columns.iter().map(|(name, _)| (*name).into()).collect(),
+        primary_key: spec.primary.iter().map(|name| (*name).into()).collect(),
+    }).collect();
+    tables.push(ApplicationTable {
+        name: crate::application_turn_item_counts::TABLE.into(),
+        columns: vec!["thread_id".into(), "run_key".into(), "item_count".into()],
+        primary_key: vec!["thread_id".into(), "run_key".into()],
+    });
+    ApplicationSchema { version: 1, tables }
 }
 
 async fn initialize(store: &Store) -> ApplicationTransactions {
@@ -1230,4 +1226,95 @@ async fn normalization_is_required_witnessed_and_rolls_back_with_its_projection(
             .is_none()
     );
     app.rollback("write").await.unwrap();
+}
+
+#[tokio::test]
+async fn turn_item_and_interrupt_guards_share_reserved_writer_and_exact_current_payload() {
+    use crate::application::ApplicationTransactionMode;
+    let fixture = TestFixture::start().await;
+    let store = fixture.initialize().await;
+    let mut owner = initialize(&store).await;
+    let mut competing = ApplicationTransactions::new(store.clone());
+    prepare(&store).await;
+    let item = |id: &str, ordinal: i64, text: &str| json!({
+        "id":id,"threadId":"thread","runId":null,"nodeId":null,"providerThreadId":null,
+        "providerTurnId":null,"parentItemId":null,"ordinal":ordinal,"type":"reasoning",
+        "status":"running","updatedAt":NOW,"text":text,
+    });
+    let original = item("reasoning", 1, "before");
+    let unchanged = |payload: &Value| ProjectionGuard::TurnItemUnchanged {
+        turn_item_id: "reasoning".into(), expected_json: payload.to_string(),
+    };
+    let pending = |thread: &str| ProjectionGuard::InterruptPending {
+        thread_id: thread.into(), request_id: "interrupt-request".into(), result_id: "interrupt-result".into(),
+    };
+    owner.begin("first").await.unwrap();
+    apply(&mut owner, "first", event("thread.created", "thread", thread("thread"))).await.unwrap();
+    assert!(!owner.projections_guard("first", unchanged(&original)).await.unwrap());
+    apply(&mut owner, "first", event("turn-item.updated", "thread", original.clone())).await.unwrap();
+    assert!(owner.projections_guard("first", unchanged(&original)).await.unwrap());
+    assert!(!owner.projections_guard("first", ProjectionGuard::TurnItemUnchanged {
+        turn_item_id: "reasoning".into(), expected_json: format!(" {}", original),
+    }).await.unwrap());
+    assert!(!owner.projections_guard("first", pending("thread")).await.unwrap());
+    apply(&mut owner, "first", event("turn-item.updated", "thread", item("interrupt-request", 2, "stop"))).await.unwrap();
+    assert!(owner.projections_guard("first", pending("thread")).await.unwrap());
+    assert!(!owner.projections_guard("first", pending("other-thread")).await.unwrap());
+    // The competitor cannot change either protected row between a guard and its writes.
+    assert!(matches!(competing.begin_mode("competing", ApplicationTransactionMode::Write, Some(1)).await, Err(Error::WriterBusy)));
+    let changed = item("reasoning", 1, "after-without-timestamp-change");
+    apply(&mut owner, "first", event("turn-item.updated", "thread", changed.clone())).await.unwrap();
+    owner.savepoint("first", "result").await.unwrap();
+    apply(&mut owner, "first", event("turn-item.updated", "thread", item("interrupt-result", 3, "done"))).await.unwrap();
+    assert!(!owner.projections_guard("first", pending("thread")).await.unwrap());
+    owner.rollback_to("first", "result").await.unwrap();
+    owner.release("first", "result").await.unwrap();
+    assert!(owner.projections_guard("first", pending("thread")).await.unwrap());
+    owner.commit("first").await.unwrap();
+    competing.begin("second").await.unwrap();
+    assert!(!competing.projections_guard("second", unchanged(&original)).await.unwrap());
+    assert!(competing.projections_guard("second", unchanged(&changed)).await.unwrap());
+    assert!(competing.projections_guard("second", pending("thread")).await.unwrap());
+    apply(&mut competing, "second", event("turn-item.updated", "thread", item("interrupt-result", 3, "done"))).await.unwrap();
+    competing.commit("second").await.unwrap();
+    owner.begin("final").await.unwrap();
+    assert!(!owner.projections_guard("final", pending("thread")).await.unwrap());
+    owner.rollback("final").await.unwrap();
+}
+
+#[tokio::test]
+async fn turn_item_counts_follow_cross_run_moves_deletion_and_nested_rollback() {
+    let fixture = TestFixture::start().await;
+    let store = fixture.initialize().await;
+    let mut app = initialize(&store).await;
+    prepare(&store).await;
+    prepare_reads(&store).await;
+    let counts = crate::application_turn_item_counts::TABLE;
+    let item = |thread: &str, run: Option<&str>| json!({
+        "id":"counted-item","threadId":thread,"runId":run,"nodeId":null,
+        "providerThreadId":null,"providerTurnId":null,"parentItemId":null,"ordinal":1,
+        "type":"assistant_message","status":"completed","updatedAt":NOW,
+    });
+    app.begin("write").await.unwrap();
+    apply(&mut app, "write", event("turn-item.updated", "first", item("first", None))).await.unwrap();
+    let count = app.get("write", counts, &[text_cell("first"), text_cell("")]).await.unwrap().unwrap();
+    assert_eq!(integer(&count, "item_count").unwrap(), 1);
+    app.savepoint("write", "move").await.unwrap();
+    apply(&mut app, "write", event("turn-item.updated", "second", item("second", Some("run")))).await.unwrap();
+    assert!(app.get("write", counts, &[text_cell("first"), text_cell("")]).await.unwrap().is_none());
+    assert_eq!(integer(&app.get("write", counts, &[text_cell("second"), text_cell("run")]).await.unwrap().unwrap(), "item_count").unwrap(), 1);
+    app.rollback_to("write", "move").await.unwrap();
+    assert!(app.get("write", counts, &[text_cell("second"), text_cell("run")]).await.unwrap().is_none());
+    assert_eq!(integer(&app.get("write", counts, &[text_cell("first"), text_cell("")]).await.unwrap().unwrap(), "item_count").unwrap(), 1);
+    // The projection owner's deletion path must remove an empty group in the
+    // same transaction, including data removed by retention/normalization.
+    let mut session = app.take("write").unwrap();
+    delete_row(&mut session.transaction, &session.catalog, ITEMS, &[text_cell("counted-item")]).await.unwrap();
+    app.finish("write", session, Ok(())).await.unwrap();
+    assert!(app.get("write", counts, &[text_cell("first"), text_cell("")]).await.unwrap().is_none());
+    app.rollback("write").await.unwrap();
+    app.begin("verify").await.unwrap();
+    assert!(app.get("verify", ITEMS, &[text_cell("counted-item")]).await.unwrap().is_none());
+    assert!(app.get("verify", counts, &[text_cell("first"), text_cell("")]).await.unwrap().is_none());
+    app.rollback("verify").await.unwrap();
 }

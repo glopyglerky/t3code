@@ -28,6 +28,8 @@ const PREPARE_ROWS: usize = 32;
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AuxiliaryRead {
+    ActiveRuns,
+    LegacySubagentThreadIds,
     ProviderHistory,
     LegacyProjectSettings,
     AllThreadWorktrees,
@@ -413,6 +415,24 @@ impl ApplicationTransactions {
         let mut session = self.take(id)?;
         let result = async {
             match query {
+                AuxiliaryRead::ActiveRuns => {
+                    // The existing recovery index contains active/waiting and unheld queued runs.
+                    // Narrow it to the inhibitor's exact states; a waiting run permits sleep.
+                    read_index::any_equal(
+                        &mut session, "orchestration_v2_projection_runs", "_recovery", &text_cell("runtime_run"),
+                        |row| Ok(matches!(text(row, "status")?.as_str(), "preparing" | "starting" | "running")),
+                    ).await.map(Value::Bool)
+                }
+                AuxiliaryRead::LegacySubagentThreadIds => {
+                    read_index::filter_map_equal(
+                        &mut session, THREADS, "all", &Value::Null,
+                        |row| {
+                            let id = text(&row, "thread_id")?;
+                            // SQLite LIKE folds ASCII case and has no live/archive filter here.
+                            Ok(id.to_ascii_lowercase().starts_with("thread:provider:").then_some(Value::String(id)))
+                        },
+                    ).await.map(Value::Array)
+                }
                 AuxiliaryRead::ProviderHistory => provider_history(&mut session).await,
                 AuxiliaryRead::PendingThreadCleanup { thread_id } => pending_cleanup(&mut session, &thread_id).await,
                 AuxiliaryRead::AllThreadWorktrees => {

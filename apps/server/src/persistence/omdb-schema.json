@@ -320,6 +320,38 @@
     {
       "id": "80",
       "name": "ScheduledTaskThreadMode"
+    },
+    {
+      "id": "81",
+      "name": "ProjectionMessageSearchText"
+    },
+    {
+      "id": "82",
+      "name": "TurnItemConversationIndex"
+    },
+    {
+      "id": "83",
+      "name": "CommandReadIndexes"
+    },
+    {
+      "id": "84",
+      "name": "LastExecutedRunIndex"
+    },
+    {
+      "id": "85",
+      "name": "TurnItemCounts"
+    },
+    {
+      "id": "86",
+      "name": "QueuedTurnInputIndex"
+    },
+    {
+      "id": "87",
+      "name": "ProjectionProjectsCustomTitle"
+    },
+    {
+      "id": "88",
+      "name": "TurnItemTypeStatusIndex"
     }
   ],
   "schema": {
@@ -589,7 +621,8 @@
           "streaming",
           "created_at",
           "updated_at",
-          "payload_json"
+          "payload_json",
+          "search_text"
         ],
         "primary_key": [
           "message_id"
@@ -810,6 +843,18 @@
         ]
       },
       {
+        "name": "orchestration_v2_projection_turn_item_counts",
+        "columns": [
+          "thread_id",
+          "run_key",
+          "item_count"
+        ],
+        "primary_key": [
+          "thread_id",
+          "run_key"
+        ]
+      },
+      {
         "name": "orchestration_v2_projection_turn_items",
         "columns": [
           "turn_item_id",
@@ -896,7 +941,8 @@
           "auto_pull",
           "project_icon_json",
           "pinned_at",
-          "archived_at"
+          "archived_at",
+          "has_custom_title"
         ],
         "primary_key": [
           "project_id"
@@ -1146,7 +1192,7 @@
     ]
   },
   "sources": {
-    "apps/server/src/persistence/Migrations.ts": "97ec3eb5c0c30a92d82523e1fdac00e4de1e7488549e22d2968de6d6d2aad762",
+    "apps/server/src/persistence/Migrations.ts": "96a2ecf004177ffee2bceb0c4048d610390322c29fd8fafaa2065a2bf933503e",
     "apps/server/src/persistence/Migrations/001_OrchestrationEvents.ts": "aa225c01eb205ed475b473b04e230da564af8fd32324d9e803f52bb9df26330a",
     "apps/server/src/persistence/Migrations/002_OrchestrationCommandReceipts.ts": "f178d1d325229e8423d416d14ad1bc85766704b539baa30a28f17350dc1f02ee",
     "apps/server/src/persistence/Migrations/003_CheckpointDiffBlobs.ts": "415f5e22bae6eb552edf4454a9fd1ae8be3f8e9ba4fa0305d675d7f925b6591d",
@@ -1210,15 +1256,15 @@
     "apps/server/src/persistence/Migrations/061_PullRequestReviewGuides.ts": "959d601f0d2743542485b332525bf9db069bb9212bcd7d19101ed7f271ea2e34",
     "apps/server/src/persistence/Migrations/062_ThreadFailureLookupIndex.ts": "28a2260ec10fc403e838b3564ee3408683f0aa8267807694ee2e44678217de06",
     "apps/server/src/persistence/Migrations/063_DropUnusedV1Projections.ts": "454b5e8158a301a94a054c9ec1b9f1cd639b46e02dd41e6a9ea2d60565ed3801",
-    "apps/server/src/persistence/Migrations/064_CanonicalizeThreadPullRequestLinks.ts": "417535a406ffa69e9302770dd33d48152054c16291300694ef096063e94ad55c",
+    "apps/server/src/persistence/Migrations/064_CanonicalizeThreadPullRequestLinks.ts": "5e38e8ed231b4332a90516af55662b5c5ddc11b0cd06d112c7f7587fa93e9069",
     "apps/server/src/persistence/Migrations/065_CodexUsageNativeTurnIndex.ts": "d41430575d2b67daf211a9db38819e57f112bcd748ae68f9b1a62f1d2d0b7a99",
     "apps/server/src/persistence/Migrations/066_RepairClientSettlementTimestamps.ts": "12071d9678d33e3bc092234c6c250f690bf3e839fbdfdceff9dcfec70364c400",
     "apps/server/src/persistence/Migrations/067_WebhookDedupe.ts": "3ca19c7871e64d639238e3bd11259abc361d4ba40467d3ca09922d04e81e9bb9",
     "apps/server/src/persistence/Migrations/068_ShellStopRequestIndex.ts": "d9538360b5c59f68a6dd74c8f166254631e8945e20c2b03b8de95471c567ce4e",
     "apps/server/src/persistence/Migrations/069_ThreadMessageSearch.ts": "f3c9548ab75419bd7e2335296773e8fff5f535899407c972b222ef00fde11ca3",
     "apps/server/src/persistence/Migrations/070_PeerLinks.ts": "142095a7f4f0452c2cd495b412d7ac48552a705c066ec3122836a64b5be72a62",
-    "apps/server/src/persistence/Migrations/071_PeerLinkFence.ts": "263938dcc2a124196e2a6aedc1982c2069478728b11ab9037e06ae98ac393bab",
-    "apps/server/src/persistence/Migrations/072_WaitingLinkRequestIndex.ts": "86b3694a79e3866bc6bda0e78a1de058685a36993398442f1fb4b6c88e635829",
+    "apps/server/src/persistence/Migrations/071_PeerLinkFence.ts": "7c18bd4e8c04ecd1ae7b86d3141fa0ec12feeead80ce2460d83e89795e7fc3b4",
+    "apps/server/src/persistence/Migrations/072_WaitingLinkRequestIndex.ts": "4d2c33dab112c0c9530151f438cae049cb6b971417de497910a494c74db4d813",
     "apps/server/src/persistence/Migrations/073_ActiveTurnItemIndexes.ts": "c1ee47a17e243c02be40bf02066265cb47ea3ba4db4990a6dddb1a4440395004",
     "apps/server/src/persistence/Migrations/074_ExcludeAttachmentPlaceholdersFromSearch.ts": "6de008b7d72fa39f05a76374babc9bcfb72ee05a032955c567624b697ba58d68",
     "apps/server/src/persistence/Migrations/075_SubagentDeliveryState.ts": "512cbb48415e854f7d10b1c45d40db708240cea8a361ed84d537c1fb8c67b6f2",
@@ -1227,6 +1273,14 @@
     "apps/server/src/persistence/Migrations/078_DropOrchestrationEventCorrelationIndex.ts": "0a16bc81fc8a72ba5dba69757fe704aa14bdda25bceb9aa85b819c2fe70e71d2",
     "apps/server/src/persistence/Migrations/079_DelegatedRecoveryIndexes.ts": "52b39ddb5a4acc2edb618b5a7f9282ff9232d0c952d18dee776cce454fafea24",
     "apps/server/src/persistence/Migrations/080_ScheduledTaskThreadMode.ts": "6f6fe4a40d3fe470a479c398ae88ad9c0f1d587bc75ae31f65f0d606368a6d3b",
+    "apps/server/src/persistence/Migrations/081_ProjectionMessageSearchText.ts": "fb409ca275ea4e81522e3d3168bf7b67518edec15965553d9fc5aa2128cfd26f",
+    "apps/server/src/persistence/Migrations/082_TurnItemConversationIndex.ts": "8402b76046986a18e66ff4d2bee07a98d78a55c4aa934b61f1959eda74ae15ff",
+    "apps/server/src/persistence/Migrations/083_CommandReadIndexes.ts": "b2d7d198aad8b6bc8a53d1e7b5d8e85b90e6b6144f5db2c06b4cef3f3846ceef",
+    "apps/server/src/persistence/Migrations/084_LastExecutedRunIndex.ts": "eacecadcd4bc8d29ad85e08ff39cc22cecef84aa64a177b427134b1ac491e4c6",
+    "apps/server/src/persistence/Migrations/085_TurnItemCounts.ts": "a64fcca0f13a9ad54efde2d39fa36881e02ed506e767613c4be06aa69820cff1",
+    "apps/server/src/persistence/Migrations/086_QueuedTurnInputIndex.ts": "5f1566e87513041d0c918088c3fa92baf022e146442a72e5c366a6bc05388306",
+    "apps/server/src/persistence/Migrations/087_ProjectionProjectsCustomTitle.ts": "2226f386dac9523b3175e4ba1bb4af8b1cc86b8e1b219c71dac400c972a556ef",
+    "apps/server/src/persistence/Migrations/088_TurnItemTypeStatusIndex.ts": "328f42dcf473d6ef63d0f8cd51c26e7f00139952bc6dfe7221b4633433675aa1",
     "apps/server/src/persistence/Migrations/OrchestrationV2/ApplicationEventSequenceIndexes.ts": "2a0201e505ad468d0a2cbfc5860725d1b9ded91e1d0f4e275cdb106b26d5dcd9",
     "apps/server/src/persistence/Migrations/OrchestrationV2/ApplicationEventSource.ts": "b0e4ed8c72dd7b9186c822c9c38dc7f191336abcd92cf5f367049574a06dafa1",
     "apps/server/src/persistence/Migrations/OrchestrationV2/EffectCancellation.ts": "d73145d2b0fe4907074cfc13cdfdcc319efd17a4440d2649897fc816d30f8204",
@@ -1239,6 +1293,6 @@
     "apps/server/src/persistence/Migrations/OrchestrationV2/Subagents.ts": "bdb4c2396affa5edadddbdbcb9a5bddd5e8cd346ebaa0cbbb89f182d95846ef7",
     "apps/server/src/persistence/Migrations/OrchestrationV2/ThreadLaunchWorkflows.ts": "4b1fe33c74cd5d674f70d762655b3eafa9e26cb31d6b1480d4e6968734891bc2",
     "apps/server/src/persistence/Migrations/legacyThreadPullRequestKey.ts": "ea546b8c6464107c68e8f918598782ad370b721f17e64311412afc02e2f61cb1",
-    "apps/server/src/persistence/reconcileV2PreviewMigration.ts": "e3224d127691ef5e9e94fd3dd1ad3507dbbff4698a7329f1df5e365b1562c23d"
+    "apps/server/src/persistence/reconcileV2PreviewMigration.ts": "5b5902289db76836921a2353c96d53781e3ed1d512bc908cb6821117714f92f1"
   }
 }

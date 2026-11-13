@@ -41,6 +41,8 @@ pub enum EffectType {
     ProviderRuntimeContinue,
     #[serde(rename = "provider-session.detach")]
     ProviderSessionDetach,
+    #[serde(rename = "provider-session.apply-model-selection")]
+    ProviderSessionApplyModelSelection,
     #[serde(rename = "provider-turn.start")]
     ProviderTurnStart,
     #[serde(rename = "provider-turn.interrupt")]
@@ -74,6 +76,7 @@ impl EffectType {
         match self {
             Self::ProviderRuntimeContinue => "provider-runtime.continue",
             Self::ProviderSessionDetach => "provider-session.detach",
+            Self::ProviderSessionApplyModelSelection => "provider-session.apply-model-selection",
             Self::ProviderTurnStart => "provider-turn.start",
             Self::ProviderTurnInterrupt => "provider-turn.interrupt",
             Self::ProviderTurnSteer => "provider-turn.steer",
@@ -94,6 +97,7 @@ impl EffectType {
         Some(match value {
             "provider-runtime.continue" => Self::ProviderRuntimeContinue,
             "provider-session.detach" => Self::ProviderSessionDetach,
+            "provider-session.apply-model-selection" => Self::ProviderSessionApplyModelSelection,
             "provider-turn.start" => Self::ProviderTurnStart,
             "provider-turn.interrupt" => Self::ProviderTurnInterrupt,
             "provider-turn.steer" => Self::ProviderTurnSteer,
@@ -183,6 +187,8 @@ pub struct Claim {
     pub now: String,
     #[serde(default)]
     pub exclude_restart_continuations: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_running_title_generations: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -396,6 +402,12 @@ pub(crate) fn normalize_request(request: &Value) -> Result<Value> {
         EffectType::ProviderSessionDetach => {
             &["type", "providerSessionId", "detail", "revokeMcpCredential"]
         }
+        EffectType::ProviderSessionApplyModelSelection => &[
+            "type",
+            "providerSessionId",
+            "providerThreadId",
+            "modelSelection",
+        ],
         EffectType::ProviderTurnStart => &["type", "runId"],
         EffectType::ProviderTurnInterrupt => &[
             "type",
@@ -410,6 +422,8 @@ pub(crate) fn normalize_request(request: &Value) -> Result<Value> {
             "providerThreadId",
             "providerTurnId",
             "messageId",
+            "modelSelection",
+            "steerFollowUpAfterRunOrdinal",
         ],
         EffectType::ProviderTurnRestart => &[
             "type",
@@ -458,6 +472,22 @@ pub(crate) fn normalize_request(request: &Value) -> Result<Value> {
     ] {
         trim_request_id(&mut normalized, field)?;
     }
+    if let Some(value) = normalized.get_mut("modelSelection") {
+        *value = select_fields(value, &["instanceId", "model", "options"])?;
+        if let Some(options) = value.get_mut("options") {
+            let options = options
+                .as_array_mut()
+                .ok_or_else(|| invalid("model options must be an array"))?;
+            for option in options {
+                *option = select_fields(option, &["id", "value"])?;
+            }
+        }
+        let command = crate::project_validation::validate_command(&serde_json::json!({
+            "type": "project.meta.update", "commandId": "validation", "projectId": "validation",
+            "defaultModelSelection": value,
+        }))?;
+        *value = command["defaultModelSelection"].clone();
+    }
     if let Some(value) = normalized.get_mut("subagent") {
         *value = select_fields(value, &["id", "nativeTaskId"])?;
         trim_request_id(value, "id")?;
@@ -492,6 +522,9 @@ fn validate_request(request: &Value) -> Result<()> {
     let ids: &[&str] = match kind {
         EffectType::ProviderRuntimeContinue => &["sourceRunId"],
         EffectType::ProviderSessionDetach => &["providerSessionId"],
+        EffectType::ProviderSessionApplyModelSelection => {
+            &["providerSessionId", "providerThreadId"]
+        }
         EffectType::ProviderTurnStart => &["runId"],
         EffectType::ProviderTurnInterrupt => {
             &["providerSessionId", "providerThreadId", "providerTurnId"]
@@ -545,6 +578,18 @@ fn validate_request(request: &Value) -> Result<()> {
         .is_some_and(|value| !value.is_object())
     {
         return Err(invalid("outbox user-input answers must be an object"));
+    }
+    if kind == EffectType::ProviderSessionApplyModelSelection
+        && !object.contains_key("modelSelection")
+    {
+        return Err(invalid("model selection effect requires modelSelection"));
+    }
+    if let Some(value) = object.get("steerFollowUpAfterRunOrdinal") {
+        if value.as_u64().is_none_or(|value| value > MAX_COUNTER) {
+            return Err(invalid(
+                "steer follow-up ordinal must be a nonnegative safe integer",
+            ));
+        }
     }
     if kind == EffectType::AttachmentCleanup {
         let ids = object
@@ -657,6 +702,12 @@ fn claim_stream_key(repo: Repository<'_>, id: &str) -> Vec<u8> {
 
 fn validate_claim(input: &Claim) -> Result<()> {
     crate::validate_id(&input.worker_id)?;
+    if input
+        .max_running_title_generations
+        .is_some_and(|value| !value.is_finite())
+    {
+        return Err(invalid("title generation limit must be finite"));
+    }
     validate_timestamp(&input.now)
 }
 
@@ -1030,14 +1081,48 @@ async fn lane_blockers(
     Ok(rows)
 }
 
+async fn title_limit_reached(
+    tx: &mut Transaction,
+    repo: Repository<'_>,
+    limit: f64,
+    budget: &mut ReadBudget,
+) -> Result<bool> {
+    if !limit.is_finite() {
+        return Err(invalid("title generation limit must be finite"));
+    }
+    if limit <= 0.0 {
+        return Ok(true);
+    }
+    let mut count = 0_u64;
+    let mut after = None;
+    loop {
+        let entries = page(tx, repo, "lane-running/", after.as_ref(), PAGE_SIZE).await?;
+        for entry in &entries {
+            let row = indexed_row(tx, repo, entry, budget).await?;
+            if request_type(&row.request)? == EffectType::ThreadTitleGenerate {
+                count += 1;
+                if count as f64 >= limit {
+                    return Ok(true);
+                }
+            }
+        }
+        if entries.len() < PAGE_SIZE {
+            return Ok(false);
+        }
+        after = entries.last().map(|entry| entry.0.clone());
+    }
+}
+
 async fn candidate(
     tx: &mut Transaction,
     repo: Repository<'_>,
     now: Option<&str>,
     exclude: bool,
+    max_running_title_generations: Option<f64>,
 ) -> Result<Option<OutboxEffect>> {
     let mut after = None;
     let mut budget = ReadBudget::default();
+    let mut titles_blocked = None;
     loop {
         let entries = page(tx, repo, "pending/", after.as_ref(), PAGE_SIZE).await?;
         for entry in &entries {
@@ -1047,6 +1132,21 @@ async fn candidate(
             }
             if exclude && request_type(&row.request)? == EffectType::ProviderRuntimeContinue {
                 continue;
+            }
+            if request_type(&row.request)? == EffectType::ThreadTitleGenerate {
+                if let Some(limit) = max_running_title_generations {
+                    let blocked = match titles_blocked {
+                        Some(value) => value,
+                        None => {
+                            let value = title_limit_reached(tx, repo, limit, &mut budget).await?;
+                            titles_blocked = Some(value);
+                            value
+                        }
+                    };
+                    if blocked {
+                        continue;
+                    }
+                }
             }
             let blockers = lane_blockers(tx, repo, &row, exclude, &mut budget).await?;
             if policy::claimable(&policy_row(&row)?, &blockers, now, exclude) {
@@ -1071,6 +1171,7 @@ pub(crate) async fn stage_claim_in(
         repo,
         Some(&input.now),
         input.exclude_restart_continuations,
+        input.max_running_title_generations,
     )
     .await?
     {
@@ -1291,7 +1392,18 @@ pub(crate) async fn stage_next_in(
     tx: &mut Transaction,
     repo: Repository<'_>,
 ) -> Result<Option<String>> {
-    candidate(tx, repo, None, false)
+    stage_next_limited_in(tx, repo, None).await
+}
+
+pub(crate) async fn stage_next_limited_in(
+    tx: &mut Transaction,
+    repo: Repository<'_>,
+    max_running_title_generations: Option<f64>,
+) -> Result<Option<String>> {
+    if max_running_title_generations.is_some_and(|limit| !limit.is_finite()) {
+        return Err(invalid("title generation limit must be finite"));
+    }
+    candidate(tx, repo, None, false, max_running_title_generations)
         .await
         .map(|row| row.map(|row| row.available_at))
 }
@@ -1495,6 +1607,16 @@ impl Store {
     pub async fn outbox_next_claimable_at(&self) -> Result<Option<String>> {
         let mut tx = self.db.begin().await?;
         let result = stage_next_in(&mut tx, Repository::Legacy).await;
+        finish(tx, result, false).await
+    }
+
+    pub async fn outbox_next_claimable_at_limited(
+        &self,
+        max_running_title_generations: Option<f64>,
+    ) -> Result<Option<String>> {
+        let mut tx = self.db.begin().await?;
+        let result =
+            stage_next_limited_in(&mut tx, Repository::Legacy, max_running_title_generations).await;
         finish(tx, result, false).await
     }
 

@@ -18,6 +18,7 @@ const ShellThreadRow = Schema.Struct({
   latest_run_started_at: Nullable,
   latest_run_completed_at: Nullable,
   latest_run_stop_requested: Schema.Number,
+  latest_run_background_wake: Schema.Number,
   active_run_id: Nullable,
   active_run_status: Nullable,
   activity_run_status: Nullable,
@@ -29,6 +30,7 @@ const ShellThreadRow = Schema.Struct({
   blocking_run_started_at: Nullable,
   blocking_run_completed_at: Nullable,
   blocking_run_stop_requested: Schema.Number,
+  blocking_run_background_wake: Schema.Number,
   blocking_failure_payload_json: Nullable,
   pending_request_payload_json: Nullable,
   pending_secret_request_payload_json: Nullable,
@@ -60,6 +62,7 @@ const ActiveShellIndexRow = Schema.Struct({
   pinned_at: Nullable,
   snoozed_until: Nullable,
   may_be_live: Schema.Number,
+  has_remote_tasks: Schema.Number,
 });
 
 export const makeRows = Effect.gen(function* () {
@@ -87,6 +90,7 @@ export const makeRows = Effect.gen(function* () {
             thread_id: Schema.String,
             run_id: Schema.String,
             ordinal: Schema.Number,
+            rolled_back_at: Nullable,
           }),
         ),
       ),

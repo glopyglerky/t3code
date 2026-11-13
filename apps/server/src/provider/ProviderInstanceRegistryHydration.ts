@@ -20,6 +20,8 @@ import * as Stream from "effect/Stream";
 
 import * as ManagedProviders from "../policy/managedProviders.ts";
 import * as Settings from "../serverSettings.ts";
+import type * as AuxiliaryPersistenceReads from "../persistence/AuxiliaryPersistenceReads.ts";
+import * as SqliteAuxiliaryPersistenceReads from "../persistence/SqliteAuxiliaryPersistenceReads.ts";
 import * as SecretResolver from "../secrets/SecretResolver.ts";
 import { BUILT_IN_DRIVERS, type BuiltInDriversEnv } from "./builtInDrivers.ts";
 import * as ProviderInstanceRegistry from "./ProviderInstanceRegistry.ts";
@@ -47,7 +49,9 @@ type ProviderInstanceRegistryHydrationEnv =
   // Secret provider reads.
   | SecureRandom.SecureRandom
   // The Claude runner counts its CLIs as running agents for port discovery.
-  | PortScanner.PortDiscovery;
+  | PortScanner.PortDiscovery
+  // Adapter ids read which subagent threads predate short ids.
+  | AuxiliaryPersistenceReads.AuxiliaryPersistenceReads;
 
 export const deriveProviderInstanceConfigMap = (
   settings: ServerSettings,
@@ -165,7 +169,7 @@ export const layerSettingsWatcher = (
     }),
   );
 
-export const layer: Layer.Layer<
+export const layerWithPersistenceReads: Layer.Layer<
   | ProviderInstanceRegistry.ProviderInstanceRegistry
   | ProviderInstanceRegistryMutator.ProviderInstanceRegistryMutator,
   never,
@@ -199,7 +203,7 @@ export const layer: Layer.Layer<
       blockedReason: (driver) =>
         ManagedProviders.disallowedDriverReason(serverSettings.managedPolicy, driver),
     }).pipe(
-      Layer.provide(ProviderOrchestrationAdapterInfrastructure.layer),
+      Layer.provide(ProviderOrchestrationAdapterInfrastructure.layerWithPersistenceReads),
       Layer.provide(AcpRegistrySupport.layerFromHost),
       Layer.provide(ProviderHostLive.layer),
       Layer.provide(Layer.succeed(HostProcess.Environment, hostEnvironment)),
@@ -216,3 +220,7 @@ export const layer: Layer.Layer<
   never,
   ProviderInstanceRegistryHydrationEnv
 >;
+
+export const layer = layerWithPersistenceReads.pipe(
+  Layer.provide(SqliteAuxiliaryPersistenceReads.layer),
+);

@@ -31,6 +31,7 @@ export class ProjectStoreV2Error extends Schema.TaggedError<ProjectStoreV2Error>
 export const ProjectRow = Schema.Struct({
   projectId: ProjectId,
   title: Schema.String,
+  hasCustomTitle: Schema.Boolean,
   workspaceRoot: Schema.String,
   defaultModelSelection: Schema.NullOr(ModelSelection),
   defaultThreadEnvMode: Schema.NullOr(ThreadEnvMode),
@@ -49,6 +50,7 @@ export type ProjectRow = typeof ProjectRow.Type;
 const ProjectDbRow = Schema.Struct({
   ...ProjectRow.fields,
   defaultModelSelection: Schema.NullOr(Schema.fromJsonString(ModelSelection)),
+  hasCustomTitle: Schema.BooleanFromBit,
   autoPull: Schema.BooleanFromBit,
   projectIcon: Schema.NullOr(Schema.fromJsonString(StoredProjectIcon)),
   scripts: Schema.fromJsonString(Schema.Array(ProjectScript)),
@@ -58,6 +60,7 @@ function toShell(row: ProjectRow): OrchestrationProjectShell {
   return {
     id: row.projectId,
     title: row.title,
+    hasCustomTitle: row.hasCustomTitle,
     workspaceRoot: row.workspaceRoot,
     repositoryIdentity: null,
     defaultModelSelection: row.defaultModelSelection,
@@ -139,6 +142,7 @@ export const makeWithRows = Effect.gen(function* () {
         return yield* upsertRow({
           projectId: payload.projectId,
           title: payload.title,
+          hasCustomTitle: false,
           workspaceRoot: payload.workspaceRoot,
           defaultModelSelection: payload.defaultModelSelection,
           defaultThreadEnvMode: payload.defaultThreadEnvMode ?? null,
@@ -166,7 +170,7 @@ export const makeWithRows = Effect.gen(function* () {
       const payload = event.payload;
       yield* upsertRow({
         ...row,
-        ...(payload.title === undefined ? {} : { title: payload.title }),
+        ...(payload.title === undefined ? {} : { title: payload.title, hasCustomTitle: true }),
         ...(payload.workspaceRoot === undefined ? {} : { workspaceRoot: payload.workspaceRoot }),
         ...(payload.defaultModelSelection === undefined
           ? {}

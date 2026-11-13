@@ -4,6 +4,7 @@ import type {
   OrchestrationV2ProviderThread,
   OrchestrationV2Run,
   OrchestrationV2RuntimeRequest,
+  OrchestrationV2TurnItem,
   ProviderThreadId,
   RunAttemptId,
   RunId,
@@ -70,6 +71,15 @@ export interface ProjectionCommitStoreShape {
     providerThreadId: ProviderThreadId,
     expectedJson: string,
   ) => Effect.Effect<boolean, ProjectionCommitStoreError>;
+  readonly turnItemUnchanged: (
+    turnItemId: OrchestrationV2TurnItem["id"],
+    expectedJson: string,
+  ) => Effect.Effect<boolean, ProjectionCommitStoreError>;
+  readonly interruptPending: (input: {
+    readonly threadId: ThreadId;
+    readonly requestId: OrchestrationV2TurnItem["id"];
+    readonly resultId: OrchestrationV2TurnItem["id"];
+  }) => Effect.Effect<boolean, ProjectionCommitStoreError>;
 }
 
 export class ProjectionCommitStore extends Context.Service<
@@ -83,18 +93,19 @@ export class ProjectionCommitStore extends Context.Service<
  */
 export const applyWithThreadLinkNormalization = (
   store: Pick<ProjectionCommitStoreShape, "getThread" | "apply">,
-): ProjectionCommitStoreShape["apply"] => Effect.fnUntraced(function* (event) {
-  if (event.type !== "thread.pull-request-link-updated") return yield* store.apply(event);
-  const current = yield* store.getThread(event.threadId);
-  if (current === undefined) {
-    return yield* new ProjectionCommitStoreError({
-      operation: "apply",
-      cause: `No orchestration projection exists for thread ${event.threadId}.`,
+): ProjectionCommitStoreShape["apply"] =>
+  Effect.fnUntraced(function* (event) {
+    if (event.type !== "thread.pull-request-link-updated") return yield* store.apply(event);
+    const current = yield* store.getThread(event.threadId);
+    if (current === undefined) {
+      return yield* new ProjectionCommitStoreError({
+        operation: "apply",
+        cause: `No orchestration projection exists for thread ${event.threadId}.`,
+      });
+    }
+    yield* store.apply({
+      ...event,
+      type: "thread.pull-request-synced",
+      payload: applyThreadPullRequestLinkUpdate(current, event.payload),
     });
-  }
-  yield* store.apply({
-    ...event,
-    type: "thread.pull-request-synced",
-    payload: applyThreadPullRequestLinkUpdate(current, event.payload),
   });
-});

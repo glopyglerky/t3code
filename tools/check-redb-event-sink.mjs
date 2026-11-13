@@ -423,6 +423,105 @@ function exercise({ sink, events, outbox, receipts, projects, snapshot, publicat
       events: [detached("current-row")],
     });
     Assert.equal(result.rowCurrent.committed, true);
+    const beforeItemGuard = yield* snapshot;
+    const itemGuardPublications = publications.length;
+    result.itemMissing = yield* sink.writeIfTurnItemUnchanged({
+      expected: { ...payloads.turnItem, id: "item:missing" },
+      events: [detached("missing-item")],
+    });
+    result.itemStale = yield* sink.writeIfTurnItemUnchanged({
+      expected: { ...payloads.turnItem, text: "stale reasoning" },
+      events: [detached("stale-item")],
+    });
+    Assert.deepEqual(result.itemMissing, { committed: false, storedEvents: [] });
+    Assert.deepEqual(result.itemStale, { committed: false, storedEvents: [] });
+    Assert.deepEqual(
+      yield* snapshot,
+      beforeItemGuard,
+      "Failed payload guards cannot mutate any persisted row",
+    );
+    Assert.equal(
+      publications.length,
+      itemGuardPublications,
+      "Failed payload guards cannot publish events",
+    );
+    const changedItem = { ...jsonPayloads.turnItem, text: "Updated without changing timestamp" };
+    result.itemCurrent = yield* sink.writeIfTurnItemUnchanged({
+      expected: payloads.turnItem,
+      events: [makeEvent("turn-item.updated", changedItem, { id: "event:item-guard-update" })],
+    });
+    Assert.equal(result.itemCurrent.committed, true);
+    const afterItemGuard = publications.length;
+    result.itemChanged = yield* sink.writeIfTurnItemUnchanged({
+      expected: payloads.turnItem,
+      events: [detached("changed-item")],
+    });
+    Assert.deepEqual(result.itemChanged, { committed: false, storedEvents: [] });
+    Assert.equal(publications.length, afterItemGuard);
+
+    const unlessInterruptRequested = {
+      requestId: "item:interrupt-request",
+      resultId: "item:interrupt-result",
+    };
+    result.interruptAbsent = yield* sink.writeIfRunCurrent({
+      ...runGuard,
+      unlessInterruptRequested,
+      events: [detached("before-interrupt")],
+    });
+    Assert.equal(result.interruptAbsent.committed, true);
+    yield* sink.write({
+      events: [
+        makeEvent(
+          "turn-item.updated",
+          {
+            ...jsonPayloads.turnItem,
+            id: unlessInterruptRequested.requestId,
+            text: "Interrupt requested",
+          },
+          { id: "event:interrupt-request" },
+        ),
+      ],
+    });
+    const beforeInterruptGuard = yield* snapshot;
+    const interruptPublications = publications.length;
+    result.interruptPending = yield* sink.writeIfRunCurrent({
+      ...runGuard,
+      unlessInterruptRequested,
+      events: [detached("pending-interrupt")],
+      effects: [pending("blocked-interrupt-effect")],
+    });
+    Assert.deepEqual(result.interruptPending, { committed: false, storedEvents: [] });
+    Assert.deepEqual(
+      yield* snapshot,
+      beforeInterruptGuard,
+      "A pending interrupt cannot append events or outbox effects",
+    );
+    Assert.equal(
+      publications.length,
+      interruptPublications,
+      "A pending interrupt cannot publish rejected events",
+    );
+    Assert.ok(Option.isNone(yield* outbox.get("blocked-interrupt-effect")));
+    yield* sink.write({
+      events: [
+        makeEvent(
+          "turn-item.updated",
+          {
+            ...jsonPayloads.turnItem,
+            id: unlessInterruptRequested.resultId,
+            text: "Interrupt completed",
+          },
+          { id: "event:interrupt-result" },
+        ),
+      ],
+    });
+    result.interruptCompleted = yield* sink.writeIfRunCurrent({
+      ...runGuard,
+      unlessInterruptRequested,
+      events: [detached("after-interrupt")],
+    });
+    Assert.equal(result.interruptCompleted.committed, true);
+
     result.nativeOwned = yield* sink.write({
       unlessNativeThreadOwned: { ...payloads.providerThread, appThreadId: "thread:other" },
       events: [detached("owned-native")],

@@ -511,6 +511,128 @@ function exercise({ store, apply, transaction, timeline }) {
       ),
       "Zero-row fork windows retain synthetic markers",
     );
+    for (const event of eventsFor("cutoff-source", 0)) yield* apply(event);
+    const sourceThread = "thread:cutoff-source";
+    const sourceEvent = (type, payload) => makeEvent(type, payload, { threadId: sourceThread });
+    yield* apply(
+      sourceEvent("run.updated", {
+        ...jsonPayloads.run,
+        id: "run:cutoff-source",
+        threadId: sourceThread,
+        ordinal: 1,
+        status: "rolled_back",
+        rootNodeId: "node:cutoff-source",
+        activeAttemptId: "attempt:cutoff-source",
+        userMessageId: "message:cutoff-source",
+        completedAt: "2026-11-10T11:00:00.000Z",
+      }),
+    );
+    for (const [name, ordinal, status, attemptStatus, inputIntent] of [
+      ["after", 2, "rolled_back", "rolled_back", "turn_start"],
+      ["undelivered", 3, "rolled_back", "cancelled", "queued_turn"],
+      ["boundary", 4, "completed", "completed", "turn_start"],
+      ["queued", 5, "queued", "pending", "queued_turn"],
+    ]) {
+      const runId = `run:cutoff:${name}`,
+        nodeId = `node:cutoff:${name}`,
+        attemptId = `attempt:cutoff:${name}`,
+        messageId = `message:cutoff:${name}`;
+      yield* apply(
+        sourceEvent("run.created", {
+          ...jsonPayloads.run,
+          id: runId,
+          threadId: sourceThread,
+          ordinal,
+          status,
+          rootNodeId: nodeId,
+          activeAttemptId: attemptId,
+          userMessageId: messageId,
+          completedAt: status === "queued" ? null : "2026-11-10T13:00:00.000Z",
+        }),
+      );
+      yield* apply(
+        sourceEvent("run-attempt.created", {
+          ...jsonPayloads.attempt,
+          id: attemptId,
+          runId,
+          rootNodeId: nodeId,
+          status: attemptStatus,
+        }),
+      );
+      yield* apply(
+        sourceEvent("node.updated", {
+          ...jsonPayloads.node,
+          id: nodeId,
+          threadId: sourceThread,
+          runId,
+          rootNodeId: nodeId,
+        }),
+      );
+      yield* apply(
+        sourceEvent("message.updated", {
+          ...jsonPayloads.message,
+          id: messageId,
+          threadId: sourceThread,
+          runId,
+          nodeId,
+          role: "user",
+          createdBy: "user",
+          creationSource: "web",
+        }),
+      );
+      yield* apply(
+        sourceEvent("turn-item.updated", {
+          ...jsonPayloads.turnItem,
+          id: `item:cutoff:${name}`,
+          threadId: sourceThread,
+          runId,
+          nodeId,
+          ordinal: ordinal * 100,
+          type: "user_message",
+          messageId,
+          inputIntent,
+          createdBy: "user",
+          creationSource: "web",
+          attachments: [],
+        }),
+      );
+    }
+    for (const event of eventsFor("cutoff-child", 0, {
+      type: "run",
+      threadId: sourceThread,
+      runId: "run:cutoff:boundary",
+    }))
+      yield* apply(event);
+    result.cutoffWindow = yield* store.getThreadSnapshotWindow("thread:cutoff-child", {
+      rowLimit: 77,
+      userTurnLimit: 10,
+      deferWork: true,
+    });
+    result.cutoffTimeline = identity(yield* timeline("thread:cutoff-child"));
+    result.cutoffLocal = yield* store.getThreadSnapshotWindow(sourceThread, {
+      rowLimit: 77,
+      userTurnLimit: 10,
+      deferWork: true,
+    });
+    const inheritedIds = result.cutoffWindow.projection.visibleTurnItems.map(
+      (row) => row.sourceItemId,
+    );
+    Assert.ok(
+      inheritedIds.includes("item:cutoff:after"),
+      "A fork keeps the source run rolled back after its creation",
+    );
+    Assert.ok(
+      !inheritedIds.includes("item:cutoff-source:input"),
+      "A fork excludes a run rolled back before its creation",
+    );
+    Assert.ok(
+      !inheritedIds.includes("item:cutoff:undelivered"),
+      "Cancelled queued input stays hidden after rollback in a fork",
+    );
+    Assert.ok(
+      !result.cutoffLocal.projection.turnItems.some((row) => row.id === "item:cutoff:queued"),
+      "Undelivered queued input is absent from local windows",
+    );
     result.missing = (yield* store
       .getThreadSnapshotWindow("missing", { rowLimit: 1 })
       .pipe(Effect.flip))._tag;

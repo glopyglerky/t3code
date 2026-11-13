@@ -122,6 +122,38 @@ pub(crate) async fn rowid(
     Ok(value.rowid)
 }
 
+/// An offline schema upgrade can also receive an unactivated, validated import.
+/// Its source export already witnessed hidden rowids before native preparation.
+pub(crate) async fn upgrade_rowid(
+    tx: &mut Transaction,
+    catalog: &ApplicationCatalog,
+    message_id: &str,
+) -> Result<i64> {
+    if state(tx, catalog).await?.is_some_and(|state| state.ready) {
+        return rowid(tx, catalog, message_id).await;
+    }
+    let primary = [text_cell(message_id)];
+    let key = store_key(&format!(
+        "application/generation/{}/metadata/source/{}",
+        catalog.generation,
+        request_digest(&json!([TABLE, primary]))
+    ));
+    let witness: Value = decode(
+        &tx.get(&key)
+            .await?
+            .ok_or_else(|| invalid("upgrade requires witnessed message rowids"))?,
+    )?;
+    if witness["table"] != TABLE || witness["key"] != json!(primary) {
+        return Err(Error::IncompatibleStore);
+    }
+    let raw = witness["rowid"].as_str().ok_or(Error::IncompatibleStore)?;
+    let rowid: i64 = raw.parse().map_err(|_| Error::IncompatibleStore)?;
+    if rowid.to_string() != raw {
+        return Err(Error::IncompatibleStore);
+    }
+    Ok(rowid)
+}
+
 pub(crate) async fn identity(
     tx: &mut Transaction,
     catalog: &ApplicationCatalog,

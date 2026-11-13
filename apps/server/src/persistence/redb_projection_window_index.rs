@@ -27,6 +27,7 @@ fn compact(name: &str, row: &Map<String, Value>, order: RowOrder) -> Result<Meta
             .and_then(Value::as_str)
             .ok_or(Error::IncompatibleStore)?;
         if name == ITEMS {
+            slim.insert("_native_payload_bytes".into(), int_cell(raw.len().try_into().map_err(|_| Error::IncompatibleStore)?));
             // This selection is SQL LIKE over raw bytes, not json_extract.
             // Keep it even if JSON is unreadable so matching corrupt render
             // rows reach the original decoder instead of disappearing.
@@ -100,6 +101,12 @@ fn compact(name: &str, row: &Map<String, Value>, order: RowOrder) -> Result<Meta
             }
         }
         if name == MESSAGES {
+            retained.insert("nativeBackgroundWake".into(), json!(
+                payload["notification"]["source"]["kind"].as_str().is_some_and(|kind| ["background_task", "background_command", "command", "monitor"].contains(&kind))
+                && payload["notification"]["source"]["work"].is_null()
+                && payload["notification"]["outcome"] == "updated"
+                && payload["delegatedCompletion"].is_null()
+            ));
             retained.insert(
                 "nativeMonitorNotification".into(),
                 json!(payload["notification"]["source"]["kind"] == "monitor"),

@@ -18,6 +18,7 @@ pub const PROCESS_LOSS_REQUEUE_REASON: &str = "Requeued after the previous serve
 pub enum EffectType {
     ProviderRuntimeContinue,
     ProviderSessionDetach,
+    ProviderSessionApplyModelSelection,
     ProviderTurnStart,
     ProviderTurnInterrupt,
     ProviderTurnSteer,
@@ -38,6 +39,9 @@ impl EffectType {
         match value {
             "provider-runtime.continue" => Some(Self::ProviderRuntimeContinue),
             "provider-session.detach" => Some(Self::ProviderSessionDetach),
+            "provider-session.apply-model-selection" => {
+                Some(Self::ProviderSessionApplyModelSelection)
+            }
             "provider-turn.start" => Some(Self::ProviderTurnStart),
             "provider-turn.interrupt" => Some(Self::ProviderTurnInterrupt),
             "provider-turn.steer" => Some(Self::ProviderTurnSteer),
@@ -59,6 +63,7 @@ impl EffectType {
         match self {
             Self::ProviderRuntimeContinue => "provider-runtime.continue",
             Self::ProviderSessionDetach => "provider-session.detach",
+            Self::ProviderSessionApplyModelSelection => "provider-session.apply-model-selection",
             Self::ProviderTurnStart => "provider-turn.start",
             Self::ProviderTurnInterrupt => "provider-turn.interrupt",
             Self::ProviderTurnSteer => "provider-turn.steer",
@@ -82,7 +87,8 @@ impl EffectType {
     pub fn is_process_bound(self) -> bool {
         matches!(
             self,
-            Self::ProviderTurnStart
+            Self::ProviderSessionApplyModelSelection
+                | Self::ProviderTurnStart
                 | Self::ProviderTurnInterrupt
                 | Self::ProviderTurnSteer
                 | Self::ProviderTurnRestart
@@ -193,13 +199,24 @@ fn lanes(rows: &[Row], title: bool, exclude: bool) -> HashMap<String, Lane> {
     result
 }
 
-fn select(rows: &[Row], now: Option<&str>, exclude: bool) -> Option<usize> {
+fn select(
+    rows: &[Row],
+    now: Option<&str>,
+    exclude: bool,
+    max_running_titles: Option<f64>,
+) -> Option<usize> {
     // Build lane heads once so a standalone bounded policy frame is linear in row count.
     let regular = lanes(rows, false, exclude);
     let titles = lanes(rows, true, exclude);
+    let running_titles = rows
+        .iter()
+        .filter(|row| row.status == EffectStatus::Running && row.effect_type.is_title())
+        .count();
+    let titles_blocked = max_running_titles.is_some_and(|limit| running_titles as f64 >= limit);
     let mut selected: Option<usize> = None;
     for (index, row) in rows.iter().enumerate() {
-        if row.status != EffectStatus::Pending
+        if (titles_blocked && row.effect_type.is_title())
+            || row.status != EffectStatus::Pending
             || now.is_some_and(|time| row.available_at.as_str() > time)
             || (exclude && row.effect_type == EffectType::ProviderRuntimeContinue)
         {
@@ -228,12 +245,28 @@ fn select(rows: &[Row], now: Option<&str>, exclude: bool) -> Option<usize> {
 }
 
 pub fn claim_next(rows: &[Row], now: &str, exclude_restart_continuations: bool) -> Option<usize> {
-    select(rows, Some(now), exclude_restart_continuations)
+    select(rows, Some(now), exclude_restart_continuations, None)
 }
 
 /// Unlike the startup claim filter, upstream's wake deadline includes restart continuations.
 pub fn next_claimable_at(rows: &[Row]) -> Option<String> {
-    select(rows, None, false).map(|index| rows[index].available_at.clone())
+    select(rows, None, false, None).map(|index| rows[index].available_at.clone())
+}
+
+pub fn claim_next_with_title_limit(
+    rows: &[Row],
+    now: &str,
+    exclude: bool,
+    max_running_titles: Option<f64>,
+) -> Option<usize> {
+    select(rows, Some(now), exclude, max_running_titles)
+}
+
+pub fn next_claimable_at_with_title_limit(
+    rows: &[Row],
+    max_running_titles: Option<f64>,
+) -> Option<String> {
+    select(rows, None, false, max_running_titles).map(|index| rows[index].available_at.clone())
 }
 
 pub fn owned_running(row: &Row, worker_id: &str) -> bool {
@@ -560,8 +593,46 @@ mod tests {
     }
 
     #[test]
+    fn title_limit_counts_global_running_rows_and_preserves_ordinary_deadlines() {
+        let mut running = row(
+            "running",
+            "first-thread",
+            1,
+            EffectType::ThreadTitleGenerate,
+        );
+        running.status = EffectStatus::Running;
+        let pending = row("title", "second-thread", 2, EffectType::ThreadTitleGenerate);
+        let mut ordinary = row("ordinary", "third-thread", 3, EffectType::TerminalCleanup);
+        ordinary.available_at = "2099-01-01T00:00:00.000Z".into();
+        let rows = [running.clone(), pending, ordinary];
+        assert_eq!(
+            claim_next_with_title_limit(&rows, NOW, false, Some(1.0)),
+            None
+        );
+        assert_eq!(
+            next_claimable_at_with_title_limit(&rows, Some(1.0)),
+            Some("2099-01-01T00:00:00.000Z".into())
+        );
+        assert_eq!(claim_next(&rows, NOW, false), Some(1));
+        assert_eq!(
+            claim_next_with_title_limit(&rows, NOW, false, Some(1.5)),
+            Some(1)
+        );
+        assert_eq!(
+            claim_next_with_title_limit(&rows, NOW, false, Some(0.0)),
+            None
+        );
+        running.status = EffectStatus::Succeeded;
+        assert_eq!(
+            claim_next_with_title_limit(&[running, rows[1].clone()], NOW, false, Some(1.0)),
+            Some(1)
+        );
+    }
+
+    #[test]
     fn reconciliation_only_requeues_replay_safe_running_rows() {
         for kind in [
+            EffectType::ProviderSessionApplyModelSelection,
             EffectType::ProviderTurnStart,
             EffectType::ProviderTurnInterrupt,
             EffectType::ProviderTurnSteer,

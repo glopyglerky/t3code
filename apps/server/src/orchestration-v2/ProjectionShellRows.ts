@@ -29,6 +29,7 @@ export interface ActiveShellIndexRow {
   readonly pinned_at: string | null;
   readonly snoozed_until: string | null;
   readonly may_be_live: number;
+  readonly has_remote_tasks: number;
 }
 
 /** Purpose-specific shell queries; never a SQL string or full-store snapshot boundary. */

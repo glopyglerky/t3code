@@ -240,7 +240,9 @@ async fn recovery_threads(
                 )
                 .await?
                 {
-                    add_thread(&mut ids, &subagent.row)?;
+                    if text(&subagent.row, "origin")? == "provider_native" {
+                        add_thread(&mut ids, &subagent.row)?;
+                    }
                 }
             }
             for node in flag(session, NODES, "live_root_node").await? {

@@ -334,6 +334,85 @@ function exercise({ store, apply, transaction }) {
     Assert.equal(result.sideChat.sideChat, true);
     Assert.equal(result.rollback.rolledBackAttemptIds.length, 4);
 
+    // Missing snapshots still anchor a run, while unowned missing slots may rebaseline.
+    yield* failed(
+      transaction(
+        Effect.gen(function* () {
+          for (const [id, ordinalWithinScope, runId] of [
+            ["checkpoint:missing-owned", 901, "run:main"],
+            ["checkpoint:missing-unowned", 902, null],
+          ])
+            yield* apply(
+              makeEvent("checkpoint.captured", {
+                ...jsonPayloads.checkpoint,
+                id,
+                ordinalWithinScope,
+                runId,
+                status: "missing",
+              }),
+            );
+          result.missingCapture = yield* store.getCheckpointCaptureContext(
+            "thread:main",
+            captureTarget,
+          );
+          yield* apply(
+            makeEvent("checkpoint.captured", { ...jsonPayloads.checkpoint, status: "missing" }),
+          );
+          result.missingRollback = yield* store.getCheckpointRollbackContext(
+            "thread:main",
+            rollbackTarget,
+          );
+          return yield* Effect.fail("missing-checkpoint fixture rollback");
+        }),
+      ),
+    );
+    Assert.ok(result.missingCapture.preservedCheckpointOrdinals.includes(901));
+    Assert.ok(!result.missingCapture.preservedCheckpointOrdinals.includes(902));
+    Assert.equal(result.missingRollback.targetAttempt.id, "attempt:main");
+
+    // Deleting a source preserves files still visible in an active run fork, including runless files.
+    yield* failed(
+      transaction(
+        Effect.gen(function* () {
+          yield* apply(
+            userMessage("message:runless-attachment", "runless", {
+              runId: null,
+              attachments: [file("runless_shared")],
+            }),
+          );
+          yield* apply(
+            threadEvent("thread:attachment-fork", {
+              forkedFrom: { type: "run", threadId: "thread:main", runId: "run:z" },
+              lineage: {
+                parentThreadId: "thread:main",
+                relationshipToParent: "fork",
+                rootThreadId: "thread:main",
+              },
+            }),
+          );
+          result.liveForkAttachments = yield* store.getThreadAttachmentIds("thread:main");
+          yield* apply(
+            threadEvent("thread:attachment-fork", {
+              forkedFrom: { type: "run", threadId: "thread:main", runId: "run:z" },
+              lineage: {
+                parentThreadId: "thread:main",
+                relationshipToParent: "fork",
+                rootThreadId: "thread:main",
+                sideChat: true,
+              },
+            }),
+          );
+          result.sideChatAttachments = yield* store.getThreadAttachmentIds("thread:main");
+          return yield* Effect.fail("live-fork attachment fixture rollback");
+        }),
+      ),
+    );
+    Assert.ok(!result.liveForkAttachments.includes("runless_shared"));
+    Assert.ok(!result.liveForkAttachments.includes(ownHtml));
+    Assert.ok(result.liveForkAttachments.includes("guest"));
+    Assert.ok(result.sideChatAttachments.includes("runless_shared"));
+    Assert.ok(result.sideChatAttachments.includes(ownHtml));
+
     // Recovery keeps live work owners, pending input nodes and orphan root turns.
     for (const [suffix, ordinal, status] of [
       ["work", 5, "completed"],
@@ -494,7 +573,7 @@ function exercise({ store, apply, transaction }) {
                 (yield* store.getCheckpointCaptureContext(
                   "thread:main",
                   captureTarget,
-                )).readyCheckpointOrdinals.includes(999),
+                )).preservedCheckpointOrdinals.includes(999),
               );
               return yield* Effect.fail("rollback fixture checkpoint");
             }),
@@ -504,7 +583,7 @@ function exercise({ store, apply, transaction }) {
           !(yield* store.getCheckpointCaptureContext(
             "thread:main",
             captureTarget,
-          )).readyCheckpointOrdinals.includes(999),
+          )).preservedCheckpointOrdinals.includes(999),
         );
       }),
     );
@@ -555,6 +634,8 @@ try {
     "Recovery includes active/latest/background/work run owners, pending inputs, orphan turns and detached sessions",
     "Message, guest, answered-input and render attachment IDs preserve distinct order and thread ownership",
     "Nested writer rollback restores checkpoint rows and derived native indexes",
+    "Missing checkpoints preserve run anchors and remain valid rollback targets",
+    "Live run forks protect inherited message, render and answer files; side chats do not retain them",
   );
   await withServices("redb", source, ({ store }) =>
     Effect.gen(function* () {

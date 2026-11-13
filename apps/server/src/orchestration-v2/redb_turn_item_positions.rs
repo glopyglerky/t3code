@@ -25,11 +25,21 @@ const MARKER: &str = "turn-item-positions-v1";
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+pub enum PositionPlacement {
+    #[serde(rename = "append")]
+    Append,
+    #[serde(rename = "run_start")]
+    RunStart,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct PositionAllocate {
     pub thread_id: String,
     pub turn_item_id: String,
     pub run_id: Option<String>,
     pub run_ordinal: Option<i64>,
+    pub placement: Option<PositionPlacement>,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
@@ -428,10 +438,23 @@ impl ApplicationTransactions {
             } else {
                 lower
             };
-            let ordinal = base
-                .checked_add(1)
-                .filter(|value| (-MAX_SAFE_INTEGER..=MAX_SAFE_INTEGER).contains(value))
-                .ok_or_else(|| invalid("turn-item ordinal exceeds JavaScript integer range"))?;
+            let first_slot_unused = matches!(input.placement, Some(PositionPlacement::RunStart))
+                && session
+                    .transaction
+                    .get(&ordinal_key(&session.catalog, &input.thread_id, lower))
+                    .await?
+                    .is_none();
+            let ordinal = if first_slot_unused {
+                lower
+            } else {
+                base.checked_add(1)
+                    .ok_or_else(|| invalid("turn-item ordinal exceeds integer range"))?
+            };
+            if !(-MAX_SAFE_INTEGER..=MAX_SAFE_INTEGER).contains(&ordinal) {
+                return Err(invalid(
+                    "turn-item ordinal exceeds JavaScript integer range",
+                ));
+            }
             let position = Position {
                 thread_id: input.thread_id,
                 turn_item_id: input.turn_item_id,

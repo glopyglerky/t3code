@@ -205,7 +205,7 @@ await scenario(
       NodeAssert.equal(rows[0].createdAt, iso());
       NodeAssert.equal(rows[0].leaseOwner, null);
       NodeAssert.equal(rows[0].completedAt, null);
-      NodeAssert.equal(DateTime.formatIso(row(yield* outbox.nextClaimableAt)), iso());
+      NodeAssert.equal(DateTime.formatIso(row(yield* outbox.nextClaimableAt())), iso());
       yield* outbox.notifyAvailable(2);
       yield* outbox.awaitAvailable;
       yield* outbox.awaitAvailable;

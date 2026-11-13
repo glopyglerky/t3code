@@ -210,12 +210,21 @@ impl Store {
             )
             .map_err(|_| Error::IncompatibleStore)?;
             validate_schema(&catalog.schema).map_err(|_| Error::IncompatibleStore)?;
-            if receipt.generation != receipt.summary.export_sha256
-                || catalog.generation != receipt.generation
-                || catalog.schema.tables.len() as u64 != receipt.summary.table_count
-                || receipt.replayed
-            {
+            if receipt.generation != receipt.summary.export_sha256 || receipt.replayed {
                 return Err(Error::IncompatibleStore);
+            }
+            if catalog.generation == receipt.generation {
+                if catalog.schema.tables.len() as u64 != receipt.summary.table_count {
+                    return Err(Error::IncompatibleStore);
+                }
+            } else {
+                crate::application_bootstrap::validate_import_lineage(
+                    &mut tx,
+                    &catalog,
+                    &receipt.generation,
+                    receipt.summary.table_count,
+                )
+                .await?;
             }
             let archived = self
                 .archive_record(&receipt.generation)

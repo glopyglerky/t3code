@@ -11,6 +11,7 @@ import {
   ProviderInstanceId,
   ThreadId,
 } from "@t3tools/contracts";
+import { latestExecutedRun } from "@t3tools/shared/orchestrationV2ThreadError";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -127,6 +128,15 @@ export function isActiveRun(run: OrchestrationV2Run): boolean {
   );
 }
 
+/** The run a follow-up to a finished child binds to: the latest active one, else the last that ran. */
+export function followUpOwnerRun(
+  runs: ReadonlyArray<OrchestrationV2Run>,
+): OrchestrationV2Run | null {
+  return (
+    runs.filter(isActiveRun).toSorted((a, b) => b.ordinal - a.ordinal)[0] ?? latestExecutedRun(runs)
+  );
+}
+
 function providerTurnCapabilities(
   projection: OrchestrationV2ThreadProjection,
   run: OrchestrationV2Run,
@@ -191,6 +201,9 @@ interface CapabilityCheckInput {
 }
 
 export interface CommandPolicyV2Shape {
+  readonly followUpOwnerRun: (
+    runs: ReadonlyArray<OrchestrationV2Run>,
+  ) => Effect.Effect<OrchestrationV2Run | null>;
   readonly resolveMessageDispatchIntent: (
     ...args: Parameters<typeof resolveMessageDispatchIntent>
   ) => Effect.Effect<ReturnType<typeof resolveMessageDispatchIntent>>;
@@ -407,6 +420,9 @@ export const layer: Layer.Layer<CommandPolicyV2> = Layer.sync(CommandPolicyV2, (
   // Selection precedes execution; native failures never retry through upstream.
   if (executable !== undefined) return makeNativeCommandPolicy(executable, unsupported);
   return {
+    followUpOwnerRun: Effect.fn("CommandPolicy.followUpOwnerRun")((runs) =>
+      Effect.sync(() => followUpOwnerRun(runs)),
+    ),
     resolveMessageDispatchIntent: Effect.fn("CommandPolicy.resolveMessageDispatchIntent")(
       (...args: Parameters<typeof resolveMessageDispatchIntent>) =>
         Effect.sync(() => resolveMessageDispatchIntent(...args)),

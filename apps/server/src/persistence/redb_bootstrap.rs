@@ -9,6 +9,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::time::Duration;
 
+#[path = "redb_schema_upgrade.rs"]
+mod upgrade;
+pub(crate) use upgrade::validate_import_lineage;
+
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Migration {
     pub id: String,
@@ -91,10 +95,10 @@ impl Store {
             .await?;
         if let Some(bytes) = tx.get(&schema_key()).await? {
             let catalog = decode_catalog(&bytes)?;
-            if catalog.schema != definition.schema {
-                return Err(Error::Invalid("Native application schema does not match this build; migrate the source with its matching build before importing".into()));
-            }
             tx.rollback().await?;
+            if catalog.schema != definition.schema {
+                return self.upgrade_application_80(catalog, definition).await;
+            }
             if self.application_migrations().await? != definition.migrations {
                 return Err(Error::Invalid(
                     "Native migration history does not match this build".into(),
@@ -154,7 +158,7 @@ mod tests {
         store.shutdown().await.unwrap();
         let before = std::fs::read(fixture.path()).unwrap();
         let read_only = Store::open_read_only(fixture.path()).await.unwrap();
-        assert_eq!(read_only.application_migrations().await.unwrap().len(), 80);
+        assert_eq!(read_only.application_migrations().await.unwrap().len(), 88);
         assert!(read_only.bootstrap_application().await.is_err());
         read_only.shutdown().await.unwrap();
         assert_eq!(std::fs::read(fixture.path()).unwrap(), before);
@@ -170,10 +174,10 @@ mod tests {
         let store = fixture.initialize().await;
         let first = store.bootstrap_application().await.unwrap();
         assert!(first.initialized);
-        assert_eq!(first.migrations.len(), 80);
+        assert_eq!(first.migrations.len(), 88);
         assert!(store.prepare_application_search().await.unwrap().prepared);
         assert!(!store.bootstrap_application().await.unwrap().initialized);
-        assert_eq!(store.application_migrations().await.unwrap().len(), 80);
+        assert_eq!(store.application_migrations().await.unwrap().len(), 88);
         while !store
             .prepare_application_message_rowids()
             .await

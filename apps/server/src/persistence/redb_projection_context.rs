@@ -231,6 +231,53 @@ fn keep(
     Ok(out)
 }
 
+async fn unshared_attachments(
+    session: &mut Session,
+    thread: &str,
+    rows: Vec<IndexedRow>,
+) -> Result<Vec<IndexedRow>> {
+    let mut fork_ordinal: Option<i64> = None;
+    for fork in equal_metadata(session, THREADS, "all", &Value::Null).await? {
+        let payload = p(&fork)?;
+        let source = &payload["forkedFrom"];
+        if optional(&fork, "deleted_at")?.is_some()
+            || source["type"] != "run"
+            || source["threadId"] != thread
+            || payload["lineage"]["sideChat"] == true
+            || payload["lineage"]["sideChat"].as_i64() == Some(1)
+        {
+            continue;
+        }
+        let Some(run_id) = source["runId"].as_str() else {
+            continue;
+        };
+        if let Some(run) = point(session, RUNS, Some(run_id), Some(thread))
+            .await?
+            .first()
+        {
+            let ordinal = integer(&run.row, "ordinal")?;
+            fork_ordinal = Some(fork_ordinal.map_or(ordinal, |previous| previous.max(ordinal)));
+        }
+    }
+    let Some(boundary) = fork_ordinal else {
+        return Ok(rows);
+    };
+    let mut result = Vec::new();
+    for row in rows {
+        let Some(run_id) = optional(&row, "run_id")? else {
+            continue;
+        };
+        let shared = match point(session, RUNS, Some(&run_id), None).await?.first() {
+            Some(run) => integer(&run.row, "ordinal")? <= boundary,
+            None => false,
+        };
+        if !shared {
+            result.push(row);
+        }
+    }
+    Ok(result)
+}
+
 async fn select(session: &mut Session, q: ProjectionContextQuery) -> Result<Value> {
     ensure_ready(session).await?;
     let t = &q.thread_id;
@@ -268,18 +315,18 @@ async fn select(session: &mut Session, q: ProjectionContextQuery) -> Result<Valu
         "checkpoint_runs"=>return Ok(json!(sorted(thread_rows(session,RUNS,t).await?,&["ordinal"])?.iter().map(|row|Ok(json!({"id":id(row,RUNS)?,"ordinal":integer(&row.row,"ordinal")?,"status":string(row,"status")?}))).collect::<Result<Vec<_>>>()?)),
         "checkpoint_scopes"=>return Ok(json!(sorted(thread_rows(session,SCOPES,t).await?,&["ordinal_within_parent","scope_id"])?.iter().map(|row|Ok(json!({"id":id(row,SCOPES)?,"runId":optional(row,"run_id")?,"kind":string(row,"kind")?,"cwd":sql_json(p(row)?.get("cwd"))?}))).collect::<Result<Vec<_>>>()?)),
         "checkpoint_records"=>return Ok(json!(sorted(thread_rows(session,CHECKPOINTS,t).await?,&["scope_id","ordinal_within_scope"])?.iter().map(|row|Ok(json!({"scopeId":string(row,"scope_id")?,"runId":optional(row,"run_id")?,"ordinalWithinScope":integer(&row.row,"ordinal_within_scope")?,"appRunOrdinal":cell_json(row,"app_run_ordinal")?,"status":string(row,"status")?,"ref":sql_json(p(row)?.get("ref"))?}))).collect::<Result<Vec<_>>>()?)),
-        "ready_ordinals"=>return Ok(json!(sorted(keep(thread_rows(session,CHECKPOINTS,t).await?,|row|Ok(string(row,"scope_id")?==required(&q.scope_id)?&&string(row,"status")?=="ready"))?,&[])?.iter().map(|row|Ok(json!({"ordinal":integer(&row.row,"ordinal_within_scope")?}))).collect::<Result<Vec<_>>>()?)),
-        "rollback_target_attempt"=>{let ordinal=required_ordinal(q.ordinal)?;let mut out=Vec::new();for run in thread_rows(session,RUNS,t).await?{if integer(&run.row,"ordinal")?!=ordinal{continue;}let payload=p(&run)?;if let Some(attempt)=point(session,ATTEMPTS,payload.get("activeAttemptId").and_then(Value::as_str),Some(t)).await?.pop(){out.push(json!({"id":id(&attempt,ATTEMPTS)?,"providerTurnId":optional(&attempt,"provider_turn_id")?}));}}return Ok(json!(out));},
+        "preserved_ordinals"=>return Ok(json!(sorted(keep(thread_rows(session,CHECKPOINTS,t).await?,|row|Ok(string(row,"scope_id")?==required(&q.scope_id)?&&(string(row,"status")?=="ready"||(string(row,"status")?=="missing"&&optional(row,"run_id")?.is_some()))))?,&[])?.iter().map(|row|Ok(json!({"ordinal":integer(&row.row,"ordinal_within_scope")?}))).collect::<Result<Vec<_>>>()?)),
+        "rollback_target_attempt"=>{let ordinal=required_ordinal(q.ordinal)?;let mut out=Vec::new();for run in thread_rows(session,RUNS,t).await?{if integer(&run.row,"ordinal")?!=ordinal||string(&run,"status")?=="rolled_back"{continue;}let payload=p(&run)?;if let Some(attempt)=point(session,ATTEMPTS,payload.get("activeAttemptId").and_then(Value::as_str),Some(t)).await?.pop(){out.push(json!({"id":id(&attempt,ATTEMPTS)?,"providerTurnId":optional(&attempt,"provider_turn_id")?}));}}return Ok(json!(out));},
         "rollback_runs"=>(RUNS,sorted(keep(thread_rows(session,RUNS,t).await?,|row|Ok(integer(&row.row,"ordinal")?>required_ordinal(q.ordinal)?&&one_of(row,"status",&["completed","interrupted","failed","cancelled"])?))?,&["ordinal"])?),
         "bound_session"=>{let id=q.record_id.as_deref();let rows=keep(bound_sessions(session,t).await?,|row|Ok(id==Some(string(row,"provider_session_id")?.as_str())))?;(SESSIONS,rows)},
         "rolledback_attempts"=>{let runs=sorted(keep(thread_rows(session,RUNS,t).await?,|row|Ok(string(row,"status")?=="rolled_back"))?,&["run_id"])?;let mut out=Vec::new();for run in runs{for attempt in related(session,ATTEMPTS,"run_id",&id(&run,RUNS)?).await?{if string(&attempt,"thread_id")?==*t{out.push(json!({"id":id(&attempt,ATTEMPTS)?}));}}}return Ok(json!(out));},
         "stale_checkpoints"=>(CHECKPOINTS,sorted(keep(thread_rows(session,CHECKPOINTS,t).await?,|row|Ok(string(row,"scope_id")?==required(&q.scope_id)?&&string(row,"status")?=="ready"&&cell_json(row,"app_run_ordinal")?.as_i64().is_some_and(|v|q.ordinal.is_some_and(|n|v>n))))?,&["ordinal_within_scope"])?),
         "rollback_nodes"=>{let mut rows=Vec::new();for id in q.ids.as_ref().ok_or_else(||invalid("context node identities are required"))?.iter().flatten().collect::<BTreeSet<_>>(){rows.extend(point(session,NODES,Some(id),Some(t)).await?);}(NODES,sorted(rows,&["node_id"])?)},
         "rollback_turns"=>(TURNS,sorted(keep(thread_rows(session,TURNS,t).await?,|row|Ok(optional(row,"provider_thread_id")?.as_deref()==q.provider_thread_id.as_deref()||q.provider_turn_id.as_ref().is_some_and(|id|id==&string(row,"provider_turn_id").unwrap_or_default())||q.attempt_id.as_ref().is_some_and(|id|optional(row,"run_attempt_id").ok().flatten().as_ref()==Some(id))))?,&["provider_thread_id","ordinal"])?),
-        "attachment_messages"=>return attachment_values(sorted(thread_rows(session,MESSAGES,t).await?,&["created_at","message_id"])?,"nativeContextAttachmentIds"),
-        "attachment_answers"=>return attachment_values(sorted(keep(thread_rows(session,ITEMS,t).await?,|row|Ok(string(row,"type")?=="user_input_request"))?,&[])?,"nativeAnswerAttachmentIds"),
+        "attachment_messages"=>{let rows=thread_rows(session,MESSAGES,t).await?;return attachment_values(sorted(unshared_attachments(session,t,rows).await?,&["created_at","message_id"])?,"nativeContextAttachmentIds");},
+        "attachment_answers"=>{let rows=keep(thread_rows(session,ITEMS,t).await?,|row|Ok(string(row,"type")?=="user_input_request"))?;return attachment_values(sorted(unshared_attachments(session,t,rows).await?,&[])?,"nativeAnswerAttachmentIds");},
         "attachment_guests"=>return attachment_values(point(session,THREADS,Some(t),None).await?,"nativeGuestAttachmentIds"),
-        "attachment_renders"=>(ITEMS,sorted(keep(thread_rows(session,ITEMS,t).await?,|row|Ok(string(row,"type")?=="dynamic_tool"&&integer(&row.row,"_native_attachment_render")?==1))?,&[])?),
+        "attachment_renders"=>{let rows=keep(thread_rows(session,ITEMS,t).await?,|row|Ok(string(row,"type")?=="dynamic_tool"&&integer(&row.row,"_native_attachment_render")?==1))?;(ITEMS,sorted(unshared_attachments(session,t,rows).await?,&[])?)},
         "runtime_recovery"=>return runtime_recovery(session,t).await,
         _=>return Err(invalid("unknown projection context query")),
     };
@@ -514,6 +561,9 @@ async fn runtime_recovery(session: &mut Session, t: &str) -> Result<Value> {
         );
     }
     for subagent in &all_subagents {
+        if optional(subagent, "origin")?.as_deref() != Some("provider_native") {
+            continue;
+        }
         if let Some(provider) = optional(subagent, "provider_thread_id")? {
             all_providers.extend(point(session, PROVIDER_THREADS, Some(&provider), None).await?);
         }

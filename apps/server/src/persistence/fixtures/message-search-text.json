@@ -1,0 +1,141 @@
+{
+  "upstream": "10fbff5ab6d31c494b5c6cfd759d78c12aa731f6",
+  "source": "packages/shared/src/assistantCitations.ts",
+  "cases": [
+    {
+      "name": "plain",
+      "input": "ordinary text",
+      "expected": null
+    },
+    {
+      "name": "valid",
+      "input": "[Assistant quote](t3-citation://v1/environment/thread/message?text=%71uoted+words&start=0&end=12&prefix=&suffix=)",
+      "expected": "quoted words"
+    },
+    {
+      "name": "bare_fragment",
+      "input": "[Assistant quote](t3-citation://v1/environment/thread/message?text=%71uoted+words&start=0&end=12&prefix=&suffix=#)",
+      "expected": "quoted words"
+    },
+    {
+      "name": "fragment",
+      "input": "[Assistant quote](t3-citation://v1/environment/thread/message?text=%71uoted+words&start=0&end=12&prefix=&suffix=#fragment)",
+      "expected": null
+    },
+    {
+      "name": "comment",
+      "input": "[Assistant quote](t3-citation://v1/environment/thread/message?text=%71uoted+words&start=0&end=12&prefix=&suffix=&comment=review+comment)",
+      "expected": "quoted words\nComment: review comment"
+    },
+    {
+      "name": "empty_comment",
+      "input": "[Assistant quote](t3-citation://v1/environment/thread/message?text=%71uoted+words&start=0&end=12&prefix=&suffix=&comment=)",
+      "expected": "quoted words\nComment: "
+    },
+    {
+      "name": "blank_comment",
+      "input": "[Assistant quote](t3-citation://v1/environment/thread/message?text=%71uoted+words&start=0&end=12&prefix=&suffix=&comment=%20%0A%09)",
+      "expected": "quoted words\nComment:  \n\t"
+    },
+    {
+      "name": "unicode",
+      "input": "[Assistant quote](t3-citation://v1/environment/thread/message?text=%F0%9F%8C%8D+quoted&start=0&end=12&prefix=&suffix=)",
+      "expected": "🌍 quoted"
+    },
+    {
+      "name": "malformed_query",
+      "input": "[Assistant quote](t3-citation://v1/environment/thread/message?text=%ZZquoted&start=0&end=12&prefix=&suffix=)",
+      "expected": "%ZZquoted"
+    },
+    {
+      "name": "invalid_utf8_query",
+      "input": "[Assistant quote](t3-citation://v1/environment/thread/message?text=%FFquoted&start=0&end=12&prefix=&suffix=)",
+      "expected": "�quoted"
+    },
+    {
+      "name": "invalid_utf8_path",
+      "input": "[Assistant quote](t3-citation://v1/%FF/thread/message?text=%71uoted+words&start=0&end=12&prefix=&suffix=)",
+      "expected": null
+    },
+    {
+      "name": "encoded_ids",
+      "input": "[Assistant quote](t3-citation://v1/env%2Fironment/thr%C3%A9ad/message?text=%71uoted+words&start=0&end=12&prefix=&suffix=)",
+      "expected": "quoted words"
+    },
+    {
+      "name": "dot_path",
+      "input": "[Assistant quote](t3-citation://v1/environment/./thread/message?text=%71uoted+words&start=0&end=12&prefix=&suffix=)",
+      "expected": "quoted words"
+    },
+    {
+      "name": "encoded_dot_path",
+      "input": "[Assistant quote](t3-citation://v1/environment/%2e/thread/message?text=%71uoted+words&start=0&end=12&prefix=&suffix=)",
+      "expected": "quoted words"
+    },
+    {
+      "name": "parent_path",
+      "input": "[Assistant quote](t3-citation://v1/old/../environment/thread/message?text=%71uoted+words&start=0&end=12&prefix=&suffix=)",
+      "expected": "quoted words"
+    },
+    {
+      "name": "trailing_dot",
+      "input": "[Assistant quote](t3-citation://v1/environment/thread/message/.?text=%71uoted+words&start=0&end=12&prefix=&suffix=)",
+      "expected": null
+    },
+    {
+      "name": "unknown_key",
+      "input": "[Assistant quote](t3-citation://v1/environment/thread/message?text=%71uoted+words&start=0&end=12&prefix=&suffix=&unknown=1)",
+      "expected": null
+    },
+    {
+      "name": "duplicate_comment",
+      "input": "[Assistant quote](t3-citation://v1/environment/thread/message?text=%71uoted+words&start=0&end=12&prefix=&suffix=&comment=a&comment=b)",
+      "expected": null
+    },
+    {
+      "name": "empty_query_segment",
+      "input": "[Assistant quote](t3-citation://v1/environment/thread/message?text=%71uoted+words&start=0&end=12&prefix=&suffix=&)",
+      "expected": "quoted words"
+    },
+    {
+      "name": "offset_zeroes",
+      "input": "[Assistant quote](t3-citation://v1/environment/thread/message?text=%71uoted+words&start=000&end=0012&prefix=&suffix=)",
+      "expected": "quoted words"
+    },
+    {
+      "name": "invalid_offset",
+      "input": "[Assistant quote](t3-citation://v1/environment/thread/message?text=%71uoted+words&start=1.5&end=12&prefix=&suffix=)",
+      "expected": null
+    },
+    {
+      "name": "invalid_text_blank",
+      "input": "[Assistant quote](t3-citation://v1/environment/thread/message?text=%20%0A&start=0&end=12&prefix=&suffix=)",
+      "expected": null
+    },
+    {
+      "name": "raw_unicode_separator",
+      "input": "[Assistant quote](t3-citation://v1/environment/thread/message?text=%71uotedwords&start=0&end=12&prefix=&suffix=)",
+      "expected": "quotedwords"
+    },
+    {
+      "name": "two_links",
+      "input": "before [Assistant quote](t3-citation://v1/environment/thread/message?text=%71uoted+words&start=0&end=12&prefix=&suffix=) middle [Assistant quote](t3-citation://v1/environment/thread/message?text=%71uoted+words&start=0&end=12&prefix=&suffix=&comment=two) after",
+      "expected": "before quoted words middle quoted words\nComment: two after"
+    },
+    {
+      "name": "discarded_invalid_escape",
+      "input": "[Assistant quote](t3-citation://v1/%ZZ/../env/thread/msg?text=quoted+words&start=0&end=12&prefix=&suffix=)",
+      "expected": "quoted words"
+    },
+    {
+      "name": "discarded_invalid_utf8",
+      "input": "[Assistant quote](t3-citation://v1/env/%FF/../thread/msg?text=quoted+words&start=0&end=12&prefix=&suffix=)",
+      "expected": "quoted words"
+    },
+    {
+      "name": "encoded_parent_discarded_invalid_utf8",
+      "input": "[Assistant quote](t3-citation://v1/%FF/%2e%2e/env/thread/msg?text=quoted+words&start=0&end=12&prefix=&suffix=)",
+      "expected": "quoted words"
+    }
+  ]
+}

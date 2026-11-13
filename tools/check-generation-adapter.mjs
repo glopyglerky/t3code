@@ -1,4 +1,6 @@
-function effectiveDefault() { return NodeURL.fileURLToPath(new URL("../bin/t3-code-ls-generate", import.meta.url)); }
+function effectiveDefault() {
+  return NodeURL.fileURLToPath(new URL("../bin/t3-code-ls-generate", import.meta.url));
+}
 import * as NodeAssert from "node:assert/strict";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
@@ -24,6 +26,7 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as ServerConfig from "../apps/server/src/config.ts";
 import * as ServerSettings from "../apps/server/src/serverSettings.ts";
 import * as ProviderInstanceRegistry from "../apps/server/src/provider/ProviderInstanceRegistry.ts";
+import * as ProviderInstallationGate from "../apps/server/src/provider/ProviderInstallationGate.ts";
 import * as SourceControlProviderRegistry from "../apps/server/src/sourceControl/SourceControlProviderRegistry.ts";
 import * as TextGeneration from "../apps/server/src/textGeneration/TextGeneration.ts";
 import * as TextGenerators from "../apps/server/src/textGeneration/TextGenerators.ts";
@@ -181,9 +184,7 @@ async function run(f, body, options = {}) {
   let program = Effect.gen(function* () {
     const actual = yield* ChildProcessSpawner.ChildProcessSpawner;
     const observed = ChildProcessSpawner.make((command) => {
-      NodeAssert.ok(
-        command.command === effective,
-      );
+      NodeAssert.ok(command.command === effective);
       f.commands.push(command);
       {
         NodeAssert.deepEqual(command.args, []);
@@ -764,6 +765,7 @@ try {
                       listModels: () => Effect.die("Unexpected text-generator model lookup"),
                     }),
                     ServerSettings.layerTest({}),
+                    ProviderInstallationGate.layer,
                   ),
                 ),
               );

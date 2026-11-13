@@ -285,3 +285,23 @@ export const acquireServerOwnershipWithLock = Effect.fn("acquireServerOwnership"
 /** Retained compatibility composition; production selects the native lock layer. */
 export const acquireServerOwnership = (statePath: string) =>
   acquireServerOwnershipWithLock(statePath).pipe(Effect.provide(SqliteServerOwnershipLock.layer));
+
+/** Lock the state directory for offline maintenance without publishing a server. */
+export const holdServerOwnershipLockWithLock = Effect.fn("holdServerOwnershipLock")(function* (
+  statePath: string,
+) {
+  const stateDir = NodePath.dirname(statePath);
+  const locks = yield* ServerOwnershipLock;
+  const lock = yield* locks.acquire(NodePath.join(stateDir, "server-owner.sqlite")).pipe(
+    Effect.mapError((cause) => cause.busy
+      ? new ServerAlreadyRunningError({ stateDir })
+      : new ServerOwnershipError({ stateDir, cause })),
+  );
+  if (lock.replacedDuringAcquire) return yield* new ServerOwnershipError({
+    stateDir,
+    cause: new Error("server ownership lock replaced during acquisition"),
+  });
+});
+
+export const holdServerOwnershipLock = (statePath: string) =>
+  holdServerOwnershipLockWithLock(statePath).pipe(Effect.provide(SqliteServerOwnershipLock.layer));

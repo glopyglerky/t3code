@@ -26,6 +26,22 @@ fn write_response(output: &mut impl Write, frame: &str) -> Result<(), &'static s
 fn run() -> Result<(), &'static str> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut output = io::stdout().lock();
+    if args.as_slice() == ["--follow-up-owner"] {
+        let mut input = BufReader::new(io::stdin().lock());
+        let mut owner = dispatch::FollowUpOwner::default();
+        while let Some(frame) =
+            read_frame(&mut input).map_err(|_| "invalid follow-up input frame")?
+        {
+            owner.push(&frame)?;
+        }
+        let selected = owner
+            .selected_index()
+            .map_or_else(|| "-".into(), |index| index.to_string());
+        writeln!(output, "ok\t{selected}").map_err(|_| "cannot write follow-up response")?;
+        return output
+            .flush()
+            .map_err(|_| "cannot flush follow-up response");
+    }
     if !args.is_empty() {
         if args.len() > 12
             || args.iter().map(String::len).sum::<usize>() + args.len() - 1 > MAX_FRAME_BYTES

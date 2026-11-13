@@ -192,9 +192,12 @@ function world(fixture) {
     },
     [
       "resolvePackageManagedProviderMaintenance",
+      "followVitePlusSystemFirstShim",
       "resolveMiseProviderMaintenance",
       "resolveHomebrewProviderMaintenance",
       "resolvePnpmGlobalLatestVersion",
+      "resolveBunGlobalLatestVersion",
+      "resolveVitePlusInstallableLatestVersion",
       "parseChocolateyLatestVersion",
       "parseHomebrewLatestVersion",
       "runProbe",
@@ -358,19 +361,18 @@ function hydrated(fixture, capabilities) {
     if (selector === "context") result.update.env = fixture.context.env;
     if (selector === "native") result.update.env = fixture.definition.nativeUpdate.env;
   }
-  if (latestLookup?.kind === "mise") {
-    const hash = NodeCrypto.createHash("sha256");
-    for (const [name, value] of Object.entries(fixture.context.env).toSorted(([a], [b]) =>
-      a < b ? -1 : 1,
-    )) {
-      hash.update(`${name}\0${value ?? ""}\0`);
-    }
-    result.latestVersionCacheKey = [
-      "mise",
-      latestLookup.executable,
-      latestLookup.tool,
-      hash.digest("hex"),
-    ].join("\0");
+  if (latestLookup?.kind === "mise" || latestLookup?.kind === "vite-plus") {
+    const hash = NodeCrypto.createHash("sha256")
+      .update(
+        JSON.stringify(
+          Object.entries(fixture.context.env).toSorted(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+        ),
+      )
+      .digest("hex");
+    result.latestVersionCacheKey =
+      latestLookup.kind === "mise"
+        ? ["mise", latestLookup.executable, latestLookup.tool, hash].join("\0")
+        : ["vite-plus-global", latestLookup.packageName, hash].join("\0");
   }
   return { ...clean(result), hasLatestLookup: latestLookup !== undefined };
 }
@@ -400,6 +402,18 @@ async function lookupLatest(fixture, state, lookup) {
         ? module.parseHomebrewLatestVersion(info, { kind: lookup.ownershipKind, name: lookup.name })
         : null;
     }
+    case "vite-plus":
+      return state.execute(
+        module.resolveVitePlusInstallableLatestVersion(
+          lookup.packageName,
+          fixture.context.env,
+          fixture.context.platform,
+        ),
+      );
+    case "bun":
+      return state.execute(
+        module.resolveBunGlobalLatestVersion(lookup.packageName, fixture.context.env),
+      );
     case "pnpm":
       return state.execute(
         module.resolvePnpmGlobalLatestVersion(lookup.packageName, fixture.context.env),
@@ -496,9 +510,20 @@ export async function compareMaintenance(executable, fixtures = maintenanceCases
               fixture.context,
             );
     const expected = await upstream.execute(effect);
-    const actual = await nativeResolve(executable, fixture, native);
+    // The production caller follows a Vite+ system-first shim before selecting
+    // the native policy. Keep that observation in the shared upstream boundary.
+    const nativeFixture =
+      fixture.mode === "package" && fixture.context
+        ? {
+            ...fixture,
+            context: await native.execute(
+              native.module.followVitePlusSystemFirstShim(fixture.context),
+            ),
+          }
+        : fixture;
+    const actual = await nativeResolve(executable, nativeFixture, native);
     NodeAssert.deepEqual(
-      hydrated(fixture, actual.capabilities),
+      hydrated(nativeFixture, actual.capabilities),
       projected(expected),
       fixture.label,
     );
@@ -506,7 +531,11 @@ export async function compareMaintenance(executable, fixtures = maintenanceCases
     observations += actual.observations;
     if (expected?.lookupLatestVersion) {
       const expectedVersion = await upstream.execute(expected.lookupLatestVersion);
-      const actualVersion = await lookupLatest(fixture, native, actual.capabilities.latestLookup);
+      const actualVersion = await lookupLatest(
+        nativeFixture,
+        native,
+        actual.capabilities.latestLookup,
+      );
       NodeAssert.deepEqual(actualVersion, expectedVersion, `${fixture.label}: lazy latest version`);
       NodeAssert.deepEqual(native.trace, upstream.trace, `${fixture.label}: lazy probe order`);
       lazyLookups++;
@@ -529,6 +558,32 @@ add(
     env: { CODEX_HOME: "/home/fixture's account" },
   }),
 );
+
+for (const native of [false, true]) {
+  const fixture = commandPath(
+    base(`Nix store preserves manual ownership with native updater ${native}`),
+    "/fixture/bin/codex",
+    "/nix/store/package-codex/bin/codex",
+  );
+  add(native ? nativeDefinition(fixture, { matches: null }) : fixture);
+}
+
+for (const found of [false, true]) {
+  const fixture = commandPath(
+    base(`Vite system-first shim with system executable ${found}`),
+    "/home/a/.vite-plus/bin/codex",
+  );
+  fixture.context.env.PATH = "/home/a/.vite-plus/bin:/fixture/bin";
+  fixture.files["/home/a/.vite-plus/config.json"] = {
+    text: JSON.stringify({ shimMode: "system_first" }),
+  };
+  if (found) {
+    fixture.lookups.codex = "/usr/local/bin/codex";
+    fixture.realPaths["/usr/local/bin/codex"] =
+      "/usr/local/lib/node_modules/@openai/codex/bin/codex.js";
+  }
+  add(fixture);
+}
 
 const installerPaths = [
   ["Vite home", "/home/a/.vite-plus/bin/codex"],

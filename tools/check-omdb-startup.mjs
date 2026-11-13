@@ -61,8 +61,8 @@ try {
         { operation: "application_migrations" },
         Schema.Array(Schema.Struct({ id: Schema.String, name: Schema.String })),
       );
-      Assert.equal(migrations.length, 80);
-      Assert.equal(migrations.at(-1).id, "80");
+      Assert.equal(migrations.length, 88);
+      Assert.equal(migrations.at(-1).id, "88");
       const locks = yield* NativeOwnership.make(executable);
       yield* locks.acquire(Path.join(fixture.root, "server-owner.sqlite"));
     }),

@@ -77,6 +77,15 @@ pub struct ProjectionRecordFilter {
     pub node_ids: Option<Vec<String>>,
     pub omit_settled_leaf_nodes: Option<bool>,
     pub omit_settled_subagents: Option<OmitSettledSubagents>,
+    pub omit_settled_subagent_records: Option<bool>,
+    pub since_last_compaction: Option<SinceLastCompaction>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SinceLastCompaction {
+    pub keep_run_ids: Vec<String>,
+    pub keep_message_id: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -186,10 +195,87 @@ async fn active_run(
     Ok(active)
 }
 
+async fn settled_subagent(
+    session: &mut Session,
+    row: &Map<String, Value>,
+    active: &mut BTreeMap<String, bool>,
+) -> Result<bool> {
+    Ok(
+        ["completed", "failed", "cancelled", "interrupted"]
+            .contains(&text(row, "status")?.as_str())
+            && ["acknowledged", "delivered", "disposed"].contains(
+                &nullable(row, "completion_delivery_state")?
+                    .as_deref()
+                    .unwrap_or(""),
+            )
+            && !active_run(session, active, nullable(row, "run_id")?).await?,
+    )
+}
+
+async fn recent_runs(
+    session: &mut Session,
+    thread: &str,
+    keep: &SinceLastCompaction,
+) -> Result<Option<BTreeSet<String>>> {
+    let mut boundary: Option<(i64, i64, String)> = None;
+    for item in related(session, ITEMS, "thread_id", thread).await? {
+        if text(&item.row, "type")? != "compaction" || text(&item.row, "status")? != "completed" {
+            continue;
+        }
+        let Some(run_id) = nullable(&item.row, "run_id")? else {
+            continue;
+        };
+        let Some(run) = compact_row(session, RUNS, &run_id).await? else {
+            continue;
+        };
+        if text(&run.row, "status")? == "rolled_back" {
+            continue;
+        }
+        let item_ordinal = integer(&item.row, "ordinal")?;
+        if boundary
+            .as_ref()
+            .is_none_or(|(previous, _, _)| item_ordinal > *previous)
+        {
+            boundary = Some((
+                item_ordinal,
+                integer(&run.row, "ordinal")?,
+                text(&run.row, "requested_at")?,
+            ));
+        }
+    }
+    let Some((_, ordinal, requested)) = boundary else {
+        return Ok(None);
+    };
+    let mut ids = BTreeSet::new();
+    for run in related(session, RUNS, "thread_id", thread).await? {
+        let completed = nullable(&run.row, "completed_at")?;
+        if integer(&run.row, "ordinal")? >= ordinal
+            || completed.as_ref().is_none_or(|value| value >= &requested)
+            || ACTIVE_RUNS.contains(&text(&run.row, "status")?.as_str())
+        {
+            ids.insert(text(&run.row, "run_id")?);
+        }
+    }
+    if let Some(message) = compact_row(session, MESSAGES, &keep.keep_message_id).await? {
+        if text(&message.row, "thread_id")? == thread {
+            if let Some(run) = nullable(&message.row, "run_id")? {
+                ids.insert(run);
+            }
+        }
+    }
+    if ids.is_empty() {
+        return Ok(None);
+    }
+    ids.extend(keep.keep_run_ids.iter().cloned());
+    Ok(Some(ids))
+}
+
 async fn candidates(
     session: &mut Session,
     field: ProjectionRecordField,
     thread: &str,
+    filter: &ProjectionRecordFilter,
+    active: &mut BTreeMap<String, bool>,
 ) -> Result<Vec<IndexedRow>> {
     match field {
         ProjectionRecordField::ProviderSessions => {
@@ -222,11 +308,29 @@ async fn candidates(
                     .await?,
                 );
             }
+            let bound_sessions = if filter.omit_settled_subagent_records == Some(true) {
+                related(session, BINDINGS, "thread_id", thread)
+                    .await?
+                    .iter()
+                    .map(|row| text(&row.row, "provider_session_id"))
+                    .collect::<Result<BTreeSet<_>>>()?
+            } else {
+                BTreeSet::new()
+            };
             for subagent in related(session, SUBAGENTS, "thread_id", thread).await? {
                 if let Some(id) = nullable(&subagent.row, "provider_thread_id")? {
-                    rows.extend(
-                        related(session, PROVIDER_THREADS, "provider_thread_id", &id).await?,
-                    );
+                    let providers =
+                        related(session, PROVIDER_THREADS, "provider_thread_id", &id).await?;
+                    let omit = filter.omit_settled_subagent_records == Some(true)
+                        && settled_subagent(session, &subagent.row, active).await?;
+                    for provider in providers {
+                        if !omit
+                            || nullable(&provider.row, "provider_session_id")?
+                                .is_some_and(|id| bound_sessions.contains(&id))
+                        {
+                            rows.push(provider);
+                        }
+                    }
                 }
             }
             unique_rows(PROVIDER_THREADS, rows)
@@ -269,7 +373,32 @@ async fn retain(
                 .contains(&text(row, "status")?.as_str())
                 && nullable(row, "run_id")?.is_some()
                 && !active_run(session, active, nullable(row, "run_id")?).await?;
-            selected(&filter.node_ids, row, "node_id")? && !settled_leaf
+            let active_ended_leaf = filter.omit_settled_leaf_nodes == Some(true)
+                && ["tool_call", "assistant_message", "reasoning"]
+                    .contains(&text(row, "kind")?.as_str())
+                && [
+                    "completed",
+                    "interrupted",
+                    "failed",
+                    "cancelled",
+                    "rolled_back",
+                ]
+                .contains(&text(row, "status")?.as_str())
+                && active_run(session, active, nullable(row, "run_id")?).await?;
+            let settled_owner = !active_ended_leaf
+                && filter.omit_settled_leaf_nodes == Some(true)
+                && filter.omit_settled_subagent_records == Some(true);
+            let settled_owner = if settled_owner {
+                match compact_row(session, SUBAGENTS, &text(row, "node_id")?).await? {
+                    Some(owner) if text(&owner.row, "thread_id")? == text(row, "thread_id")? => {
+                        settled_subagent(session, &owner.row, active).await?
+                    }
+                    _ => false,
+                }
+            } else {
+                false
+            };
+            selected(&filter.node_ids, row, "node_id")? && !settled_leaf && !settled_owner
         }
         ProjectionRecordField::Subagents => {
             let keep_exception = match &filter.omit_settled_subagents {
@@ -602,12 +731,16 @@ async fn query(
         ));
     }
     let mut active = BTreeMap::new();
+    let recent = match &filter.since_last_compaction {
+        Some(keep) => recent_runs(session, &input.thread_id, keep).await?,
+        None => None,
+    };
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| UNIX_EPOCH_JULIAN_MS + elapsed.as_millis() as i64)
         .map_err(|_| Error::IncompatibleStore)?;
     for field in input.fields.into_iter().collect::<BTreeSet<_>>() {
-        let rows = candidates(session, field, &input.thread_id).await?;
+        let rows = candidates(session, field, &input.thread_id, &filter, &mut active).await?;
         let latest_run =
             if field == ProjectionRecordField::Runs && filter.include_latest_run == Some(true) {
                 let mut latest: Option<(i64, String)> = None;
@@ -631,6 +764,37 @@ async fn query(
             };
         let mut ordered = Vec::new();
         for row in rows {
+            if let Some(recent) = &recent {
+                let run_id = match field {
+                    ProjectionRecordField::Attempts
+                    | ProjectionRecordField::Nodes
+                    | ProjectionRecordField::Messages => nullable(&row.row, "run_id")?,
+                    ProjectionRecordField::ProviderTurns => {
+                        match nullable(&row.row, "run_attempt_id")? {
+                            Some(id) => match compact_row(session, ATTEMPTS, &id).await? {
+                                Some(attempt)
+                                    if text(&attempt.row, "thread_id")? == input.thread_id =>
+                                {
+                                    nullable(&attempt.row, "run_id")?
+                                }
+                                _ => None,
+                            },
+                            None => None,
+                        }
+                    }
+                    _ => None,
+                };
+                if matches!(
+                    field,
+                    ProjectionRecordField::Attempts
+                        | ProjectionRecordField::Nodes
+                        | ProjectionRecordField::Messages
+                        | ProjectionRecordField::ProviderTurns
+                ) && !run_id.is_some_and(|id| recent.contains(&id))
+                {
+                    continue;
+                }
+            }
             if retain(
                 session,
                 field,

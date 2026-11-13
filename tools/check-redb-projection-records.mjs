@@ -351,6 +351,181 @@ function exercise({ read, apply, transaction }) {
     Assert.ok(ids(omitted.nodes).includes("node:without-run"));
     Assert.ok(!ids(omitted.subagents).includes("subagent:settled"));
     Assert.ok(ids(omitted.subagents).includes("subagent:active-terminal"));
+    const compactedThread = "thread:compacted";
+    const scoped = (type, payload) => makeEvent(type, payload, { threadId: compactedThread });
+    yield* apply(
+      scoped("thread.created", {
+        ...jsonPayloads.thread,
+        id: compactedThread,
+        lineage: {
+          parentThreadId: null,
+          relationshipToParent: null,
+          rootThreadId: compactedThread,
+        },
+      }),
+    );
+    const compactedRunCases = [
+      ["old", "completed", "2026-11-10T09:00:00.000Z"],
+      ["executed-late", "completed", "2026-11-10T10:30:00.000Z"],
+      ["explicit", "completed", "2026-11-10T09:00:00.000Z"],
+      ["resent", "completed", "2026-11-10T09:00:00.000Z"],
+      ["unfinished", "failed", null],
+      ["boundary", "completed", "2026-11-10T11:00:00.000Z"],
+      ["later", "completed", "2026-11-10T09:00:00.000Z"],
+      ["held", "queued", "2026-11-10T09:00:00.000Z"],
+      ["rolled", "rolled_back", fixedTime],
+    ];
+    for (const [index, [name, status, completedAt]] of compactedRunCases.entries()) {
+      const runId = `run:compacted:${name}`,
+        attemptId = `attempt:compacted:${name}`,
+        nodeId = `node:compacted:${name}`;
+      yield* apply(
+        scoped("run.created", {
+          ...jsonPayloads.run,
+          id: runId,
+          threadId: compactedThread,
+          ordinal: index + 1,
+          status,
+          requestedAt: "2026-11-10T10:00:00.000Z",
+          completedAt,
+          userMessageId: `message:compacted:${name}`,
+          activeAttemptId: attemptId,
+          rootNodeId: nodeId,
+        }),
+      );
+      yield* apply(
+        scoped("run-attempt.created", {
+          ...jsonPayloads.attempt,
+          id: attemptId,
+          runId,
+          rootNodeId: nodeId,
+        }),
+      );
+      yield* apply(
+        scoped("node.updated", {
+          ...jsonPayloads.node,
+          id: nodeId,
+          runId,
+          threadId: compactedThread,
+          rootNodeId: nodeId,
+        }),
+      );
+      yield* apply(
+        scoped("message.updated", {
+          ...jsonPayloads.message,
+          id: `message:compacted:${name}`,
+          runId,
+          threadId: compactedThread,
+          nodeId,
+        }),
+      );
+      yield* apply(
+        scoped("provider-turn.updated", {
+          ...jsonPayloads.providerTurn,
+          id: `turn:compacted:${name}`,
+          providerThreadId: "provider:compacted",
+          runAttemptId: attemptId,
+          ordinal: index + 1,
+          nativeTurnRef: null,
+          nodeId,
+        }),
+      );
+    }
+    const narrowedFields = ["runs", "attempts", "nodes", "messages", "providerTurns", "turnItems"];
+    const sinceLastCompaction = {
+      keepRunIds: ["run:compacted:explicit"],
+      keepMessageId: "message:compacted:resent",
+    };
+    result.beforeCompaction = yield* read(compactedThread, narrowedFields, { sinceLastCompaction });
+    Assert.equal(result.beforeCompaction.messages.length, 9);
+    for (const [name, ordinal] of [
+      ["boundary", 100],
+      ["rolled", 200],
+    ]) {
+      yield* apply(
+        scoped("turn-item.updated", {
+          ...jsonPayloads.turnItem,
+          id: `item:compacted:${name}`,
+          threadId: compactedThread,
+          runId: `run:compacted:${name}`,
+          nodeId: `node:compacted:${name}`,
+          type: "compaction",
+          status: "completed",
+          driver: null,
+          ordinal,
+        }),
+      );
+    }
+    result.afterCompaction = yield* read(compactedThread, narrowedFields, { sinceLastCompaction });
+    Assert.equal(result.afterCompaction.runs.length, 9, "Compaction does not narrow run metadata");
+    Assert.equal(
+      result.afterCompaction.turnItems.length,
+      2,
+      "Compaction does not narrow turn items",
+    );
+    for (const field of ["attempts", "nodes", "messages", "providerTurns"]) {
+      Assert.equal(result.afterCompaction[field].length, 8);
+      Assert.ok(!ids(result.afterCompaction[field]).some((id) => id.endsWith(":old")));
+    }
+    result.withoutCompactionExceptions = yield* read(compactedThread, narrowedFields, {
+      sinceLastCompaction: { keepRunIds: [], keepMessageId: "message:missing" },
+    });
+    Assert.equal(result.withoutCompactionExceptions.messages.length, 6);
+
+    for (const [name, sessionId] of [
+      ["private", null],
+      ["shared", jsonPayloads.providerThread.providerSessionId],
+    ]) {
+      const nodeId = `subagent:settled:${name}`,
+        providerId = `provider:settled:${name}`;
+      yield* apply(
+        makeEvent("provider-thread.updated", {
+          ...jsonPayloads.providerThread,
+          id: providerId,
+          appThreadId: null,
+          ownerNodeId: null,
+          providerSessionId: sessionId,
+          nativeThreadRef: null,
+        }),
+      );
+      yield* apply(
+        makeEvent("node.updated", {
+          ...jsonPayloads.node,
+          id: nodeId,
+          kind: "subagent",
+          status: "completed",
+          runId: "run:old",
+        }),
+      );
+      yield* apply(
+        makeEvent("subagent.updated", {
+          ...jsonPayloads.subagent,
+          id: nodeId,
+          runId: "run:old",
+          providerThreadId: providerId,
+          status: "completed",
+          completionDelivery: { state: "delivered", observedByRunId: null },
+        }),
+      );
+    }
+    result.omittedSubagentRecords = yield* read(
+      "thread:main",
+      ["nodes", "subagents", "providerThreads"],
+      {
+        omitSettledLeafNodes: true,
+        omitSettledSubagents: true,
+        omitSettledSubagentRecords: true,
+      },
+    );
+    Assert.ok(!ids(result.omittedSubagentRecords.nodes).includes("subagent:settled:private"));
+    Assert.ok(!ids(result.omittedSubagentRecords.subagents).includes("subagent:settled:private"));
+    Assert.ok(
+      !ids(result.omittedSubagentRecords.providerThreads).includes("provider:settled:private"),
+    );
+    Assert.ok(
+      ids(result.omittedSubagentRecords.providerThreads).includes("provider:settled:shared"),
+    );
+    Assert.ok(ids(result.omittedSubagentRecords.providerThreads).includes("provider:owned"));
     result.missing = (yield* read("missing", fields).pipe(Effect.flip))._tag;
     Assert.equal(result.missing, "ProjectionStoreThreadNotFoundError");
     result.dateOrder = [];
@@ -580,7 +755,6 @@ try {
     sourcePaths: [
       "apps/server/src/orchestration-v2/ProjectionStore.ts",
       "apps/server/src/orchestration-v2/ProjectionRecordRows.ts",
-      "apps/server/src/orchestration-v2/SqliteProjectionRecordRows.ts",
       "apps/server/src/orchestration-v2/NativeProjectionRecordRows.ts",
       "apps/server/src/orchestration-v2/NativeProjectionStore.ts",
       "apps/server/src/persistence/redb_projection_records.rs",

@@ -20,6 +20,8 @@ pub(crate) mod application_json;
 pub mod application_legacy_v1;
 #[path = "../../../apps/server/src/persistence/redb_message_rowids.rs"]
 pub mod application_message_rowids;
+#[path = "../../../apps/server/src/persistence/redb_message_search_text.rs"]
+pub(crate) mod application_message_search_text;
 #[path = "../../../apps/server/src/orchestration-v2/redb_effect_outbox.rs"]
 pub mod application_outbox;
 #[path = "../../../apps/server/src/peer/redb_peer_rows.rs"]
@@ -48,6 +50,8 @@ pub mod application_server_ownership;
 pub mod application_storage;
 #[path = "../../../apps/server/src/persistence/redb_thread_find.rs"]
 pub mod application_thread_find;
+#[path = "../../../apps/server/src/persistence/redb_turn_item_counts.rs"]
+pub(crate) mod application_turn_item_counts;
 
 pub mod outbox;
 pub mod project_service;

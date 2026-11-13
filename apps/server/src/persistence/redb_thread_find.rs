@@ -101,6 +101,11 @@ async fn payloads(session: &mut Session, sources: Vec<ThreadFindSource>) -> Resu
         }
         let raw = text(&item.row, "payload_json")?;
         let item = payload(&raw)?;
+        let run_id = nullable_json_text(item.get("runId"))?;
+        let empty_text = item
+            .get("text")
+            .filter(|value| !value.is_null())
+            .map(|value| i64::from(value.as_str() == Some("")));
         let entry_id = nullable_json_text(item.get("messageId"))?.unwrap_or(&source.item_id);
         let item_type = item
             .get("type")
@@ -109,6 +114,7 @@ async fn payloads(session: &mut Session, sources: Vec<ThreadFindSource>) -> Resu
         result.push(json!({
             "thread_id":source.thread_id, "turn_item_id":source.item_id,
             "payload_json":raw, "entry_id":entry_id, "item_type":item_type,
+            "run_id":run_id, "empty_text":empty_text,
         }));
     }
     Ok(json!(result))

@@ -99,6 +99,12 @@ pub enum Lookup {
     Pnpm {
         package_name: String,
     },
+    VitePlus {
+        package_name: String,
+    },
+    Bun {
+        package_name: String,
+    },
     Chocolatey,
 }
 
@@ -760,6 +766,12 @@ fn package(request: &Request, cursor: &mut Cursor<'_>) -> Result<Option<Capabili
     if let Some(capabilities) = mise(owner, request.definition.mise.as_ref(), context, cursor)? {
         return Ok(Some(capabilities));
     }
+    if paths
+        .iter()
+        .any(|path| normalize_path(path).starts_with("/nix/store/"))
+    {
+        return Ok(Some(manual));
+    }
     let native = request.definition.native.as_ref().map_or_else(
         || manual.clone(),
         |native| {
@@ -828,11 +840,18 @@ fn package(request: &Request, cursor: &mut Cursor<'_>) -> Result<Option<Capabili
             "context",
             None,
         );
-        if manager == "pnpm" {
-            capabilities.latest_lookup = Some(Lookup::Pnpm {
+        capabilities.latest_lookup = match manager {
+            "vp" => Some(Lookup::VitePlus {
                 package_name: package_name.to_string(),
-            });
-        }
+            }),
+            "bun" => Some(Lookup::Bun {
+                package_name: package_name.to_string(),
+            }),
+            "pnpm" => Some(Lookup::Pnpm {
+                package_name: package_name.to_string(),
+            }),
+            _ => None,
+        };
         return Ok(Some(capabilities));
     }
     let normalized = normalize_path(&context.real_command_path);

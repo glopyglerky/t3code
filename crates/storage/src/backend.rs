@@ -703,6 +703,13 @@ impl Backend {
         .map_err(worker_error)?
     }
 
+    pub(crate) fn require_exclusive(&self) -> Result<()> {
+        if !self.handles.exclusive || self.handles.read_only {
+            return Err(Error::Invalid("native schema upgrade requires an exclusive offline handle".into()));
+        }
+        self.handles.verify_identity()
+    }
+
     pub(crate) async fn begin(&self) -> Result<Transaction> {
         let handles = self.handles.clone();
         let snapshot = tokio::task::spawn_blocking(move || handles.begin_read())

@@ -12,6 +12,7 @@ pub struct ProjectionRecordWindow {
     pub defer_work: Option<bool>,
     pub anchor_item_id: Option<String>,
     pub required_run_id: Option<String>,
+    pub fork_created_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -202,24 +203,46 @@ async fn retained(
         let run = run_id.as_ref().and_then(|id| runs.get(id));
         let run_status = run.map(|run| string(run, "status")).transpose()?;
         let kind = string(row, "type")?;
-        if window.required_run_id.is_none() {
-            if run_status.as_deref() == Some("rolled_back")
-                || (kind == "user_message"
-                    && json(row)?["inputIntent"] == "queued_turn"
-                    && run_status.as_deref() == Some("cancelled"))
-            {
-                continue;
-            }
-        } else if !(run_id.is_none() && imported)
-            && !run
+        let related_attempts = run_id.as_ref().and_then(|id| attempts.get(id));
+        if window.required_run_id.is_none() && run_status.as_deref() == Some("rolled_back") {
+            continue;
+        }
+        if kind == "user_message"
+            && json(row)?["inputIntent"] == "queued_turn"
+            && (matches!(run_status.as_deref(), Some("queued" | "cancelled"))
+                || (run_status.as_deref() == Some("rolled_back")
+                    && related_attempts.is_some_and(|attempts| {
+                        attempts.iter().any(|attempt| {
+                            string(attempt, "status").ok().as_deref() == Some("cancelled")
+                        })
+                    })))
+        {
+            continue;
+        }
+        if window.required_run_id.is_some() && !(run_id.is_none() && imported) {
+            if !run
                 .map(|run| number(run, "ordinal"))
                 .transpose()?
                 .zip(required_ordinal)
                 .is_some_and(|(ordinal, required)| ordinal <= required)
-        {
-            continue;
+            {
+                continue;
+            }
+            if run_status.as_deref() == Some("rolled_back") {
+                let ended = run
+                    .map(|run| null_string(run, "completed_at"))
+                    .transpose()?
+                    .flatten()
+                    .and_then(|value| timestamp(&json!(value), 0));
+                let fork = window
+                    .fork_created_at
+                    .as_ref()
+                    .and_then(|value| timestamp(&json!(value), 0));
+                if ended.zip(fork).is_some_and(|(ended, fork)| ended < fork) {
+                    continue;
+                }
+            }
         }
-        let related_attempts = run_id.as_ref().and_then(|id| attempts.get(id));
         if kind == "run_interrupt_result" {
             let node = null_string(row, "node_id")?;
             let superseded = related_attempts.is_some_and(|attempts| {
@@ -597,7 +620,14 @@ pub(super) async fn query(
         )
     }) {
         for node in &tables[NODES] {
-            if status(node, &["pending", "starting", "running", "waiting"])? {
+            let settled_todo = string(node, "kind")? == "todo_list"
+                && null_string(node, "run_id")?.is_some()
+                && !tables[RUNS].iter().any(|run| {
+                    id(run, RUNS).ok().as_ref()
+                        == null_string(node, "run_id").ok().flatten().as_ref()
+                        && status(run, &ACTIVE_RUNS).unwrap_or(false)
+                });
+            if status(node, &["pending", "starting", "running", "waiting"])? && !settled_todo {
                 cohort_nodes.insert(id(node, NODES)?);
             }
         }
@@ -754,6 +784,14 @@ pub(super) async fn query(
     } else {
         None
     };
+    let presented_run = if window.anchor_item_id.is_none()
+        && window.required_run_id.is_none()
+        && fields.contains(&ProjectionRecordField::Runs)
+    {
+        super::super::shell::presented_run_id(session, &input.thread_id).await?
+    } else {
+        None
+    };
     for field in fields {
         let mut rows = match field {
             ProjectionRecordField::TurnItems => retained.rows.iter().map(cloned).collect(),
@@ -829,6 +867,7 @@ pub(super) async fn query(
             let keep = match field {
                 ProjectionRecordField::Runs => {
                     status(&row, &ACTIVE_RUNS)?
+                        || presented_run.as_ref() == Some(&id(&row, RUNS)?)
                         || cohort_runs.contains(&id(&row, RUNS)?)
                         || Some(id(&row, RUNS)?) == window.required_run_id
                         || latest_started.as_ref() == Some(&id(&row, RUNS)?)

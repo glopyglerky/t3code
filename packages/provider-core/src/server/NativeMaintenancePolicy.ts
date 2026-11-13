@@ -57,7 +57,10 @@ const Lookup = Schema.Union([
     name: Schema.String,
     ownershipKind: Schema.Literals(["formula", "cask"]),
   }),
-  Schema.Struct({ kind: Schema.Literal("pnpm"), packageName: Schema.String }),
+  Schema.Struct({
+    kind: Schema.Literals(["pnpm", "vite-plus", "bun"]),
+    packageName: Schema.String,
+  }),
   Schema.Struct({ kind: Schema.Literal("chocolatey") }),
 ]);
 
@@ -86,23 +89,39 @@ const Response = Schema.Struct({
     Schema.Struct({ kind: Schema.Literal("resolved"), capabilities: Schema.NullOr(Capabilities) }),
     Schema.Struct({
       kind: Schema.Literal("selected"),
-      action: Schema.NullOr(Schema.Struct({ command: Schema.String, args: Schema.Array(Schema.String) })),
+      action: Schema.NullOr(
+        Schema.Struct({ command: Schema.String, args: Schema.Array(Schema.String) }),
+      ),
     }),
     Schema.Struct({
       kind: Schema.Literal("verified"),
       mode: Schema.Literal("pre-update"),
       alreadyCurrent: Schema.Boolean,
     }),
-    ...([
-      ["unchanged", "Update command completed, but T3 Code could not verify the provider version."],
-      ["unchanged", "Update command completed, but T3 Code still detects an outdated provider version."],
-      ["succeeded", "Provider updated."],
-    ] as const).map(([status, message]) => Schema.Struct({
-      kind: Schema.Literal("verified"),
-      mode: Schema.Literal("post-update"),
-      status: Schema.Literal(status),
-      message: Schema.Literal(message),
-    })),
+    ...(
+      [
+        [
+          "unchanged",
+          "Update command completed, but T3 Code could not verify the provider version.",
+        ],
+        [
+          "unchanged",
+          "Update command completed, but T3 Code still detects an outdated provider version.",
+        ],
+        ["succeeded", "Provider updated."],
+        [
+          "succeeded",
+          "OpenCode CLI updated. Restart the configured local OpenCode server to use the new version.",
+        ],
+      ] as const
+    ).map(([status, message]) =>
+      Schema.Struct({
+        kind: Schema.Literal("verified"),
+        mode: Schema.Literal("post-update"),
+        status: Schema.Literal(status),
+        message: Schema.Literal(message),
+      }),
+    ),
   ]),
 });
 const decodeResponse = Schema.decodeUnknownEffect(Schema.fromJsonString(Response), {
@@ -155,6 +174,7 @@ export interface UpdateActionRequest {
 }
 
 export interface VerificationSnapshot {
+  readonly driver?: string;
   readonly checkedAt: string;
   readonly installed: boolean;
   readonly status: string;
@@ -406,13 +426,14 @@ export const selectUpdateAction = Effect.fn("NativeMaintenancePolicy.selectUpdat
   },
 );
 
-export const verifyUpdate = Effect.fn("NativeMaintenancePolicy.verifyUpdate")(
-  function* (executable: string, input: UpdateVerificationRequest) {
-    const { result } = yield* exchange(executable, input, () =>
-      Effect.fail(new NativeMaintenancePolicyError({ stage: "response" })),
-    );
-    if (result.kind !== "verified" || result.mode !== input.mode)
-      return yield* new NativeMaintenancePolicyError({ stage: "response" });
-    return result;
-  },
-);
+export const verifyUpdate = Effect.fn("NativeMaintenancePolicy.verifyUpdate")(function* (
+  executable: string,
+  input: UpdateVerificationRequest,
+) {
+  const { result } = yield* exchange(executable, input, () =>
+    Effect.fail(new NativeMaintenancePolicyError({ stage: "response" })),
+  );
+  if (result.kind !== "verified" || result.mode !== input.mode)
+    return yield* new NativeMaintenancePolicyError({ stage: "response" });
+  return result;
+});

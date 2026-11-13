@@ -60,7 +60,10 @@ const LegacyStoredEffect = StoredEffect.mapFields((fields) => ({
 }));
 
 export interface OutboxTransport {
-  readonly request: <A>(input: unknown, response: Schema.Decoder<A>) => Effect.Effect<A, RedbClientError>;
+  readonly request: <A>(
+    input: unknown,
+    response: Schema.Decoder<A>,
+  ) => Effect.Effect<A, RedbClientError>;
   /** True only when this operation owns its entire transaction/reconnect scope. */
   readonly canRecover: Effect.Effect<boolean>;
   /** Shared owners publish local signals only after their acknowledged root commit. */
@@ -90,6 +93,7 @@ interface ClaimDetails {
   readonly worker_id: string;
   readonly now: string;
   readonly exclude_restart_continuations: boolean;
+  readonly max_running_title_generations?: number;
 }
 
 interface ClaimRequest extends ClaimDetails {
@@ -99,10 +103,16 @@ interface ClaimRequest extends ClaimDetails {
 }
 
 function matchesClaim(row: typeof StoredEffect.Type, input: ClaimDetails): boolean {
-  return row.status === "running" && row.lease_owner === input.worker_id
-    && row.updated_at === input.now && row.available_at <= input.now && row.attempt_count >= 1
-    && row.completed_at === null && row.last_error === null
-    && !(input.exclude_restart_continuations && row.request.type === "provider-runtime.continue");
+  return (
+    row.status === "running" &&
+    row.lease_owner === input.worker_id &&
+    row.updated_at === input.now &&
+    row.available_at <= input.now &&
+    row.attempt_count >= 1 &&
+    row.completed_at === null &&
+    row.last_error === null &&
+    !(input.exclude_restart_continuations && row.request.type === "provider-runtime.continue")
+  );
 }
 
 interface ClaimStream {
@@ -112,11 +122,21 @@ interface ClaimStream {
 }
 
 /** The complete worker service is shared; its selected transport owns persistence. */
-export const makeWithTransport = Effect.fn("NativeEffectOutbox.makeWithTransport")(function* (transport: OutboxTransport) {
+export const makeWithTransport = Effect.fn("NativeEffectOutbox.makeWithTransport")(function* (
+  transport: OutboxTransport,
+) {
   const StoredEffectResponse = transport.retainLeaseExpiry ? StoredEffect : LegacyStoredEffect;
   const ClaimOutcome = Schema.Union([
-    Schema.Struct({ state: Schema.Literal("claimed"), replayed: Schema.Boolean, effect: StoredEffectResponse }),
-    Schema.Struct({ state: Schema.Literals(["empty", "retired"]), replayed: Schema.Boolean, effect: Schema.Null }),
+    Schema.Struct({
+      state: Schema.Literal("claimed"),
+      replayed: Schema.Boolean,
+      effect: StoredEffectResponse,
+    }),
+    Schema.Struct({
+      state: Schema.Literals(["empty", "retired"]),
+      replayed: Schema.Boolean,
+      effect: Schema.Null,
+    }),
   ]);
   const random = yield* SecureRandom.SecureRandom;
   const publish = transport.publish ?? ((effect: Effect.Effect<void>) => effect);
@@ -247,12 +267,14 @@ export const makeWithTransport = Effect.fn("NativeEffectOutbox.makeWithTransport
       );
       if (changed) {
         const effectId = input.effectId;
-        yield* publish(Effect.gen(function* () {
-          cancellations.delete(effectId);
-          if (operation !== "outbox_retry") yield* signalSettled([effectId]);
-          yield* notifyAvailable();
-          uncertainSettlements.delete(effectId);
-        }));
+        yield* publish(
+          Effect.gen(function* () {
+            cancellations.delete(effectId);
+            if (operation !== "outbox_retry") yield* signalSettled([effectId]);
+            yield* notifyAvailable();
+            uncertainSettlements.delete(effectId);
+          }),
+        );
       } else if (mayRecover && uncertainSettlements.has(input.effectId)) {
         yield* recoverSettlement(input.effectId);
       }
@@ -313,18 +335,20 @@ export const makeWithTransport = Effect.fn("NativeEffectOutbox.makeWithTransport
     signalCancellations: Effect.fn("NativeEffectOutbox.signalCancellations")(
       (ids: ReadonlyArray<string>) => {
         const effectIds = [...ids];
-        return publish(Effect.gen(function* () {
-          yield* Effect.forEach(
-            effectIds,
-            (id) => {
-              const signal = cancellations.get(id);
-              return signal === undefined ? Effect.void : Deferred.succeed(signal, undefined);
-            },
-            { discard: true },
-          );
-          yield* signalSettled(effectIds);
-          if (effectIds.length > 0) yield* notifyAvailable(effectIds.length);
-        }));
+        return publish(
+          Effect.gen(function* () {
+            yield* Effect.forEach(
+              effectIds,
+              (id) => {
+                const signal = cancellations.get(id);
+                return signal === undefined ? Effect.void : Deferred.succeed(signal, undefined);
+              },
+              { discard: true },
+            );
+            yield* signalSettled(effectIds);
+            if (effectIds.length > 0) yield* notifyAvailable(effectIds.length);
+          }),
+        );
       },
     ),
     awaitCancellation: Effect.fn("NativeEffectOutbox.awaitCancellation")((id) => {
@@ -355,15 +379,19 @@ export const makeWithTransport = Effect.fn("NativeEffectOutbox.makeWithTransport
     // already owns the writer and must not wait behind a standalone claimant
     // that is itself waiting for that writer to commit.
     claimNext: Effect.fnUntraced(
-      function* ({ workerId, excludeRestartContinuations = false }) {
+      function* ({ workerId, excludeRestartContinuations = false, maxRunningTitleGenerations }) {
         const mayRecover = yield* transport.canRecover;
         if (!mayRecover && uncertainSettlements.size > 0) {
-          return yield* new EffectOutbox.EffectOutboxError({ operation: "unresolved-settlement-scope" });
+          return yield* new EffectOutbox.EffectOutboxError({
+            operation: "unresolved-settlement-scope",
+          });
         }
         yield* Effect.forEach(uncertainSettlements, recoverSettlement, { discard: true });
         if (!mayRecover && transport.transactionalClaims) {
           if (streams.get(workerId)?.pending !== undefined) {
-            return yield* new EffectOutbox.EffectOutboxError({ operation: "unresolved-claim-scope" });
+            return yield* new EffectOutbox.EffectOutboxError({
+              operation: "unresolved-claim-scope",
+            });
           }
           // A shared owner may still roll back this claim. It must not advance
           // the standalone worker's durable replay stream before that commit.
@@ -372,14 +400,24 @@ export const makeWithTransport = Effect.fn("NativeEffectOutbox.makeWithTransport
             worker_id: workerId,
             now: DateTime.formatIso(yield* DateTime.now),
             exclude_restart_continuations: excludeRestartContinuations,
+            ...(maxRunningTitleGenerations === undefined
+              ? {}
+              : { max_running_title_generations: maxRunningTitleGenerations }),
           };
           // Decode semantic ownership while RedbClient still owns the request;
           // a bad acknowledgement must poison the shared scope even if caught.
-          const result = yield* request(input, Schema.NullOr(StoredEffectResponse).check(
-            Schema.makeFilter((claimed) => claimed === null || matchesClaim(claimed, input)),
-          ));
+          const result = yield* request(
+            input,
+            Schema.NullOr(StoredEffectResponse).check(
+              Schema.makeFilter((claimed) => claimed === null || matchesClaim(claimed, input)),
+            ),
+          );
           if (result === null) return Option.none();
-          yield* publish(Effect.sync(() => { cancellations.set(result.id, Deferred.makeUnsafe<void>()); }));
+          yield* publish(
+            Effect.sync(() => {
+              cancellations.set(result.id, Deferred.makeUnsafe<void>());
+            }),
+          );
           return Option.some(toEffect(result));
         }
         let stream = streams.get(workerId);
@@ -389,7 +427,8 @@ export const makeWithTransport = Effect.fn("NativeEffectOutbox.makeWithTransport
         }
         if (
           stream.pending !== undefined &&
-          stream.pending.exclude_restart_continuations !== excludeRestartContinuations
+          (stream.pending.exclude_restart_continuations !== excludeRestartContinuations ||
+            stream.pending.max_running_title_generations !== maxRunningTitleGenerations)
         ) {
           return yield* new EffectOutbox.EffectOutboxError({
             operation: "unresolved-claim-mode",
@@ -403,13 +442,16 @@ export const makeWithTransport = Effect.fn("NativeEffectOutbox.makeWithTransport
             worker_id: workerId,
             now: DateTime.formatIso(yield* DateTime.now),
             exclude_restart_continuations: excludeRestartContinuations,
+            ...(maxRunningTitleGenerations === undefined
+              ? {}
+              : { max_running_title_generations: maxRunningTitleGenerations }),
           };
         }
         const input = stream.pending;
         const attempt = request(input, ClaimOutcome);
         const result = yield* attempt.pipe(
           Effect.catchTags({
-            NativeDatabaseOutcomeUnknown: (error) => mayRecover ? attempt : Effect.fail(error),
+            NativeDatabaseOutcomeUnknown: (error) => (mayRecover ? attempt : Effect.fail(error)),
             NativeDatabaseRejected: (error) =>
               mayRecover && error.kind === "transaction_conflict" ? attempt : Effect.fail(error),
           }),
@@ -425,17 +467,27 @@ export const makeWithTransport = Effect.fn("NativeEffectOutbox.makeWithTransport
         cancellations.set(result.effect.id, Deferred.makeUnsafe<void>());
         return Option.some(toEffect(result.effect));
       },
-      (effect) => transport.canRecover.pipe(Effect.flatMap((mayRecover) =>
-        !mayRecover && transport.transactionalClaims ? effect : effect.pipe(claims.withPermit),
-      )),
+      (effect) =>
+        transport.canRecover.pipe(
+          Effect.flatMap((mayRecover) =>
+            !mayRecover && transport.transactionalClaims ? effect : effect.pipe(claims.withPermit),
+          ),
+        ),
       mapError("claim"),
     ),
-    nextClaimableAt: request(
-      { operation: "outbox_next_claimable_at" },
-      Schema.NullOr(Timestamp),
-    ).pipe(
-      Effect.map((value) => (value === null ? Option.none() : DateTime.make(value))),
-      mapError("next-claimable"),
+    nextClaimableAt: Effect.fn("EffectOutbox.EffectOutboxV2.nextClaimableAt")((input) =>
+      request(
+        {
+          operation: "outbox_next_claimable_at",
+          ...(input?.maxRunningTitleGenerations === undefined
+            ? {}
+            : { max_running_title_generations: input.maxRunningTitleGenerations }),
+        },
+        Schema.NullOr(Timestamp),
+      ).pipe(
+        Effect.map((value) => (value === null ? Option.none() : DateTime.make(value))),
+        mapError("next-claimable"),
+      ),
     ),
     // Settlement wrappers share the NativeEffectOutbox.settle span.
     succeed: Effect.fnUntraced(function* (input) {
@@ -453,10 +505,7 @@ export const makeWithTransport = Effect.fn("NativeEffectOutbox.makeWithTransport
       );
       let count = 0;
       while (true) {
-        const removed = yield* request(
-          { operation: "outbox_prune", before, limit: 500 },
-          Counter,
-        );
+        const removed = yield* request({ operation: "outbox_prune", before, limit: 500 }, Counter);
         count += removed;
         if (removed < 500) return count;
       }
@@ -469,6 +518,9 @@ export const layer = Layer.effect(
   EffectOutbox.EffectOutboxV2,
   Effect.gen(function* () {
     const database = yield* NativeDatabase.NativeDatabase;
-    return yield* makeWithTransport({ request: database.request, canRecover: Effect.succeed(true) });
+    return yield* makeWithTransport({
+      request: database.request,
+      canRecover: Effect.succeed(true),
+    });
   }),
 );

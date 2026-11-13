@@ -20,6 +20,8 @@ export interface ThreadFindPayloadRow {
   readonly payload_json: string;
   readonly entry_id: string;
   readonly item_type: OrchestrationV2TurnItem["type"];
+  readonly run_id: OrchestrationV2TurnItem["runId"];
+  readonly empty_text: number | null;
 }
 
 /** Raw records needed by find, read under the same owner as its projected index. */

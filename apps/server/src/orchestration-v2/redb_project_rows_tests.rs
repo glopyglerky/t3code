@@ -17,6 +17,7 @@ fn project(id: &str, created: &str, workspace: &str) -> ProjectRecord {
     ProjectRecord {
         project_id: id.into(),
         title: format!("Project {id} 🦊"),
+        has_custom_title: 0,
         workspace_root: workspace.into(),
         default_model_selection: Some("{ \"provider\": \"codex\", \"model\": \"test\" }".into()),
         default_thread_env_mode: Some("local".into()),
@@ -387,4 +388,53 @@ async fn project_preparation_rejects_noncanonical_cells_without_reencoding_json(
         vec![original]
     );
     app.rollback("read").await.unwrap();
+}
+
+#[tokio::test]
+async fn imported_defaults_preserve_a_custom_project_title_until_an_explicit_title_change() {
+    let fixture = TestFixture::start().await;
+    let store = fixture.initialize().await;
+    let mut app = initialize(&store).await;
+    prepare(&store).await;
+    let mut custom = project("custom", "2026-11-13T00:00:00.000Z", "/fixture");
+    custom.title = "Chosen title".into();
+    custom.has_custom_title = 1;
+    app.begin("write").await.unwrap();
+    app.projects_upsert("write", custom.clone()).await.unwrap();
+    let mut automatic = custom.clone();
+    automatic.has_custom_title = 0;
+    automatic.title = "Repository default".into();
+    automatic.auto_pull = 0;
+    app.projects_upsert("write", automatic).await.unwrap();
+    let rows = app
+        .projects_select(
+            "write",
+            ProjectSelection {
+                project_id: Some("custom".into()),
+                include_deleted: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows[0].title, "Chosen title");
+    assert_eq!(rows[0].has_custom_title, 1);
+    assert_eq!(rows[0].auto_pull, 0);
+    custom.title = "New chosen title".into();
+    app.projects_upsert("write", custom).await.unwrap();
+    app.commit("write").await.unwrap();
+    app.begin("verify").await.unwrap();
+    let rows = app
+        .projects_select(
+            "verify",
+            ProjectSelection {
+                project_id: Some("custom".into()),
+                include_deleted: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows[0].title, "New chosen title");
+    app.rollback("verify").await.unwrap();
 }

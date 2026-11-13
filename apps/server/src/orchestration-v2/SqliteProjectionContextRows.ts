@@ -28,6 +28,23 @@ export const make = Effect.gen(function* () {
       WHERE owned.owner_node_id IS NOT NULL AND owner.thread_id = ${threadId}
     `;
 
+  const shownByLiveFork = (threadId: string, runIdColumn: string) => sql`
+    EXISTS (
+      SELECT 1
+      FROM orchestration_v2_projection_threads AS fork
+      JOIN orchestration_v2_projection_runs AS fork_run
+        ON fork_run.run_id = json_extract(fork.payload_json, '$.forkedFrom.runId')
+      LEFT JOIN orchestration_v2_projection_runs AS item_run
+        ON item_run.run_id = ${sql.literal(runIdColumn)}
+      WHERE fork_run.thread_id = ${threadId}
+        AND fork.deleted_at IS NULL
+        AND json_extract(fork.payload_json, '$.forkedFrom.type') = 'run'
+        AND json_extract(fork.payload_json, '$.forkedFrom.threadId') = ${threadId}
+        AND json_extract(fork.payload_json, '$.lineage.sideChat') IS NOT 1
+        AND (${sql.literal(runIdColumn)} IS NULL OR item_run.ordinal <= fork_run.ordinal)
+    )
+  `;
+
   const select = (
     query: ProjectionContextQuery,
   ): Effect.Effect<ReadonlyArray<unknown>, SqlError.SqlError> => {
@@ -173,10 +190,11 @@ export const make = Effect.gen(function* () {
               AND (thread_id = ${threadId}
                 OR owner_node_id IN (${nodesOwningProviderThreads(threadId)})
                 OR provider_thread_id IN (SELECT provider_thread_id FROM orchestration_v2_projection_subagents WHERE thread_id = ${threadId}))`;
-      case "ready_ordinals":
+      case "preserved_ordinals":
         return sql<{ readonly ordinal: number }>`SELECT ordinal_within_scope AS ordinal
             FROM orchestration_v2_projection_checkpoints
-            WHERE thread_id = ${threadId} AND scope_id = ${scopeId} AND status = 'ready'`;
+            WHERE thread_id = ${threadId} AND scope_id = ${scopeId}
+              AND (status = 'ready' OR (status = 'missing' AND run_id IS NOT NULL))`;
       case "checkpoint":
         return sql<PayloadRow>`SELECT payload_json FROM orchestration_v2_projection_checkpoints
             WHERE thread_id = ${threadId} AND checkpoint_id = ${recordId}`;
@@ -186,7 +204,7 @@ export const make = Effect.gen(function* () {
             JOIN orchestration_v2_projection_runs AS run
               ON attempt.attempt_id = json_extract(run.payload_json, '$.activeAttemptId')
             WHERE run.thread_id = ${threadId} AND run.ordinal = ${ordinal}
-              AND attempt.thread_id = ${threadId}`;
+              AND run.status != 'rolled_back' AND attempt.thread_id = ${threadId}`;
       case "rollback_runs":
         return sql<PayloadRow>`SELECT payload_json FROM orchestration_v2_projection_runs
             WHERE thread_id = ${threadId} AND ordinal > ${ordinal}
@@ -227,15 +245,17 @@ export const make = Effect.gen(function* () {
       FROM orchestration_v2_projection_messages AS message,
         json_each(message.payload_json, '$.attachments') AS attachment
       WHERE message.thread_id = ${threadId}
+        AND NOT ${shownByLiveFork(threadId, "message.run_id")}
     `;
       case "attachment_renders":
         return sql<{ payload_json: string }>`
-      SELECT payload_json
-      FROM orchestration_v2_projection_turn_items
-      WHERE thread_id = ${threadId}
-        AND type = 'dynamic_tool'
-        AND (payload_json LIKE '%htmlRender%' OR payload_json LIKE ${`%${MCP_APP_OUTPUT_KEY}%`}
-          OR payload_json LIKE '%preview_recording_stop%')
+      SELECT item.payload_json
+      FROM orchestration_v2_projection_turn_items AS item
+      WHERE item.thread_id = ${threadId}
+        AND item.type = 'dynamic_tool'
+        AND (item.payload_json LIKE '%htmlRender%' OR item.payload_json LIKE ${`%${MCP_APP_OUTPUT_KEY}%`}
+          OR item.payload_json LIKE '%preview_recording_stop%')
+        AND NOT ${shownByLiveFork(threadId, "item.run_id")}
     `;
       case "attachment_answers":
         return sql<{ id: string }>`
@@ -245,6 +265,7 @@ export const make = Effect.gen(function* () {
         json_each(question.value) AS attachment
       WHERE item.thread_id = ${threadId}
         AND item.type = 'user_input_request'
+        AND NOT ${shownByLiveFork(threadId, "item.run_id")}
     `;
       case "attachment_guests":
         return sql<{ id: string }>`
@@ -318,6 +339,7 @@ export const make = Effect.gen(function* () {
             `,
           nodes: sql<PayloadRow>`
               SELECT node.payload_json FROM orchestration_v2_projection_nodes AS node
+                INDEXED BY orchestration_v2_projection_nodes_live_idx
               WHERE node.thread_id = ${threadId}
                 AND node.status IN ('pending', 'starting', 'running', 'waiting')
                 AND (
@@ -426,6 +448,7 @@ export const make = Effect.gen(function* () {
                   UNION
                   SELECT provider_thread_id FROM orchestration_v2_projection_subagents
                   WHERE thread_id = ${threadId} AND provider_thread_id IS NOT NULL
+                    AND origin = 'provider_native'
                 )
                 AND (
                   provider_thread.status = 'active'

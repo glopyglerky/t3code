@@ -27,7 +27,7 @@ export const projectionRecordFields = [
 
 export type ProjectionRecordWindow = Pick<
   ProjectionWindow,
-  "rowLimit" | "userTurnLimit" | "deferWork" | "anchorItemId" | "requiredRunId"
+  "rowLimit" | "userTurnLimit" | "deferWork" | "anchorItemId" | "requiredRunId" | "forkCreatedAt"
 >;
 
 export interface ProjectionRecordQuery {

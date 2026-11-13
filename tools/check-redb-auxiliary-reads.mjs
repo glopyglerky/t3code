@@ -5,10 +5,14 @@ import * as Path from "node:path";
 import * as Sqlite from "node:sqlite";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 import * as SecureRandom from "effect/crypto/SecureRandom";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 
 import * as NativeReads from "../apps/server/src/persistence/NativeAuxiliaryPersistenceReads.ts";
+import * as AuxiliaryReads from "../apps/server/src/persistence/AuxiliaryPersistenceReads.ts";
+import * as AdapterInfrastructure from "../apps/server/src/provider/ProviderOrchestrationAdapterInfrastructure.ts";
 import * as SqliteReads from "../apps/server/src/persistence/SqliteAuxiliaryPersistenceReads.ts";
 import * as NativeRuntime from "../apps/server/src/persistence/NativeProviderSessionRuntime.ts";
 import * as Runtime from "../apps/server/src/persistence/ProviderSessionRuntime.ts";
@@ -16,7 +20,9 @@ import * as EffectOutbox from "../apps/server/src/orchestration-v2/EffectOutbox.
 import * as NativeOutbox from "../apps/server/src/orchestration-v2/NativeApplicationEffectOutbox.ts";
 import { createFixture } from "./database-fixture.mjs";
 import { exportSqliteState } from "./export-sqlite-state.mjs";
-import { jsonPayloads } from "./redb-event-sink-fixtures.mjs";
+import { jsonPayloads, makeEvent } from "./redb-event-sink-fixtures.mjs";
+import * as ProjectionStore from "../apps/server/src/orchestration-v2/ProjectionStore.ts";
+import * as NativeProjectionCommit from "../apps/server/src/persistence/NativeProjectionCommitStore.ts";
 import { upstreamSource } from "./upstream-source.mjs";
 import { at } from "./check-outbox-runtime.mjs";
 import {
@@ -38,6 +44,10 @@ const now = "2026-11-10T12:00:00.000Z";
 const future = "2999-01-01T00:00:00.000Z";
 const settingsSource = upstreamSource("apps/server/src/serverSettings.ts");
 const cleanupSource = upstreamSource("apps/server/src/storageCleanup.ts");
+const keepAwakeSource = upstreamSource("apps/server/src/background/KeepAwake.ts");
+const infrastructureSource = upstreamSource(
+  "apps/server/src/provider/ProviderOrchestrationAdapterInfrastructure.ts",
+);
 const sqlFromSource = (source, needle) => {
   const index = source.indexOf(needle);
   Assert.ok(index >= 0, `Immutable SQL oracle contains ${needle}`);
@@ -47,6 +57,8 @@ const sqlFromSource = (source, needle) => {
   return source.slice(start + 1, end);
 };
 const queries = {
+  hasActiveRun: sqlFromSource(keepAwakeSource, "SELECT EXISTS ("),
+  legacySubagentThreadIds: sqlFromSource(infrastructureSource, 'SELECT thread_id AS "threadId"'),
   providerHistory: sqlFromSource(settingsSource, "FROM projection_thread_sessions"),
   legacyProjectSettings: sqlFromSource(settingsSource, "FROM projection_projects"),
   allThreadWorktrees: sqlFromSource(cleanupSource, "SELECT DISTINCT json_extract"),
@@ -63,10 +75,17 @@ const queries = {
 const sort = (rows) =>
   normalized(rows).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
 const normalizeSnapshot = (snapshot) =>
-  Object.fromEntries(Object.entries(snapshot).map(([key, value]) => [key, sort(value)]));
+  Object.fromEntries(
+    Object.entries(snapshot).map(([key, value]) => [
+      key,
+      typeof value === "boolean" ? value : sort(value),
+    ]),
+  );
 const snapshot = (rows) =>
   Effect.gen(function* () {
     return normalizeSnapshot({
+      hasActiveRun: yield* rows.hasActiveRun,
+      legacySubagentThreadIds: yield* rows.legacySubagentThreadIds,
       providerHistory: yield* rows.providerHistory,
       legacyProjectSettings: yield* rows.legacyProjectSettings,
       allThreadWorktrees: yield* rows.allThreadWorktrees,
@@ -96,6 +115,11 @@ const pending = (id) => ({
   threadId: "thread:written",
   request: { type: "terminal.cleanup" },
 });
+const loadIdAllocator = (rows) =>
+  IdAllocator.IdAllocatorV2.pipe(
+    Effect.provide(AdapterInfrastructure.layerIdAllocatorWithPersistenceReads),
+    Effect.provideService(AuxiliaryReads.AuxiliaryPersistenceReads, rows),
+  );
 
 async function services(kind, filename, use) {
   if (kind === "native")
@@ -105,12 +129,14 @@ async function services(kind, filename, use) {
       (client) =>
         Effect.gen(function* () {
           const rows = yield* NativeReads.make;
+          const projection = yield* NativeProjectionCommit.make;
           const runtime = yield* NativeRuntime.make;
           const outbox = yield* EffectOutbox.EffectOutboxV2.pipe(
             Effect.provide(NativeOutbox.layer),
           );
           return yield* use({
             rows,
+            apply: projection.apply,
             runtime,
             outbox,
             transaction: (body) => client.withTransaction(body),
@@ -133,10 +159,17 @@ async function services(kind, filename, use) {
   return withSqlite(filename, (sql) =>
     Effect.gen(function* () {
       const rows = yield* SqliteReads.make;
+      const projection = yield* ProjectionStore.ProjectionStoreV2.pipe(
+        Effect.provide(ProjectionStore.layer),
+      );
       const runtime = yield* Runtime.make;
       const outbox = yield* EffectOutbox.EffectOutboxV2.pipe(Effect.provide(EffectOutbox.layer));
       return yield* use({
         rows,
+        apply: projection.apply,
+        legacyOracle: sql
+          .unsafe(queries.legacySubagentThreadIds)
+          .pipe(Effect.map((rows) => rows.map((row) => row.threadId))),
         runtime,
         outbox,
         transaction: (body) => sql.withTransaction(body),
@@ -145,11 +178,118 @@ async function services(kind, filename, use) {
   );
 }
 
-function exercise({ rows, runtime, outbox, transaction }) {
+function exercise({ rows, apply, legacyOracle, runtime, outbox, transaction }) {
   return at(
     now,
     Effect.gen(function* () {
-      const result = { initial: yield* snapshot(rows) };
+      const result = { initial: yield* snapshot(rows), activeRuns: [] };
+      Assert.equal(result.initial.hasActiveRun, false);
+      Assert.deepEqual(result.initial.legacySubagentThreadIds, []);
+      const storedInput = { driver: "claudeAgent", nativeThreadId: "parent:legacy-task" };
+      const legacyId = IdAllocator.deriveThreadFromProviderThread(storedInput);
+      const emptyAllocator = yield* loadIdAllocator(rows);
+      Assert.match(
+        emptyAllocator.derive.subagentThread(storedInput),
+        /^thread:subagent:[0-9a-f]{16}$/,
+      );
+      const legacyIds = [
+        legacyId,
+        "ThReAd:PrOvIdEr:mixed-case",
+        "thread:provider:deleted",
+        "thread:provider:archived",
+        ...Array.from({ length: 140 }, (_, index) => `thread:provider:history:${index}`),
+      ];
+      yield* failure(
+        transaction(
+          Effect.gen(function* () {
+            for (const id of [...legacyIds, "thread:providers:unrelated", "thread:subagent:short"])
+              yield* apply(
+                makeEvent(
+                  "thread.created",
+                  {
+                    ...jsonPayloads.thread,
+                    id,
+                    projectId: "project:a",
+                    deletedAt: id === "thread:provider:deleted" ? now : null,
+                    archivedAt: id === "thread:provider:archived" ? now : null,
+                    lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: id },
+                  },
+                  { threadId: id },
+                ),
+              );
+            result.legacyThreadIds = sort(yield* rows.legacySubagentThreadIds);
+            if (legacyOracle !== undefined) result.legacyOracleIds = sort(yield* legacyOracle);
+            const allocator = yield* loadIdAllocator(rows);
+            result.legacyAllocatedId = allocator.derive.subagentThread(storedInput);
+            result.newAllocatedId = allocator.derive.subagentThread({
+              ...storedInput,
+              nativeThreadId: "parent:new-task",
+            });
+            return yield* Effect.fail("legacy-subagent state rollback");
+          }),
+        ),
+      );
+      Assert.deepEqual(result.legacyThreadIds, sort(legacyIds));
+      if (legacyOracle !== undefined) {
+        Assert.deepEqual(result.legacyThreadIds, result.legacyOracleIds);
+        delete result.legacyOracleIds;
+      }
+      Assert.equal(result.legacyAllocatedId, legacyId);
+      Assert.match(result.newAllocatedId, /^thread:subagent:[0-9a-f]{16}$/);
+      Assert.deepEqual(yield* rows.legacySubagentThreadIds, []);
+      const warnings = [];
+      const failedAllocator = yield* loadIdAllocator({
+        ...rows,
+        legacySubagentThreadIds: Effect.fail(
+          new AuxiliaryReads.AuxiliaryPersistenceReadError({
+            operation: "legacySubagentThreadIds",
+            cause: new Error("controlled legacy-id read failure"),
+          }),
+        ),
+      }).pipe(Effect.provide(Logger.layer([Logger.make(({ message }) => warnings.push(message))])));
+      Assert.match(
+        failedAllocator.derive.subagentThread(storedInput),
+        /^thread:subagent:[0-9a-f]{16}$/,
+      );
+      Assert.equal(warnings.length, 1);
+      Assert.equal(warnings[0][0], "orchestration-v2.legacy-subagent-thread-ids-unavailable");
+      for (const status of [
+        "queued",
+        "preparing",
+        "starting",
+        "running",
+        "waiting",
+        "completed",
+        "failed",
+        "interrupted",
+        "cancelled",
+        "rolled_back",
+      ]) {
+        let active;
+        yield* failure(
+          transaction(
+            Effect.gen(function* () {
+              yield* apply(
+                makeEvent(
+                  "run.updated",
+                  {
+                    ...jsonPayloads.run,
+                    id: "run:keep-awake",
+                    threadId: "thread:a",
+                    status,
+                  },
+                  { threadId: "thread:a" },
+                ),
+              );
+              active = yield* rows.hasActiveRun;
+              return yield* Effect.fail("keep-awake state rollback");
+            }),
+          ),
+        );
+        Assert.equal(active, ["preparing", "starting", "running"].includes(status), status);
+        result.activeRuns.push({ status, active });
+        Assert.equal(yield* rows.hasActiveRun, false);
+      }
       Assert.equal(result.initial.pendingThreadCleanup.length, 81);
       Assert.ok(result.initial.pendingThreadCleanup.some((row) => row.status === "failed"));
       Assert.deepEqual(yield* blockers(rows, "missing"), []);
@@ -330,9 +470,16 @@ try {
       Object.fromEntries(
         Object.entries(queries).map(([name, query]) => [
           name,
-          name === "pendingThreadCleanup"
-            ? db.prepare(query).all("thread:cleanup")
-            : db.prepare(query).all(),
+          name === "hasActiveRun"
+            ? db.prepare(query).get().active === 1
+            : name === "legacySubagentThreadIds"
+              ? db
+                  .prepare(query)
+                  .all()
+                  .map((row) => row.threadId)
+              : name === "pendingThreadCleanup"
+                ? db.prepare(query).all("thread:cleanup")
+                : db.prepare(query).all(),
         ]),
       ),
     );
@@ -374,6 +521,12 @@ try {
     "Six settings/cleanup queries match immutable upstream SQL, including provider UNION nulls/duplicates, legacy values, deleted-project joins, orphan exclusion and shared live sessions",
   );
   checks.push(
+    "Active-run existence matches all ten statuses with transactional rollback; legacy subagent IDs preserve ASCII-insensitive LIKE matching across pages, including archived/deleted rows and empty results",
+  );
+  checks.push(
+    "Actual identifier allocator retains stored legacy IDs, assigns short IDs to new subagents and preserves the upstream warning plus empty-set behavior on a controlled persistence read failure",
+  );
+  checks.push(
     "Compact history and cleanup indexes backfill across pages; history does not parse unrelated malformed runtime payloads",
   );
   checks.push(
@@ -402,14 +555,23 @@ try {
         path: "apps/server/src/storageCleanup.ts",
         sha256: hash(cleanupSource),
       },
+      { path: "apps/server/src/background/KeepAwake.ts", sha256: hash(keepAwakeSource) },
+      {
+        path: "apps/server/src/provider/ProviderOrchestrationAdapterInfrastructure.ts",
+        sha256: hash(infrastructureSource),
+      },
     ],
     sourcePaths: [
+      "apps/server/src/background/KeepAwake.ts",
       "apps/server/src/serverSettings.ts",
       "apps/server/src/storageCleanup.ts",
       "apps/server/src/persistence/AuxiliaryPersistenceReads.ts",
       "apps/server/src/persistence/SqliteAuxiliaryPersistenceReads.ts",
       "apps/server/src/persistence/NativeAuxiliaryPersistenceReads.ts",
       "apps/server/src/persistence/redb_auxiliary_reads.rs",
+      "apps/server/src/persistence/redb_projection_read_index.rs",
+      "apps/server/src/provider/ProviderOrchestrationAdapterInfrastructure.ts",
+      "apps/server/src/provider/ProviderInstanceRegistryHydration.ts",
       "apps/server/src/orchestration-v2/redb_effect_outbox.rs",
       "tools/check-redb-auxiliary-reads.mjs",
     ],

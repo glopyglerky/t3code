@@ -175,6 +175,14 @@ function exercise({ store, apply, transaction }) {
       (yield* store.getRunMessage("missing", "run:main").pipe(Effect.flip))._tag,
       "ProjectionStoreThreadNotFoundError",
     );
+    result.run = yield* store.getRun("thread:main", "run:main");
+    Assert.equal(result.run.id, "run:main");
+    Assert.equal(yield* store.getRun("thread:other", "run:main"), undefined);
+    Assert.equal(yield* store.getRun("thread:main", "run:missing"), undefined);
+    Assert.equal(
+      (yield* store.getRun("missing", "run:main").pipe(Effect.flip))._tag,
+      "ProjectionStoreThreadNotFoundError",
+    );
     Assert.equal(yield* store.canStartQueuedRun("thread:main"), false);
     Assert.equal(
       (yield* store.canStartQueuedRun("missing").pipe(Effect.flip))._tag,
@@ -330,7 +338,7 @@ try {
     "Native lookups match immutable SQLite behavior",
   );
   checks.push(
-    "All seventeen public lookup methods match immutable upstream and retained SQLite",
+    "Public lookup methods, including direct run reads, match immutable upstream and retained SQLite",
     "Read-only lookups preserve missing owner, foreign-owner record, null/undefined and archived/deleted distinctions",
     "Requested message order and duplicate elimination match the original json_each query",
     "Node identity compares exact encoded payload and interrupt pairing stays scoped to its thread",

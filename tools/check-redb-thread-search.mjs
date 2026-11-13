@@ -34,6 +34,12 @@ const oracle = await loadUpstreamModule("apps/server/src/orchestration-v2/Thread
 const projectionOracle = await loadUpstreamModule(
   "apps/server/src/orchestration-v2/ProjectionStore.ts",
 );
+const citationOracle = await loadUpstreamModule("packages/shared/src/assistantCitations.ts");
+const citationFixtures = JSON.parse(await FS.readFile(new URL("../apps/server/src/persistence/fixtures/message-search-text.json", import.meta.url), "utf8")).cases;
+for (const fixture of citationFixtures) {
+  const readable = citationOracle.module.assistantCitationsToPlainText(fixture.input);
+  Assert.equal(readable === fixture.input ? null : readable, fixture.expected, fixture.name);
+}
 const checks = [];
 const projectId = "project:search";
 const otherProjectId = "project:elsewhere";
@@ -337,6 +343,14 @@ function exercise({ search, rows, apply, transaction }) {
     }
     const update = (text, extra = {}) =>
       apply(message("message:mutable", text, extra, mutationThread));
+    for (const fixture of citationFixtures) {
+      yield* update(fixture.input);
+      const raw = yield* rows.searchRows({ match: null, substrings: [], shortSpellings: [], projectId: null, excludedThreadIds: [] });
+      const actual = raw.find((row) => row.messageId === "message:mutable");
+      Assert.equal(actual?.text, fixture.expected ?? fixture.input, `live citation search text: ${fixture.name}`);
+      output.push(normalized(yield* search.search({ query: "quoted words" })));
+      output.push(normalized(yield* search.search({ query: "review comment" })));
+    }
     yield* update("unique draft", { streaming: true });
     Assert.equal((yield* search.search({ query: "unique" })).matches.length, 0);
     yield* update("unique finished Café 𐐀𐐁𐐂");
@@ -844,6 +858,7 @@ try {
     );
   }
   checks.push(
+    "Citation URLs, dot-segment normalization, encoded IDs, invalid UTF-8, fragments, offsets and optional comments match current upstream before and after live indexing",
     "Exact trigram phrases, quote escaping, Unicode legacy case/diacritic folding, CJK scans and short non-ASCII spellings",
     "Signed source rowids, negative cutoff, stale placeholder and orphan index entries preserve candidate membership",
     "Streaming completion, edited text, unchanged-text updates, repeated token positions and attachment placeholders preserve trigger semantics",
@@ -856,13 +871,15 @@ try {
     fixture: fixtures[0],
     proofPath,
     checks,
-    oracles: [oracle.source, projectionOracle.source],
+    oracles: [oracle.source, projectionOracle.source, citationOracle.source],
     sourceHash,
     sourcePaths: [
       "apps/server/src/orchestration-v2/ThreadSearch.ts",
       "apps/server/src/orchestration-v2/ThreadSearchRows.ts",
       "apps/server/src/orchestration-v2/NativeThreadSearch.ts",
       "apps/server/src/persistence/redb_thread_search.rs",
+      "apps/server/src/persistence/redb_message_search_text.rs",
+      "apps/server/src/persistence/fixtures/message-search-text.json",
       "apps/server/src/persistence/redb_search_unicode.rs",
       "apps/server/src/persistence/redb_search_positions.rs",
       "apps/server/src/persistence/redb_projection_commit.rs",

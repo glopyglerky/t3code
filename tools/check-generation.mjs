@@ -45,7 +45,7 @@ const model = immutableModule(
 const launch = immutableModule(
   "apps/server/src/provider/codexLaunchArgs.ts",
   immutableModule("packages/shared/src/cliArgs.ts", {}, ["tokenizeCliArgs"]),
-  ["codexExecLaunchArgs", "resolveCodexLaunchArgs"],
+  ["codexExecLaunchArgs", "codexMcpListLaunchArgs", "resolveCodexLaunchArgs"],
 );
 const tier = immutableModule("apps/server/src/codexModelOptions.ts", model, [
   "getCodexServiceTierOptionValue",
@@ -344,6 +344,9 @@ for (const managed of [false, true]) {
   }
 }
 for (const launchArgs of [
+  "--oss --local-provider ollama --profile local -p named --strict-config --config x=1",
+  "--oss --local-provider=lmstudio --profile=local -p=named --config=x=1",
+  "--local-provider --profile -p --oss --strict-config --profile ''",
   "--listen 127.0.0.1 --strict-config --config x=1 --enable foo --disable bar",
   "-c x=1 --config=y=2 -c=z=3 --enable=foo --disable=bar",
   "--config --strict-config --enable --disable -c -x --config",
