@@ -6,6 +6,8 @@
     "lib": ["ESNext", "DOM", "DOM.Iterable"]
   },
   "include": [
+    "../apps/web/scripts/hybrid-client-browser-diagnostics.ts",
+    "../apps/web/scripts/hybrid-client-browser-diagnostics.test.ts",
     "../apps/web/scripts/hybrid-client-database.ts",
     "../apps/web/scripts/hybrid-client-database.test.ts",
     "../apps/web/scripts/hybrid-client-turn.ts",

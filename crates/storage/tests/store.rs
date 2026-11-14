@@ -9,6 +9,61 @@ use t3_code_ls_storage::OutboxBatch;
 use t3_code_ls_storage::outbox::{CancelUnsettled, Claim, EffectType, EnqueueEffect, Settle};
 use t3_code_ls_storage::{CommitBatch, Error, ProjectionMutation, Record, Store, request_digest};
 
+#[test]
+fn request_digest_preserves_historical_canonical_vectors() {
+    // Literal SHA-256 values of the canonical UTF-8 JSON, independent of the
+    // implementation under test. The reordered object has the same identity;
+    // arrays keep their order and the 286 vector requires leading zeroes.
+    for (input, expected) in [
+        (
+            "null",
+            "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+        ),
+        (
+            r#""""#,
+            "12ae32cb1ec02d01eda3581b127c1fee3b0dc53572ed6baf239721a03d82e126",
+        ),
+        (
+            "[]",
+            "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        ),
+        (
+            "{}",
+            "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        ),
+        (
+            r#"{"a":[null,"雪\n"],"b":true}"#,
+            "f570f1ec887c074ed87463b1043e84f8eabd1703f704e1c431fcc0329407fe03",
+        ),
+        (
+            r#"{"b":true,"a":[null,"雪\n"]}"#,
+            "f570f1ec887c074ed87463b1043e84f8eabd1703f704e1c431fcc0329407fe03",
+        ),
+        (
+            "[1,2]",
+            "49a64717d5d4cb19952e6eac2946415cf6879adacf9908e7d872332d32c6e684",
+        ),
+        (
+            "[2,1]",
+            "af1a1fc110b6094c48582b0ef83553cb7908d7a4365424eef28e76ef6c88d630",
+        ),
+        (
+            "286",
+            "00328ce57bbc14b33bd6695bc8eb32cdf2fb5f3a7d89ec14a42825e15d39df60",
+        ),
+        (
+            r#"[{"type":"integer","value":"9223372036854775807"},{"type":"blob","value":"AAEC/w=="}]"#,
+            "6c81a2a1f30e730dbd885c6f569d1e597432e560cc36269b12bc66bad0dfce1b",
+        ),
+    ] {
+        assert_eq!(
+            request_digest(&serde_json::from_str(input).unwrap()),
+            expected,
+            "{input}"
+        );
+    }
+}
+
 fn batch(command: &str, revision: u64) -> CommitBatch {
     CommitBatch {
         command_id: command.to_owned(),

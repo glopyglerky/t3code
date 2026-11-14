@@ -301,10 +301,13 @@ fn validate_batch(batch: &CommitBatch) -> Result<()> {
 pub fn request_digest(request: &Value) -> String {
     let mut hash = Sha256::new();
     hash_json(request, &mut hash);
-    hash.finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(64);
+    for byte in hash.finalize() {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
 }
 
 fn hash_json(value: &Value, hash: &mut Sha256) {

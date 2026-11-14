@@ -20,6 +20,7 @@ import * as Schema from "effect/Schema";
 import { chromium, type Browser, type Page } from "playwright";
 import { nativeExecutable } from "@t3tools/shared/nativeExecutable";
 import { inspectNativeReplay } from "./hybrid-client-database.ts";
+import { createBrowserDiagnostics } from "./hybrid-client-browser-diagnostics.ts";
 import {
   assertReplayTurnLinks,
   replayTurnIdentity,
@@ -450,6 +451,7 @@ async function exercise(implementation: Implementation): Promise<void> {
   Assert.ok(serverPort && webPort);
   Assert.notEqual(serverPort, webPort, "Server and client need distinct ports");
   Assert.ok(webPort > 5733, "The allocated web port must support the dev-runner offset");
+  const browserDiagnostics = createBrowserDiagnostics();
   const proof = {
     schemaVersion: 1,
     status: "running",
@@ -478,11 +480,13 @@ async function exercise(implementation: Implementation): Promise<void> {
     >,
     persistence: [] as Array<ReturnType<typeof inspectNativeReplay> & { checkpoint: string }>,
     browserErrors: [] as string[],
+    browserDiagnostics: browserDiagnostics.state,
     error: null as string | null,
   };
   const saveProof = () => writeJson(NodePath.join(directory, "proof.json"), proof);
   const starting = (step: string) => {
     proof.currentStep = step;
+    browserDiagnostics.phase(step);
     saveProof();
     console.log(`[${implementation}] Starting ${step}`);
   };
@@ -506,6 +510,7 @@ async function exercise(implementation: Implementation): Promise<void> {
     });
     saveProof();
   };
+  browserDiagnostics.phase(proof.currentStep);
   saveProof();
   const contextOptions = {
     viewport: { width: 1440, height: 1000 },
@@ -516,11 +521,47 @@ async function exercise(implementation: Implementation): Promise<void> {
   function observePage(current: Page): void {
     current.setDefaultTimeout(timeoutMs);
     current.setDefaultNavigationTimeout(timeoutMs);
-    current.on("pageerror", (error) =>
-      proof.browserErrors.push(redact(error.stack ?? error.message)),
-    );
+    current.on("pageerror", (error) => {
+      const browserErrorIndex = proof.browserErrors.push(redact(error.stack ?? error.message)) - 1;
+      browserDiagnostics.record({
+        kind: "page-error",
+        urlSource: "page",
+        url: current.url(),
+        browserErrorIndex,
+      });
+    });
     current.on("console", (message) => {
-      if (message.type() === "error") proof.browserErrors.push(redact(message.text()));
+      if (message.type() !== "error") return;
+      const browserErrorIndex = proof.browserErrors.push(redact(message.text())) - 1;
+      const location = message.location().url;
+      browserDiagnostics.record({
+        kind: "console-error",
+        urlSource: location ? "console-location" : "page",
+        url: location || current.url(),
+        browserErrorIndex,
+      });
+    });
+    current.on("requestfailed", (request) => {
+      browserDiagnostics.record({
+        kind: "request-failed",
+        urlSource: "request",
+        url: request.url(),
+        method: request.method(),
+        resourceType: request.resourceType(),
+        failureCode: request.failure()?.errorText,
+      });
+    });
+    current.on("response", (response) => {
+      if (response.status() < 400) return;
+      const request = response.request();
+      browserDiagnostics.record({
+        kind: "http-error",
+        urlSource: "request",
+        url: response.url(),
+        status: response.status(),
+        method: request.method(),
+        resourceType: request.resourceType(),
+      });
     });
   }
   observePage(page);
@@ -588,9 +629,11 @@ async function exercise(implementation: Implementation): Promise<void> {
     inspectPersistence("client-reload");
     completed("Reconnected after a client reload with the same completed thread");
 
-    starting("owned server restart");
+    starting("owned server restart: stopping");
     await application.stop();
+    starting("owned server restart: stopped");
     inspectPersistence("closed-before-restart", true);
+    starting("owned server restart: starting");
     application = await startApplication(
       implementation,
       stateDirectory,
@@ -599,6 +642,7 @@ async function exercise(implementation: Implementation): Promise<void> {
       NodePath.join(directory, "restart.log"),
     );
     proof.processGroups.push(application.pid);
+    starting("owned server restart: ready");
     starting("durable recovery in a fresh client");
     // Keep only the authenticated session cookies. A fresh client cannot satisfy recovery
     // from localStorage or IndexedDB, and must retrieve the old thread from the restarted server.

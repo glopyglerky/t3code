@@ -156,12 +156,13 @@ async fn legacy_command_receipts_replay_without_rewriting_the_original_result() 
     let request = update("legacy-command");
     let row = legacy_row();
     let event = title_event();
+    // Historical canonical command digest: do not derive the seed with the
+    // current encoder, which would hide a symmetrical compatibility regression.
+    const LEGACY_DIGEST: &str = "e74c372438ee32037f302896179910e4a3f35c23b49aafa4100bbcecfd4af52d";
     let original = store
         .commit(&CommitBatch {
             command_id: "legacy-command".into(),
-            request_digest: request_digest(&json!({
-                "protocol": "native-project-command-v1", "command": request.command,
-            })),
+            request_digest: LEGACY_DIGEST.into(),
             expected_revision: 0,
             events: vec![Record {
                 id: request.event_id.clone(),
@@ -179,7 +180,9 @@ async fn legacy_command_receipts_replay_without_rewriting_the_original_result() 
     store.shutdown().await.unwrap();
     let reopened = fixture.connect().await;
     let before = reopened.snapshot().await.unwrap();
-    let replay = execute_project_native(&reopened, request).await.unwrap();
+    let replay = execute_project_native(&reopened, request.clone())
+        .await
+        .unwrap();
     assert!(replay.replayed);
     assert_eq!(replay.receipt, original.receipt);
     assert!(
@@ -187,6 +190,13 @@ async fn legacy_command_receipts_replay_without_rewriting_the_original_result() 
             .get("hasCustomTitle")
             .is_none()
     );
+    assert_eq!(reopened.snapshot().await.unwrap(), before);
+    let mut conflicting = request;
+    conflicting.command["autoPull"] = json!(false);
+    assert!(matches!(
+        execute_project_native(&reopened, conflicting).await,
+        Err(Error::CommandConflict)
+    ));
     assert_eq!(reopened.snapshot().await.unwrap(), before);
     reopened.shutdown().await.unwrap();
 }

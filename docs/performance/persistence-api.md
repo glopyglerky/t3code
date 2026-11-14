@@ -40,6 +40,16 @@ as a reason to test bounded history lookup reuse. Its one fixed-order worker per
 probe condition cannot qualify performance or establish a causal speedup; the
 paired suite and every failed result above remain unchanged.
 
+The [finer a2fb attribution](measurements/2026-11-14-finer-attribution-a2fb16d.md)
+retains the approved finer observer and all its per-operation distributions.
+Its inclusive digest-formatting spans motivate a separate
+[persisted-digest compatibility experiment](../porting/2026-11-14-request-digest-hex.md),
+which has local compatibility evidence and no measured speed result yet.
+The isolated [history borrowing hosted run](measurements/2026-11-14-history-eligible-borrow.md)
+passed its functional gates and failed all eleven speed rows. Its complete
+samples, tails, host differences and failed qualification remain available;
+they do not establish a causal before/after gain from borrowing.
+
 The [compiler provenance correction](measurements/2026-11-14-compiler-provenance-erratum.md)
 explains an earlier metadata error: local diagnostics copied the expected
 compiler route and identity from configuration without a bound build manifest.

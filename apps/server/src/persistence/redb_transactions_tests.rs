@@ -443,6 +443,70 @@ async fn typed_sqlite_cells_and_compound_primary_keys_round_trip_exactly() {
 }
 
 #[tokio::test]
+async fn historical_compound_row_key_is_read_unchanged_after_reopen() {
+    // Frozen pre-change physical key, including the table's UTF-8 hex prefix.
+    // The seed must not use row_key/request_digest from the code being tested.
+    const HISTORICAL_KEY: &[u8] = b"t3-code-ls/v2/application/generation/native/row/6f64642f6e616d6520e99baa/6c81a2a1f30e730dbd885c6f569d1e597432e560cc36269b12bc66bad0dfce1b";
+    let fixture = TestFixture::start().await;
+    let store = fixture.initialize().await;
+    let mut transactions = ApplicationTransactions::new(store.clone());
+    transactions
+        .initialize(ApplicationSchema {
+            version: 1,
+            tables: vec![ApplicationTable {
+                name: "odd/name 雪".into(),
+                columns: vec!["integer".into(), "blob".into(), "payload".into()],
+                primary_key: vec!["integer".into(), "blob".into()],
+            }],
+        })
+        .await
+        .unwrap();
+    let key = vec![
+        json!({"type":"integer","value":"9223372036854775807"}),
+        json!({"type":"blob","value":"AAEC/w=="}),
+    ];
+    let row = json!({
+        "integer":key[0], "blob":key[1],
+        "payload":{"type":"real","value":"8000000000000000"},
+    })
+    .as_object()
+    .unwrap()
+    .clone();
+    let stored = encode_row(&ApplicationRow {
+        key: key.clone(),
+        row: row.clone(),
+    })
+    .unwrap();
+    let mut seed = store.db.begin().await.unwrap();
+    seed.put(HISTORICAL_KEY.to_vec(), stored.clone())
+        .await
+        .unwrap();
+    seed.commit().await.unwrap();
+    drop(transactions);
+    store.shutdown().await.unwrap();
+
+    let reopened = fixture.connect().await;
+    let mut transactions = ApplicationTransactions::new(reopened.clone());
+    transactions
+        .begin_mode("old-key", ApplicationTransactionMode::Read, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        transactions
+            .get("old-key", "odd/name 雪", &key)
+            .await
+            .unwrap(),
+        Some(row)
+    );
+    transactions.rollback("old-key").await.unwrap();
+    let mut inspect = reopened.db.begin_read_only().await.unwrap();
+    assert_eq!(inspect.get(HISTORICAL_KEY).await.unwrap(), Some(stored));
+    inspect.rollback().await.unwrap();
+    drop(transactions);
+    reopened.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn managed_tables_reject_generic_mutations_without_losing_domain_rows() {
     let fixture = TestFixture::start().await;
     let store = fixture.initialize().await;
