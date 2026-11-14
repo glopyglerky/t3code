@@ -442,6 +442,255 @@ const taskEvent = (id, type, status, ordinal, extra = {}) => {
   });
 };
 
+const wakeCases = [
+  { name: "foreign-user", author: "user", foreign: true, sameRun: true, expected: false },
+  { name: "foreign-agent", author: "agent", foreign: true, sameRun: true, expected: true },
+  { name: "foreign-other-run", author: "user", foreign: true, sameRun: false, expected: true },
+  { name: "local-user", author: "user", foreign: false, sameRun: true, expected: false },
+  {
+    name: "foreign-first-user",
+    author: "user",
+    duplicateAuthor: "agent",
+    foreign: true,
+    sameRun: true,
+    expected: false,
+  },
+  {
+    name: "foreign-first-agent",
+    author: "agent",
+    duplicateAuthor: "user",
+    foreign: true,
+    sameRun: true,
+    expected: true,
+  },
+];
+const remoteChild = (extra = {}) => ({
+  environmentId: "environment:sidebar",
+  threadId: "thread:remote-sidebar",
+  label: "Sidebar fixture",
+  ...extra,
+});
+const remoteCases = [
+  {
+    name: "completed-stopped",
+    status: "completed",
+    children: [remoteChild({ stoppedThere: true })],
+    present: true,
+    open: false,
+  },
+  {
+    name: "cancelled-stopped",
+    status: "cancelled",
+    children: [remoteChild({ stoppedThere: true })],
+    present: true,
+    open: false,
+  },
+  {
+    name: "interrupted-unstopped",
+    status: "interrupted",
+    children: [remoteChild({ stoppedThere: false })],
+    present: true,
+    open: true,
+  },
+  {
+    name: "completed-unstopped",
+    status: "completed",
+    children: [remoteChild({ stoppedThere: false })],
+    present: true,
+    open: true,
+  },
+  {
+    name: "completed-no-stop",
+    status: "completed",
+    children: [remoteChild()],
+    present: true,
+    open: false,
+  },
+  { name: "null", status: "completed", children: [null], present: false, open: false },
+  { name: "array", status: "completed", children: [[]], present: false, open: false },
+  { name: "scalar", status: "completed", children: ["remote"], present: false, open: false },
+  {
+    name: "first-object",
+    status: "completed",
+    children: [remoteChild({ stoppedThere: true }), null],
+    present: true,
+    open: false,
+  },
+  {
+    name: "first-null",
+    status: "completed",
+    children: [null, remoteChild({ stoppedThere: true })],
+    present: false,
+    open: false,
+  },
+  {
+    name: "provider-native",
+    status: "completed",
+    children: [remoteChild({ stoppedThere: true })],
+    origin: "provider_native",
+    present: false,
+    open: false,
+  },
+  {
+    name: "local-child",
+    status: "completed",
+    children: [remoteChild({ stoppedThere: true })],
+    childThreadId: "thread:local-child",
+    present: false,
+    open: false,
+  },
+];
+
+const seedSidebarPredicates = Effect.fn("checkRedbProjectionShells.seedSidebarPredicates")(
+  function* (sql) {
+    const store = yield* oracle.module.ProjectionStoreV2.pipe(Effect.provide(oracle.module.layer));
+    yield* store.apply(threadEvent("thread:wake-author"));
+    for (const test of wakeCases) {
+      const threadId = `thread:wake:${test.name}`;
+      const runId = `run:wake:${test.name}`;
+      const messageId = `message:wake:${test.name}`;
+      yield* store.apply(threadEvent(threadId));
+      yield* store.apply(
+        makeEvent(
+          "run.created",
+          {
+            ...jsonPayloads.run,
+            id: runId,
+            threadId,
+            status: "completed",
+            completedAt: fixedTime,
+            userMessageId: messageId,
+          },
+          { threadId },
+        ),
+      );
+      yield* store.apply(
+        makeEvent(
+          "message.updated",
+          {
+            ...jsonPayloads.message,
+            id: messageId,
+            threadId,
+            runId,
+            role: "user",
+            createdBy: "agent",
+            creationSource: "server",
+            streaming: false,
+            notification: {
+              source: { kind: "background_command" },
+              outcome: "updated",
+              summary: "Background work changed",
+            },
+          },
+          { threadId },
+        ),
+      );
+      const authorThreadId = test.foreign ? "thread:wake-author" : threadId;
+      const authored = {
+        ...jsonPayloads.message,
+        id: `message:author:${test.name}`,
+        threadId: authorThreadId,
+        runId: test.sameRun ? runId : "run:unrelated",
+        role: "user",
+        createdBy: test.author,
+        creationSource: "web",
+        streaming: false,
+      };
+      yield* store.apply(makeEvent("message.updated", authored, { threadId: authorThreadId }));
+      if (test.duplicateAuthor !== undefined) {
+        const raw = `${JSON.stringify(authored).slice(0, -1)},"createdBy":${JSON.stringify(test.duplicateAuthor)}}`;
+        yield* sql`UPDATE orchestration_v2_projection_messages SET payload_json = ${raw} WHERE message_id = ${authored.id}`;
+      }
+    }
+    for (const test of remoteCases) {
+      const threadId = `thread:remote:${test.name}`;
+      const id = `subagent:remote:${test.name}`;
+      yield* store.apply(threadEvent(threadId));
+      const payload = {
+        ...jsonPayloads.subagent,
+        id,
+        threadId,
+        origin: test.origin ?? "app_owned",
+        childThreadId: test.childThreadId ?? null,
+        status: test.status,
+        result: "Task already has its result",
+        completedAt: fixedTime,
+      };
+      yield* store.apply(makeEvent("subagent.updated", payload, { threadId }));
+      // These historical raw JSON shapes exercise SQL json_type, including
+      // SQLite's first duplicate-member rule, before native import/preparation.
+      const raw =
+        JSON.stringify(payload).slice(0, -1) +
+        test.children.map((child) => `,"remoteChild":${JSON.stringify(child)}`).join("") +
+        "}";
+      yield* sql`UPDATE orchestration_v2_projection_subagents SET payload_json = ${raw} WHERE subagent_id = ${id}`;
+    }
+  },
+);
+
+const exerciseSidebarPredicates = Effect.fn("checkRedbProjectionShells.exerciseSidebarPredicates")(
+  function* ({ store }) {
+    const wakes = {};
+    for (const test of wakeCases) {
+      const shell = yield* store.getThreadShell(`thread:wake:${test.name}`);
+      NodeAssert.ok(shell, "The wake fixture must produce a real public thread shell");
+      NodeAssert.equal(shell.latestRunId, `run:wake:${test.name}`);
+      wakes[test.name] = shell.latestRunBackgroundWake;
+    }
+    const active = yield* store.listActiveShellIndex();
+    const open = yield* store.getOpenRemoteDelegatedTasks;
+    const remotes = {};
+    for (const test of remoteCases) {
+      const row = active.find((entry) => entry.id === `thread:remote:${test.name}`);
+      NodeAssert.ok(row, "Every remote predicate fixture must reach the active index");
+      remotes[test.name] = {
+        present: row.hasRemoteTasks,
+        open: open.some((task) => task.taskId === `subagent:remote:${test.name}`),
+      };
+    }
+    return { wakes, remotes };
+  },
+);
+
+async function compareSidebarPredicates() {
+  const target = await createFixture();
+  try {
+    const source = NodePath.join(target.root, "sidebar.sqlite");
+    await createMigratedSqlite(source, seedSidebarPredicates);
+    const sourceHash = hash(await NodeFSP.readFile(source));
+    const archive = NodePath.join(target.root, "sidebar.ndjson");
+    exportSqliteState({ source, destination: archive });
+    nativeRequest(executable, target, "initialize", {
+      operation: "import_sqlite_application",
+      path: archive,
+    });
+    const expected = await withServices("upstream", source, exerciseSidebarPredicates, target);
+    NodeAssert.deepEqual(
+      expected,
+      {
+        wakes: Object.fromEntries(wakeCases.map((test) => [test.name, test.expected])),
+        remotes: Object.fromEntries(
+          remoteCases.map((test) => [test.name, { present: test.present, open: test.open }]),
+        ),
+      },
+      "Immutable upstream witnesses global authored-message suppression and remote presence independently of openness",
+    );
+    NodeAssert.deepEqual(
+      await withServices("sqlite", source, exerciseSidebarPredicates, target),
+      expected,
+    );
+    const actual = await withServices("redb", source, exerciseSidebarPredicates, target);
+    NodeAssert.deepEqual(
+      actual,
+      expected,
+      "Native public shells and active index must preserve global run membership and exact remoteChild presence",
+    );
+    NodeAssert.equal(hash(await NodeFSP.readFile(source)), sourceHash);
+  } finally {
+    await target.close();
+  }
+}
+
 const exercise = Effect.fn("checkRedbProjectionShells.exercise")(function* ({
   store,
   apply,
@@ -651,6 +900,10 @@ const exercise = Effect.fn("checkRedbProjectionShells.exercise")(function* ({
 });
 
 try {
+  await compareSidebarPredicates();
+  checks.push(
+    "Background wake suppression is global by run ID; active remote presence preserves first JSON members and remains distinct from open-task recovery",
+  );
   const source = NodePath.join(fixture.root, "source.sqlite");
   await createMigratedSqlite(source, (sql) =>
     Effect.gen(function* () {

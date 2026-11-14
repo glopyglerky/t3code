@@ -25,6 +25,14 @@ passed its functional gates and failed all eleven performance rows. Its changed
 oracle, runtime and host are explicit limits on comparisons across attempts.
 Their complete evidence and limits remain available.
 
+The [hosted f751 comparison](measurements/2026-11-14-hosted-f751.md) also failed all
+eleven latency rows. Its [existing functional checks](../porting/hosted-f751-functional.md)
+passed, but a later [18-case sidebar differential](../porting/sidebar-predicate-parity-f751.md)
+exposed two uncovered native SQL predicates. That correction has separate local
+evidence; no speed improvement or broad parity follows from the earlier green
+checks. Every failed measurement and the fixed qualification contract remain
+unchanged.
+
 The separate [a2fb request attribution diagnostic](measurements/2026-11-14-attribution-a2fb16d.md)
 retains a reviewed isolated observer, its actual build/runtime receipts and all
 probes-off/on distributions. It points to repeated helper reads and processing

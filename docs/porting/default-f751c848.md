@@ -160,3 +160,18 @@ references. This integration does not claim a speed improvement or change a
 failing threshold. Main remains unpromoted; further history or query
 optimization requires measured evidence and a separate review. No additional
 original source is retired here.
+
+## Completed hosted run and later predicate findings
+
+The published merge `192007cc03f418763b1f89eac26211964fc3c1c1` subsequently
+completed the [hosted functional gates](hosted-f751-functional.md), including the
+production typecheck and actual normal hook. Its
+[fixed stock/native comparison](../performance/measurements/2026-11-14-hosted-f751.md)
+failed all eleven latency rows, so qualification failed and main did not advance.
+The local outcomes above retain their original scope and status.
+
+A later [expanded sidebar differential](sidebar-predicate-parity-f751.md) found
+two SQL predicate gaps that the existing green checks had not covered. Its red
+evidence and separately built correction are retained. The successful hosted
+checks for `192007cc` are not a claim of complete parity and do not qualify that
+later source change.

@@ -506,7 +506,6 @@ fn opt_p(row: Option<&Meta>, name: &str) -> Value {
 
 async fn background_wake(
     session: &mut Session,
-    data: &ThreadData,
     run: Option<&Meta>,
 ) -> Result<bool> {
     let Some(run) = run else {
@@ -515,12 +514,54 @@ async fn background_wake(
     let Some(message_id) = run.pstr("userMessageId") else {
         return Ok(false);
     };
-    Ok(point(session, MESSAGES, message_id)
+    if !point(session, MESSAGES, message_id)
         .await?
         .is_some_and(|message| message.flag("nativeBackgroundWake"))
-        && !data.messages.iter().any(|message| {
-            message.col("run_id") == run.col("run_id") && message.pstr("createdBy") == Some("user")
-        }))
+    {
+        return Ok(false);
+    }
+    // The upstream NOT EXISTS is global by run_id, including messages whose
+    // thread differs. Read the canonical first JSON member, as json_extract
+    // does; compact metadata has already discarded duplicate-member order.
+    Ok(!read_index::any_equal(
+        session,
+        MESSAGES,
+        "run_id",
+        &text_cell(&run.id(RUNS)?),
+        |row| {
+            Ok(read_index::derived::json_identity(&text(row, "payload_json")?, &["createdBy"])?
+                == Some(text_cell("user")))
+        },
+    )
+    .await?)
+}
+
+async fn remote_presence(session: &mut Session) -> Result<BTreeSet<String>> {
+    let mut threads = BTreeSet::new();
+    for row in selected(session, SUBAGENTS, None).await? {
+        if row.col("origin") != Some("app_owned") || row.col("child_thread_id").is_some() {
+            continue;
+        }
+        // ActiveIndex asks whether a remote child exists, independently of the
+        // open-task recovery predicate. Preserve json_type's first duplicate
+        // member and its object/array/scalar/null distinction without changing
+        // prepared compact metadata or the persistent index format.
+        let fields = crate::application_json::object_fields(&full(session, SUBAGENTS, &row).await?)?;
+        let child = fields
+            .as_ref()
+            .and_then(|fields| crate::application_json::field(fields, "remoteChild"));
+        if child
+            .map(crate::application_json::object_fields)
+            .transpose()?
+            .flatten()
+            .is_some()
+        {
+            if let Some(thread) = row.col("thread_id") {
+                threads.insert(thread.to_owned());
+            }
+        }
+    }
+    Ok(threads)
 }
 
 fn outlived_before_start(run: &Meta, data: &ThreadData, silent: &BTreeSet<String>) -> Result<bool> {
@@ -662,10 +703,10 @@ async fn shell_thread(session: &mut Session, thread: &Meta) -> Result<Value> {
         .unwrap_or(Value::Null);
     Ok(
         json!({"thread_id":id,"payload_json":full(session,THREADS,thread).await?,"forked_from_run_source_thread_id":source,
-        "latest_run_id":opt_col(presented,"run_id"),"latest_run_status":opt_col(presented,"status"),"latest_run_requested_at":opt_col(presented,"requested_at"),"latest_run_started_at":opt_p(presented,"startedAt"),"latest_run_completed_at":opt_col(presented,"completed_at"),"latest_run_stop_requested":u8::from(stop_requested(&data,presented)),"latest_run_background_wake":u8::from(background_wake(session,&data,presented).await?),
+        "latest_run_id":opt_col(presented,"run_id"),"latest_run_status":opt_col(presented,"status"),"latest_run_requested_at":opt_col(presented,"requested_at"),"latest_run_started_at":opt_p(presented,"startedAt"),"latest_run_completed_at":opt_col(presented,"completed_at"),"latest_run_stop_requested":u8::from(stop_requested(&data,presented)),"latest_run_background_wake":u8::from(background_wake(session,presented).await?),
         "active_run_id":opt_col(active_run,"run_id"),"active_run_status":opt_col(active_run,"status"),"activity_run_status":opt_col(activity,"status"),"activity_run_started_at":activity_started,"last_error":last_error,
         "terminal_failure_payload_json":optional_full(session,ITEMS,failure(&data,presented.filter(|run|run.col("status")==Some("failed")))?).await?,
-        "blocking_run_id":opt_col(blocked,"run_id"),"blocking_run_requested_at":opt_col(blocked,"requested_at"),"blocking_run_started_at":opt_p(blocked,"startedAt"),"blocking_run_completed_at":opt_col(blocked,"completed_at"),"blocking_run_stop_requested":u8::from(stop_requested(&data,blocked)),"blocking_run_background_wake":u8::from(background_wake(session,&data,blocked).await?),"blocking_failure_payload_json":optional_full(session,ITEMS,failure(&data,blocked)?).await?,
+        "blocking_run_id":opt_col(blocked,"run_id"),"blocking_run_requested_at":opt_col(blocked,"requested_at"),"blocking_run_started_at":opt_p(blocked,"startedAt"),"blocking_run_completed_at":opt_col(blocked,"completed_at"),"blocking_run_stop_requested":u8::from(stop_requested(&data,blocked)),"blocking_run_background_wake":u8::from(background_wake(session,blocked).await?),"blocking_failure_payload_json":optional_full(session,ITEMS,failure(&data,blocked)?).await?,
         "pending_request_payload_json":optional_full(session,REQUESTS,data.pending_request()).await?,"pending_secret_request_payload_json":optional_full(session,ITEMS,secret).await?,"pending_link_request_payload_json":optional_full(session,ITEMS,data.pending_link()).await?,
         "latest_user_message_at":opt_col(data.latest_message(false),"updated_at"),"latest_user_authored_message_at":opt_col(data.latest_message(true),"updated_at"),"has_actionable_proposed_plan":u8::from(data.plans.iter().any(|row|row.col("kind")==Some("proposed_plan")&&row.col("status")==Some("active")))}),
     )
@@ -942,7 +983,7 @@ async fn query(session: &mut Session, input: ProjectionShellQuery) -> Result<Val
             }
             Ok(json!(result))
         }
-        ProjectionShellQuery::ActiveIndex{}=>{let remote = selected(session,SUBAGENTS,None).await?.into_iter().filter(|row|row.col("origin")==Some("app_owned")&&row.col("child_thread_id").is_none()&&row.flag("nativeOpenRemoteDelegatedTask")).filter_map(|row|row.col("thread_id").map(str::to_owned)).collect::<BTreeSet<_>>();let mut result=Vec::new();for row in shell_threads(session,None,&ShellOptions{location:Some("active".into()),..Default::default()}).await?{let data=ThreadData::load(session,&row.id(THREADS)?).await?;let lineage=row.p("lineage");let side=lineage.get("sideChat").map(|value|if let Some(value)=value.as_bool(){json!(u8::from(value))}else{value.clone()}).unwrap_or(Value::Null);result.push(json!({"thread_id":row.col("thread_id"),"project_id":row.col("project_id"),"relationship_to_parent":lineage.get("relationshipToParent"),"parent_thread_id":lineage.get("parentThreadId"),"root_thread_id":lineage.get("rootThreadId"),"side_chat":side,"settled_override":row.p("settledOverride"),"settled_at":row.p("settledAt"),"pinned_at":row.p("pinnedAt"),"snoozed_until":row.p("snoozedUntil"),"may_be_live":u8::from(data.live(&row)),"has_remote_tasks":u8::from(row.col("thread_id").is_some_and(|id|remote.contains(id)))}));}Ok(json!(result))}
+        ProjectionShellQuery::ActiveIndex{}=>{let remote = remote_presence(session).await?;let mut result=Vec::new();for row in shell_threads(session,None,&ShellOptions{location:Some("active".into()),..Default::default()}).await?{let data=ThreadData::load(session,&row.id(THREADS)?).await?;let lineage=row.p("lineage");let side=lineage.get("sideChat").map(|value|if let Some(value)=value.as_bool(){json!(u8::from(value))}else{value.clone()}).unwrap_or(Value::Null);result.push(json!({"thread_id":row.col("thread_id"),"project_id":row.col("project_id"),"relationship_to_parent":lineage.get("relationshipToParent"),"parent_thread_id":lineage.get("parentThreadId"),"root_thread_id":lineage.get("rootThreadId"),"side_chat":side,"settled_override":row.p("settledOverride"),"settled_at":row.p("settledAt"),"pinned_at":row.p("pinnedAt"),"snoozed_until":row.p("snoozedUntil"),"may_be_live":u8::from(data.live(&row)),"has_remote_tasks":u8::from(row.col("thread_id").is_some_and(|id|remote.contains(id)))}));}Ok(json!(result))}
         ProjectionShellQuery::GuestShare{share_id}=>{let rows=selected(session,THREADS,None).await?;Ok(json!(rows.into_iter().find(|row|row.pstr("nativeGuestShareId")==Some(share_id.as_str())).map(|row|json!({"thread_id":row.col("thread_id")})).into_iter().collect::<Vec<_>>()))}
         ProjectionShellQuery::OlderSettled{before,project_ids,limit}=>{let mut rows=threads(session,None,&ShellOptions{location:Some("active".into()),listed_only:Some(true),..Default::default()}).await?;rows.retain(|row|row.pstr("settledOverride")==Some("settled")&&row.pstr("settledAt").is_some_and(|time|time<before.settled_at.as_str()||(time==before.settled_at&&before.thread_id.as_deref().is_some_and(|id|row.col("thread_id").is_some_and(|thread|thread>id))))&&project_ids.as_ref().is_none_or(|ids|row.col("project_id").is_some_and(|project|ids.iter().any(|id|id==project))));rows.sort_by(|a,b|b.pstr("settledAt").cmp(&a.pstr("settledAt")).then_with(||a.col("thread_id").cmp(&b.col("thread_id"))));if limit==0{let mut counts=BTreeMap::<String,u64>::new();for row in rows{*counts.entry(text(&row.row,"project_id")?).or_default()+=1;}Ok(json!({"pageRows":[],"countRows":counts.into_iter().map(|(project,count)|json!({"project_id":project,"count":count})).collect::<Vec<_>>()}))}else{Ok(json!({"pageRows":rows.into_iter().take(if limit<0{usize::MAX}else{limit as usize}).map(|row|json!({"thread_id":row.col("thread_id")})).collect::<Vec<_>>(),"countRows":[]}))}}
     }
