@@ -149,3 +149,21 @@ The fixed eight balanced pairs, three warmups, twelve samples, eleven individual
 latency rows and confidence threshold remain as documented in the
 [comparison method](../performance/persistence-api.md). Functional success and
 an attractive individual timing cannot substitute for the complete policy.
+
+## Subsequent hosted outcome
+
+The preparation and local attempts above are historical records. Published
+candidate `02296614b7d5989475fed25e86ebb5116766645f` completed
+[run 43618303547](https://github.com/glopyglerky/t3code-ls/actions/runs/43618303547).
+All 425 Rust tests passed, including the corrected node fixture, together with
+29 component typechecks, 49 mapped scripts, production adapters, the normal
+conditional hook and the controlled Linux client/recovery flow. Every one of
+the eleven latency rows still regressed against stock, so performance and final
+qualification failed. Main remains unchanged.
+
+The [complete hosted report](../performance/measurements/2026-11-14-history-node-reuse.md)
+retains all rows, medians, p95s, worst values, raw artifacts, exact identities and
+the hook's actual conditional scope. No causal speedup is established by
+comparison with earlier runs on other hosts. The local failed and incomplete
+attempts above remain unmodified; successful hosted execution does not relabel
+their outcomes.

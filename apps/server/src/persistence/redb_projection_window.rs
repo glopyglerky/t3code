@@ -161,8 +161,8 @@ fn sort_rows(field: ProjectionRecordField, rows: Vec<IndexedRow>) -> Result<Vec<
     Ok(ordered.into_iter().map(|(_, row)| row).collect())
 }
 
-struct Eligible {
-    row: IndexedRow,
+struct Eligible<'a> {
+    row: &'a IndexedRow,
     run_status: Option<String>,
     attempt_id: Option<String>,
     attempt_status: Option<String>,
@@ -329,7 +329,7 @@ async fn retained(
             }
         }
         eligible.push(Eligible {
-            row: cloned(row),
+            row,
             run_status,
             attempt_id: matched_attempt
                 .map(|attempt| string(attempt, "attempt_id"))
@@ -446,7 +446,7 @@ async fn retained(
                 .push(number(&item.row, "ordinal")?);
         }
     }
-    let mut groups = BTreeMap::<(String, i64, Option<String>), Vec<&Eligible>>::new();
+    let mut groups = BTreeMap::<(String, i64, Option<String>), Vec<&Eligible<'_>>>::new();
     if window.defer_work == Some(true) && latest_user.is_some() {
         for item in &eligible {
             let ordinal = number(&item.row, "ordinal")?;

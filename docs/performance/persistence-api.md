@@ -25,6 +25,14 @@ passed its functional gates and failed all eleven performance rows. Its changed
 oracle, runtime and host are explicit limits on comparisons across attempts.
 Their complete evidence and limits remain available.
 
+The isolated [history node-root experiment](measurements/2026-11-14-history-node-reuse.md)
+also passed its affected functional checks and failed all eleven latency rows.
+Its complete distributions, write tails, conditional hook scope and original
+artifacts remain recorded. Different hosted CPUs prevent a causal before/after
+speed claim from comparison with the preceding 5fe run. The next prepared
+eligible-row borrowing experiment requires its own exact-source checks and
+unchanged performance gate.
+
 The separate [a2fb request attribution diagnostic](measurements/2026-11-14-attribution-a2fb16d.md)
 retains a reviewed isolated observer, its actual build/runtime receipts and all
 probes-off/on distributions. It points to repeated helper reads and processing
