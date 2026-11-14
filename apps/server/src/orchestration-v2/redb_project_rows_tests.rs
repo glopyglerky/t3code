@@ -52,6 +52,153 @@ fn ids(rows: Vec<ProjectRecord>) -> Vec<String> {
     rows.into_iter().map(|row| row.project_id).collect()
 }
 
+fn creation_event(id: &str) -> String {
+    json!({"type":"project.created","payload":{
+        "projectId":id,"title":"Created","workspaceRoot":"/fixture/reduced",
+        "defaultModelSelection":null,"scripts":[],"createdAt":"date-text","updatedAt":"date-text"
+    }})
+    .to_string()
+}
+
+#[tokio::test]
+async fn project_reduction_is_pure_and_requires_a_live_session() {
+    let fixture = TestFixture::start().await;
+    let store = fixture.initialize().await;
+    let mut app = initialize(&store).await;
+    prepare(&store).await;
+    let event = creation_event("reduced");
+    assert!(matches!(
+        app.projects_reduce_event("missing", None, &event).await,
+        Err(Error::Invalid(_))
+    ));
+    app.begin_mode("read", ApplicationTransactionMode::Read, None)
+        .await
+        .unwrap();
+    let ProjectEventReduction::Reduced { row } = app
+        .projects_reduce_event("read", None, &event)
+        .await
+        .unwrap()
+    else {
+        panic!("expected reduction")
+    };
+    assert_eq!(row["projectId"], "reduced");
+    assert_eq!(row["hasCustomTitle"], false);
+    assert_eq!(row["createdAt"], "date-text");
+    assert!(
+        app.projects_select("read", ProjectSelection::default())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let deleted = json!({"type":"project.deleted","payload":{"projectId":"missing"}}).to_string();
+    assert_eq!(
+        app.projects_reduce_event("read", None, &deleted)
+            .await
+            .unwrap(),
+        ProjectEventReduction::Reduced { row: Value::Null }
+    );
+    app.commit("read").await.unwrap();
+    assert!(matches!(
+        app.projects_reduce_event("read", None, &event).await,
+        Err(Error::Invalid(_))
+    ));
+    app.begin("cancelled").await.unwrap();
+    app.projects_reduce_event("cancelled", None, &event)
+        .await
+        .unwrap();
+    app.rollback("cancelled").await.unwrap();
+    app.begin("verify").await.unwrap();
+    assert!(
+        app.projects_select("verify", ProjectSelection::default())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    app.rollback("verify").await.unwrap();
+}
+
+#[tokio::test]
+async fn project_domain_rejection_does_not_poison_writers_or_savepoints() {
+    let fixture = TestFixture::start().await;
+    let store = fixture.initialize().await;
+    let mut app = initialize(&store).await;
+    prepare(&store).await;
+    app.begin("writer").await.unwrap();
+    let before = project("before", "a", "/before");
+    app.projects_upsert("writer", before.clone()).await.unwrap();
+    let invalid = json!({"type":"project.created","payload":{"projectId":"invalid","title":false}})
+        .to_string();
+    assert_eq!(
+        app.projects_reduce_event("writer", None, &invalid)
+            .await
+            .unwrap(),
+        ProjectEventReduction::InvalidEvent
+    );
+    assert_eq!(
+        app.projects_reduce_event("writer", Some("{"), &creation_event("invalid"))
+            .await
+            .unwrap(),
+        ProjectEventReduction::InvalidEvent
+    );
+    app.savepoint("writer", "caught").await.unwrap();
+    assert_eq!(
+        app.projects_reduce_event("writer", None, "{")
+            .await
+            .unwrap(),
+        ProjectEventReduction::InvalidEvent
+    );
+    let after = project("after", "b", "/after");
+    app.projects_upsert("writer", after.clone()).await.unwrap();
+    app.release("writer", "caught").await.unwrap();
+    app.savepoint("writer", "discarded").await.unwrap();
+    app.projects_reduce_event("writer", None, &creation_event("not-written"))
+        .await
+        .unwrap();
+    app.projects_upsert("writer", project("discarded", "c", "/discarded"))
+        .await
+        .unwrap();
+    app.rollback_to("writer", "discarded").await.unwrap();
+    app.release("writer", "discarded").await.unwrap();
+    app.commit("writer").await.unwrap();
+    app.begin_mode("verify", ApplicationTransactionMode::Read, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        app.projects_select("verify", ProjectSelection::default())
+            .await
+            .unwrap(),
+        vec![before, after]
+    );
+    app.rollback("verify").await.unwrap();
+}
+
+#[test]
+fn project_reduction_bounds_invalid_input_without_normalizing_rows() {
+    let too_large = " ".repeat(crate::MAX_BATCH_BYTES + 1);
+    assert_eq!(
+        reduce_event(None, &too_large).unwrap(),
+        ProjectEventReduction::InvalidEvent
+    );
+    let too_deep = format!("{}0{}", "[".repeat(65), "]".repeat(65));
+    assert_eq!(
+        reduce_event(None, &too_deep).unwrap(),
+        ProjectEventReduction::InvalidEvent
+    );
+    let mut event: Value = serde_json::from_str(&creation_event("reduced")).unwrap();
+    event["payload"]["defaultThreadEnvMode"] = json!("unknown-mode");
+    event["payload"]["projectIcon"] =
+        json!({"kind":"lucide","name":" folder ","color":"blue","monogramText":"AB"});
+    let ProjectEventReduction::Reduced { row } = reduce_event(None, &event.to_string()).unwrap()
+    else {
+        panic!("expected raw row")
+    };
+    // Shared application codecs, rather than this pure reducer, decide whether
+    // these values are accepted. Early normalization would change that decision.
+    assert_eq!(row["defaultThreadEnvMode"], "unknown-mode");
+    assert_eq!(row["projectIcon"]["name"], " folder ");
+    assert_eq!(row["projectIcon"]["monogramText"], "AB");
+}
+
 #[tokio::test]
 async fn project_selection_matches_ordered_filters_and_preserves_encoded_values() {
     let fixture = TestFixture::start().await;

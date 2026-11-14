@@ -102,12 +102,83 @@ export class ProjectStoreV2 extends Context.Service<
   }
 >()("t3/orchestration-v2/ProjectStore/ProjectStoreV2") {}
 
-/** Shared project defaults, event application and shell mapping for either row repository. */
-export const makeWithRows = Effect.gen(function* () {
+/** Native routes may select the retained reducer before sending an unsupported wire value. */
+type ProjectEventReducer<E = never> = (
+  event: ApplicationProjectEvent,
+  existing: ProjectRow | null,
+) => Effect.Effect<ProjectRow | null, E>;
+
+class ProjectReducerMissingRow extends Schema.TaggedError<ProjectReducerMissingRow>()(
+  "ProjectReducerMissingRow",
+  {},
+) {
+  override get message(): string {
+    return "Project reducer returned no row for an applicable event.";
+  }
+}
+
+export const reduceEvent: ProjectEventReducer = Effect.fn("ProjectStoreV2.reduceEvent")(
+  (event, row) =>
+    Effect.sync(() => {
+      if (event.type === "project.created") {
+        const payload = event.payload;
+        return {
+          projectId: payload.projectId,
+          title: payload.title,
+          hasCustomTitle: false,
+          workspaceRoot: payload.workspaceRoot,
+          defaultModelSelection: payload.defaultModelSelection,
+          defaultThreadEnvMode: payload.defaultThreadEnvMode ?? null,
+          autoPull: false,
+          faviconPath: payload.faviconPath ?? null,
+          projectIcon: payload.projectIcon ?? null,
+          scripts: payload.scripts,
+          pinnedAt: null,
+          archivedAt: null,
+          createdAt: payload.createdAt,
+          updatedAt: payload.updatedAt,
+          deletedAt: null,
+        };
+      }
+      if (row === null) return null;
+      if (event.type === "project.deleted") {
+        return {
+          ...row,
+          deletedAt: event.payload.deletedAt,
+          updatedAt: event.payload.deletedAt,
+        };
+      }
+      const payload = event.payload;
+      return {
+        ...row,
+        ...(payload.title === undefined ? {} : { title: payload.title, hasCustomTitle: true }),
+        ...(payload.workspaceRoot === undefined ? {} : { workspaceRoot: payload.workspaceRoot }),
+        ...(payload.defaultModelSelection === undefined
+          ? {}
+          : { defaultModelSelection: payload.defaultModelSelection }),
+        ...(payload.defaultThreadEnvMode === undefined
+          ? {}
+          : { defaultThreadEnvMode: payload.defaultThreadEnvMode }),
+        ...(payload.autoPull === undefined ? {} : { autoPull: payload.autoPull }),
+        ...(payload.faviconPath === undefined ? {} : { faviconPath: payload.faviconPath }),
+        ...(payload.projectIcon === undefined ? {} : { projectIcon: payload.projectIcon }),
+        ...(payload.scripts === undefined ? {} : { scripts: payload.scripts }),
+        ...(payload.pinnedAt === undefined ? {} : { pinnedAt: payload.pinnedAt }),
+        ...(payload.archivedAt === undefined ? {} : { archivedAt: payload.archivedAt }),
+        updatedAt: payload.updatedAt,
+      };
+    }),
+);
+
+/** Shared reads, codecs, shell mapping and upsert ownership for both reducers. */
+export const makeWithRowsAndReducer = Effect.fn("ProjectStoreV2.makeWithRowsAndReducer")(function* <
+  E,
+>(reduce: ProjectEventReducer<E>) {
   const rows = yield* ProjectRows;
   const encodeRow = Schema.encodeEffect(ProjectDbRow);
   const decodeRows = Schema.decodeUnknownEffect(Schema.Array(ProjectDbRow));
-  const selectRows = (input: ProjectSelection) => rows.select(input).pipe(Effect.flatMap(decodeRows));
+  const selectRows = (input: ProjectSelection) =>
+    rows.select(input).pipe(Effect.flatMap(decodeRows));
   const upsertRow = (row: ProjectRow) => encodeRow(row).pipe(Effect.flatMap(rows.upsert));
 
   const mapError =
@@ -135,57 +206,23 @@ export const makeWithRows = Effect.gen(function* () {
       mapError("findActiveByWorkspaceRoot"),
     );
 
+  const applyReduced = Effect.fnUntraced(function* (
+    event: ApplicationProjectEvent,
+    existing: ProjectRow | null,
+  ) {
+    const row = yield* reduce(event, existing);
+    if (row === null) return yield* new ProjectReducerMissingRow();
+    yield* upsertRow(row);
+  }, mapError("apply"));
+
   const apply: ProjectStoreV2["Service"]["apply"] = Effect.fn("ProjectStoreV2.apply")(
     function* (event) {
-      if (event.type === "project.created") {
-        const payload = event.payload;
-        return yield* upsertRow({
-          projectId: payload.projectId,
-          title: payload.title,
-          hasCustomTitle: false,
-          workspaceRoot: payload.workspaceRoot,
-          defaultModelSelection: payload.defaultModelSelection,
-          defaultThreadEnvMode: payload.defaultThreadEnvMode ?? null,
-          autoPull: false,
-          faviconPath: payload.faviconPath ?? null,
-          projectIcon: payload.projectIcon ?? null,
-          scripts: payload.scripts,
-          pinnedAt: null,
-          archivedAt: null,
-          createdAt: payload.createdAt,
-          updatedAt: payload.updatedAt,
-          deletedAt: null,
-        }).pipe(mapError("apply"));
-      }
+      // Creation deliberately does not decode the old row. The existing upsert
+      // owns sticky custom titles and can replace otherwise unused malformed JSON.
+      if (event.type === "project.created") return yield* applyReduced(event, null);
       const existing = yield* get(event.payload.projectId, { includeDeleted: true });
       if (Option.isNone(existing)) return;
-      const row = existing.value;
-      if (event.type === "project.deleted") {
-        return yield* upsertRow({
-          ...row,
-          deletedAt: event.payload.deletedAt,
-          updatedAt: event.payload.deletedAt,
-        }).pipe(mapError("apply"));
-      }
-      const payload = event.payload;
-      yield* upsertRow({
-        ...row,
-        ...(payload.title === undefined ? {} : { title: payload.title, hasCustomTitle: true }),
-        ...(payload.workspaceRoot === undefined ? {} : { workspaceRoot: payload.workspaceRoot }),
-        ...(payload.defaultModelSelection === undefined
-          ? {}
-          : { defaultModelSelection: payload.defaultModelSelection }),
-        ...(payload.defaultThreadEnvMode === undefined
-          ? {}
-          : { defaultThreadEnvMode: payload.defaultThreadEnvMode }),
-        ...(payload.autoPull === undefined ? {} : { autoPull: payload.autoPull }),
-        ...(payload.faviconPath === undefined ? {} : { faviconPath: payload.faviconPath }),
-        ...(payload.projectIcon === undefined ? {} : { projectIcon: payload.projectIcon }),
-        ...(payload.scripts === undefined ? {} : { scripts: payload.scripts }),
-        ...(payload.pinnedAt === undefined ? {} : { pinnedAt: payload.pinnedAt }),
-        ...(payload.archivedAt === undefined ? {} : { archivedAt: payload.archivedAt }),
-        updatedAt: payload.updatedAt,
-      }).pipe(mapError("apply"));
+      yield* applyReduced(event, existing.value);
     },
   );
 
@@ -205,8 +242,10 @@ export const makeWithRows = Effect.gen(function* () {
   });
 });
 
+/** @public Shared row repository with the one retained TypeScript reducer. */
+export const makeWithRows = makeWithRowsAndReducer(reduceEvent);
+
 /** @public The existing construction path retains the SQLite repository. */
 export const make = makeWithRows.pipe(Effect.provide(SqliteProjectRows.layer));
 
-export const layerWithRows = Layer.effect(ProjectStoreV2, makeWithRows);
 export const layer = Layer.effect(ProjectStoreV2, make);

@@ -11,9 +11,8 @@ import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import * as EventSink from "./EventSink.ts";
 import * as EventStore from "./EventStore.ts";
 import * as NativeApplicationEffectOutbox from "./NativeApplicationEffectOutbox.ts";
-import * as NativeProjectRows from "./NativeProjectRows.ts";
+import * as NativeProjectStore from "./NativeProjectStore.ts";
 import * as NativeTurnItemPositionStore from "./NativeTurnItemPositionStore.ts";
-import * as ProjectStore from "./ProjectStore.ts";
 
 const eventRows = Layer.unwrap(
   Effect.gen(function* () {
@@ -32,7 +31,7 @@ const events = EventStore.layerFromOrchestrationEventStore.pipe(
 const receipts = CommandReceiptStore.layerFromApplicationReceipts.pipe(
   Layer.provide(NativeCommandReceipts.layer),
 );
-export const projects = ProjectStore.layerWithRows.pipe(Layer.provide(NativeProjectRows.layer));
+export const projects = NativeProjectStore.layer;
 
 /** Every repository joins one RedbClient. The returned outbox also owns worker wakeups. */
 const repositories = Layer.mergeAll(

@@ -229,8 +229,9 @@ fn normalize_row(row: Value) -> WireResult<Value> {
     Ok(result)
 }
 
-/// Applies the same row changes as ProjectStoreV2.apply to a validated planner event.
-pub fn project_event(existing: &Value, event: &Value) -> WireResult<Value> {
+/// Reduces an event without running the shared application's row codecs.
+/// Creation callers may pass null and leave sticky-title handling to the row upsert.
+pub fn reduce_project_event(existing: &Value, event: &Value) -> WireResult<Value> {
     let payload = field(event, "payload")?;
     let project_id = field(payload, "projectId")?;
     project_id.as_str().ok_or(Error::InvalidRequest)?;
@@ -272,7 +273,7 @@ pub fn project_event(existing: &Value, event: &Value) -> WireResult<Value> {
                 set(&mut row, name, Value::Null)?;
             }
             validate_row(&row, project_id)?;
-            normalize_row(row)
+            Ok(row)
         }
         Some("project.meta-updated") | Some("project.deleted") => {
             if existing == &Value::Null {
@@ -310,9 +311,20 @@ pub fn project_event(existing: &Value, event: &Value) -> WireResult<Value> {
                 set(&mut row, "updatedAt", field(payload, "updatedAt")?.clone())?;
             }
             validate_row(&row, project_id)?;
-            normalize_row(row)
+            Ok(row)
         }
         _ => Err(Error::InvalidRequest),
+    }
+}
+
+/// Applies the same row changes as ProjectStoreV2.apply to a validated planner event.
+/// The standalone planner keeps its existing native normalization boundary.
+pub fn project_event(existing: &Value, event: &Value) -> WireResult<Value> {
+    let row = reduce_project_event(existing, event)?;
+    if row == Value::Null {
+        Ok(row)
+    } else {
+        normalize_row(row)
     }
 }
 
@@ -450,6 +462,69 @@ mod tests {
             }
             assert_eq!(actual, expected);
         }
+    }
+
+    #[test]
+    fn application_reduction_leaves_codec_normalization_to_the_existing_boundary() {
+        let mut input = created();
+        let Value::Object(entries) = &mut input else {
+            unreachable!()
+        };
+        let payload = &mut entries
+            .iter_mut()
+            .find(|entry| entry.0 == "payload")
+            .unwrap()
+            .1;
+        set(payload, "projectId", Value::String(" project:one ".into())).unwrap();
+        set(
+            payload,
+            "projectIcon",
+            json::parse(r#"{"kind":"lucide","name":"folder","color":"blue","monogramText":"AB"}"#)
+                .unwrap(),
+        )
+        .unwrap();
+        set(payload, "scripts", json::parse(
+            r#"[{"id":" test ","name":" Test ","command":" echo test ","icon":"test","runOnWorktreeCreate":false,"extra":true}]"#,
+        ).unwrap()).unwrap();
+        let raw = reduce_project_event(&Value::Null, &input).unwrap();
+        assert_eq!(
+            raw.get("projectId").and_then(Value::as_str),
+            Some(" project:one ")
+        );
+        assert_eq!(
+            raw.get("projectIcon")
+                .unwrap()
+                .get("kind")
+                .and_then(Value::as_str),
+            Some("lucide")
+        );
+        let script = &raw.get("scripts").unwrap().as_array().unwrap()[0];
+        assert_eq!(script.get("id").and_then(Value::as_str), Some(" test "));
+        assert_eq!(script.get("extra"), Some(&Value::Bool(true)));
+        let standalone = project_event(&Value::Null, &input).unwrap();
+        assert_eq!(
+            standalone.get("projectId").and_then(Value::as_str),
+            Some("project:one")
+        );
+        assert_eq!(
+            standalone
+                .get("projectIcon")
+                .unwrap()
+                .get("kind")
+                .and_then(Value::as_str),
+            Some("monogram")
+        );
+        assert_eq!(
+            standalone.get("scripts").unwrap().as_array().unwrap()[0].get("extra"),
+            None
+        );
+        assert_eq!(
+            project_event(
+                &Value::Null,
+                &event("project.deleted", r#"{"projectId":"missing"}"#)
+            ),
+            Ok(Value::Null)
+        );
     }
 
     #[test]

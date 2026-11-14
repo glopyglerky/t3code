@@ -29,9 +29,18 @@ The [hosted f751 comparison](measurements/2026-11-14-hosted-f751.md) also failed
 eleven latency rows. Its [existing functional checks](../porting/hosted-f751-functional.md)
 passed, but a later [18-case sidebar differential](../porting/sidebar-predicate-parity-f751.md)
 exposed two uncovered native SQL predicates. That correction has separate local
-evidence; no speed improvement or broad parity follows from the earlier green
-checks. Every failed measurement and the fixed qualification contract remain
-unchanged.
+evidence and a later [hosted outcome](measurements/2026-11-14-hosted-sidebar-predicates.md):
+all eighteen new cases and the selected functional checks passed, while every
+latency row still regressed. No speed improvement or broad parity follows from
+the earlier green checks. Every failed measurement and the fixed qualification
+contract remain unchanged.
+
+The isolated [search seek reuse experiment](measurements/2026-11-14-hosted-search-seek-reuse.md)
+also passed its selected functional checks and failed all eleven latency rows
+against its frozen 5fe oracle. Its original proposal, review, raw result and
+functional evidence remain available. Its production change is not included in
+the sidebar/project integration candidate, and separate hosted runs do not prove
+a causal speed improvement.
 
 The separate [a2fb request attribution diagnostic](measurements/2026-11-14-attribution-a2fb16d.md)
 retains a reviewed isolated observer, its actual build/runtime receipts and all
@@ -57,6 +66,13 @@ historical reports and raw archives above continue to describe the exact code
 that ran. In particular, the hosted write-tail failure remains recorded without
 a causal claim about pruning. The separate sidebar correctness/count work and
 upstream synchronization proceed with the same fixed performance requirements.
+
+The separate [partial project-event reducer integration](../porting/project-event-reducer-f751.md)
+keeps native rows and transactions while selecting a retained pure reducer for
+values outside the bounded Rust representation before any native request. Its
+extra request and selection costs are unmeasured. The documented project API
+comparison is a separate required acceptance plan, not a replacement for this
+fixed eleven-row persistence suite.
 
 ## What runs
 

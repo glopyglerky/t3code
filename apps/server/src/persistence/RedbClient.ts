@@ -44,6 +44,7 @@ const applicationOperations = {
   application_receipts_get: "read",
   application_positions_allocate: "write",
   application_projects_select: "read",
+  application_projects_reduce_event: "read",
   application_projects_upsert: "write",
   application_projections_apply: "write",
   application_projections_normalization: "read",

@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value, json};
+use t3_code_ls_core::{json as core_json, project_persistence_wire};
 
 use crate::application::{
     ApplicationCatalog, ApplicationTransactions, Session, decode_catalog, decode_row, row_prefix,
@@ -66,6 +67,49 @@ pub struct ProjectSelection {
     pub project_ids: Option<Vec<String>>,
     pub workspace_root: Option<String>,
     pub include_deleted: bool,
+}
+
+/// Domain rejection is a successful request, so a caught row-codec/reducer
+/// failure retains the caller's transaction just as the TypeScript reducer did.
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ProjectEventReduction {
+    Reduced { row: Value },
+    InvalidEvent,
+}
+
+fn reduce_event(existing_json: Option<&str>, event_json: &str) -> Result<ProjectEventReduction> {
+    let bytes = existing_json
+        .unwrap_or("")
+        .len()
+        .checked_add(event_json.len());
+    if bytes.is_none_or(|bytes| bytes > crate::MAX_BATCH_BYTES) {
+        return Ok(ProjectEventReduction::InvalidEvent);
+    }
+    let parse = |source: &str| {
+        core_json::parse_with_limits(
+            source,
+            core_json::Limits {
+                max_bytes: crate::MAX_BATCH_BYTES,
+                max_depth: 64,
+                max_values: 262_144,
+            },
+        )
+    };
+    let existing = match existing_json.map(parse).transpose() {
+        Ok(value) => value.unwrap_or(core_json::Value::Null),
+        Err(_) => return Ok(ProjectEventReduction::InvalidEvent),
+    };
+    let event = match parse(event_json) {
+        Ok(value) => value,
+        Err(_) => return Ok(ProjectEventReduction::InvalidEvent),
+    };
+    let row = match project_persistence_wire::reduce_project_event(&existing, &event) {
+        Ok(row) => row,
+        Err(_) => return Ok(ProjectEventReduction::InvalidEvent),
+    };
+    let row = serde_json::from_str(&core_json::stringify(&row)).map_err(crate::json_error)?;
+    Ok(ProjectEventReduction::Reduced { row })
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
@@ -402,6 +446,19 @@ impl Store {
 }
 
 impl ApplicationTransactions {
+    /// Pure field reduction uses the active session but never reads or writes rows.
+    /// The application still owns its shared row codecs and sticky-title upsert.
+    pub async fn projects_reduce_event(
+        &mut self,
+        id: &str,
+        existing_json: Option<&str>,
+        event_json: &str,
+    ) -> Result<ProjectEventReduction> {
+        let session = self.take(id)?;
+        let result = reduce_event(existing_json, event_json);
+        self.finish(id, session, result).await
+    }
+
     pub async fn projects_upsert(&mut self, id: &str, mut record: ProjectRecord) -> Result<()> {
         let mut session = self.take(id)?;
         let result = async {

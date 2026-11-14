@@ -202,6 +202,24 @@ function faultTransport(database, faults) {
               });
             }
             const result = yield* session.request(input, response);
+            if (
+              input.operation === "application_projects_reduce_event" &&
+              faults.pauseProjectReduction
+            ) {
+              const pause = faults.pauseProjectReduction;
+              faults.pauseProjectReduction = undefined;
+              yield* Deferred.succeed(pause.ready, undefined);
+              yield* Deferred.await(pause.release);
+            }
+            if (
+              input.operation === "application_projects_reduce_event" &&
+              faults.rejectProjectReduction
+            ) {
+              faults.rejectProjectReduction = false;
+              // The real pure request completed. Inject its documented domain
+              // rejection, not a transport failure or a replacement writer.
+              return { status: "invalid_event" };
+            }
             if (input.operation === faults.drop) {
               faults.drop = undefined;
               yield* session.discard;
@@ -330,6 +348,7 @@ const exercise = Effect.fn("checkRedbEventSink.exercise")(function* ({
   projects,
   snapshot,
   publications,
+  transaction,
 }) {
   const result = {};
   result.project = yield* sink.commitProjectCommand(projectCommand("project:create"));
@@ -391,6 +410,39 @@ const exercise = Effect.fn("checkRedbEventSink.exercise")(function* ({
     error: "changed",
   });
   NodeAssert.deepEqual(result.projectRejectedAgain, result.projectRejected);
+
+  const beforeCaught = publications.length;
+  result.caughtProjectCommands = [];
+  yield* sink.withProviderBatch(
+    Effect.gen(function* () {
+      for (const nested of [false, true]) {
+        const body = Effect.gen(function* () {
+          const failure = yield* projects
+            .apply({
+              ...projectEvent("invalid:direct"),
+              sequence: 0,
+              type: "project.meta-updated",
+              payload: { projectId: "project:main", autoPull: 2, updatedAt: fixedTime },
+            })
+            .pipe(Effect.flip);
+          NodeAssert.equal(failure._tag, "ProjectStoreV2Error");
+          NodeAssert.equal(failure.operation, "apply");
+          const committed = yield* sink.commitProjectCommand(
+            projectCommand(`project:after-caught:${nested}`, `project:after-caught:${nested}`),
+          );
+          NodeAssert.equal(committed.committed, true);
+          result.caughtProjectCommands.push(committed);
+          NodeAssert.equal(
+            publications.length,
+            beforeCaught,
+            "Caught domain failures must retain the outer transaction and defer publication",
+          );
+        });
+        yield* nested ? transaction(body) : body;
+      }
+    }),
+  );
+  NodeAssert.equal(publications.length, beforeCaught + 2);
 
   const runGuard = {
     threadId: "thread:main",
@@ -1014,6 +1066,89 @@ const nativeOwnerCases = Effect.fn("checkRedbEventSink.nativeOwnerCases")(functi
 function nativeFaultCases(faults) {
   return ({ sink, client, snapshot, publications, receipts, projects, outbox }) =>
     Effect.gen(function* () {
+      const beforeRejected = yield* snapshot;
+      const publishedBeforeRejected = publications.length;
+      faults.frames.length = 0;
+      faults.rejectProjectReduction = true;
+      const rejected = projectCommand("reducer:rejected", "project:reducer-rejected");
+      yield* expectFailure(sink.commitProjectCommand(rejected));
+      NodeAssert.equal(faults.rejectProjectReduction, false);
+      NodeAssert.equal(
+        faults.frames.filter((frame) => frame.operation === "application_projects_reduce_event")
+          .length,
+        1,
+      );
+      NodeAssert.equal(
+        faults.frames.filter((frame) => frame.operation === "application_events_append").length,
+        1,
+      );
+      NodeAssert.equal(
+        faults.frames.filter((frame) => frame.operation === "application_projects_upsert").length,
+        0,
+      );
+      NodeAssert.deepEqual(
+        yield* snapshot,
+        beforeRejected,
+        "A reducer failure after append must roll back the event, receipt and project together",
+      );
+      NodeAssert.equal(publications.length, publishedBeforeRejected);
+      NodeAssert.equal((yield* sink.commitProjectCommand(rejected)).committed, true);
+      for (const nested of [false, true]) {
+        const published = publications.length;
+        yield* client.withTransaction(
+          Effect.gen(function* () {
+            const caught = Effect.gen(function* () {
+              faults.rejectProjectReduction = true;
+              const failed = yield* projects
+                .apply({
+                  ...projectEvent(`reducer:caught:${nested}`, `project:reducer-caught:${nested}`),
+                  sequence: 0,
+                })
+                .pipe(Effect.flip);
+              NodeAssert.equal(failed._tag, "ProjectStoreV2Error");
+              NodeAssert.equal(failed.operation, "apply");
+              NodeAssert.equal(faults.rejectProjectReduction, false);
+              const committed = yield* sink.commitProjectCommand(
+                projectCommand(
+                  `reducer:after-caught:${nested}`,
+                  `project:reducer-after-caught:${nested}`,
+                ),
+              );
+              NodeAssert.equal(committed.committed, true);
+              NodeAssert.equal(publications.length, published);
+            });
+            yield* nested ? client.withTransaction(caught) : caught;
+          }),
+        );
+        NodeAssert.equal(publications.length, published + 1);
+        NodeAssert.ok(Option.isNone(yield* projects.get(`project:reducer-caught:${nested}`)));
+        NodeAssert.ok(Option.isSome(yield* projects.get(`project:reducer-after-caught:${nested}`)));
+      }
+      const beforeInterrupted = yield* snapshot;
+      const publishedBeforeInterrupted = publications.length;
+      const ready = yield* Deferred.make();
+      const release = yield* Deferred.make();
+      faults.pauseProjectReduction = { ready, release };
+      faults.frames.length = 0;
+      const interrupted = yield* Effect.forkScoped(
+        sink.commitProjectCommand(
+          projectCommand("reducer:interrupted", "project:reducer-interrupted"),
+        ),
+      );
+      yield* Deferred.await(ready);
+      yield* Fiber.interrupt(interrupted);
+      NodeAssert.equal(faults.pauseProjectReduction, undefined);
+      NodeAssert.equal(
+        faults.frames.filter((frame) => frame.operation === "application_projects_reduce_event")
+          .length,
+        1,
+      );
+      NodeAssert.equal(
+        faults.frames.filter((frame) => frame.operation === "application_projects_upsert").length,
+        0,
+      );
+      NodeAssert.deepEqual(yield* snapshot, beforeInterrupted);
+      NodeAssert.equal(publications.length, publishedBeforeInterrupted);
       let callbackCount = 0;
       faults.busyBegins = 2;
       yield* sink.withProviderBatch(
@@ -1069,6 +1204,8 @@ function nativeFaultCases(faults) {
       );
       NodeAssert.equal(publications.length, beforeUnknown);
       for (const operation of [
+        "application_projects_reduce_event",
+        "application_projects_upsert",
         "application_projections_apply",
         "application_release",
         "application_rollback_to",
@@ -1077,15 +1214,20 @@ function nativeFaultCases(faults) {
         const published = publications.length;
         faults.frames.length = 0;
         faults.drop = operation;
-        const write = sink.commitCommand(
-          command(
-            `fault:${operation}`,
-            [detached(`fault:${operation}`)],
-            [pending(`fault:${operation}`)],
-          ),
-        );
+        const write = operation.startsWith("application_projects_")
+          ? sink.commitProjectCommand(
+              projectCommand(`fault:${operation}`, `project:fault:${operation}`),
+            )
+          : sink.commitCommand(
+              command(
+                `fault:${operation}`,
+                [detached(`fault:${operation}`)],
+                [pending(`fault:${operation}`)],
+              ),
+            );
         const body =
-          operation === "application_projections_apply"
+          operation === "application_projections_apply" ||
+          operation.startsWith("application_projects_")
             ? sink.withProviderBatch(write)
             : client.withTransaction(
                 (operation === "application_release"
@@ -1151,6 +1293,7 @@ try {
     "Turn-position normalization and shared pull-request normalization agree with upstream projections",
     "A failed provider batch rolls back events, command receipts, projects, positions, projections and outbox together",
     "Nested provider batches publish in sequence only after durable root commit, including outbox cancellation signals",
+    "Caught direct project-reducer failures preserve outer and nested writers; later project commands publish only after the same outer commit",
     "The actual provider snapshot coordinator, live stream, filtered replay, command replay and high-water reads retain ordering",
   );
   await withServices("redb", source, ({ snapshot, sink }) =>
@@ -1173,10 +1316,18 @@ try {
   checks.push(
     "Native ambient transactions defer publications to the root owner and discard only callbacks belonging to rolled-back savepoints",
   );
-  const faults = { frames: [], drop: undefined, busyBegins: 0 };
+  const faults = {
+    frames: [],
+    drop: undefined,
+    busyBegins: 0,
+    rejectProjectReduction: false,
+    pauseProjectReduction: undefined,
+  };
   await withServices("redb", source, nativeFaultCases(faults), fixture, faults);
   checks.push(
     "Known writer-busy responses retry before normalization; lost real commit, apply, savepoint-release and rollback acknowledgements never replay or publish uncertain work",
+    "Project reducer rejection after event append rolls back the complete commit; lost reducer/upsert replies never fall back, replay, or publish uncommitted project state",
+    "Cancellation after the real pure reduction and before upsert discards the event and receipt without publication or a detached writer",
   );
   NodeAssert.equal(hash(await NodeFSP.readFile(source)), sourceHash);
   await finishProof({
@@ -1189,6 +1340,10 @@ try {
     sourcePaths: [
       "apps/server/src/orchestration-v2/EventSink.ts",
       "apps/server/src/orchestration-v2/NativeEventSink.ts",
+      "apps/server/src/orchestration-v2/NativeProjectStore.ts",
+      "apps/server/src/orchestration-v2/ProjectStore.ts",
+      "apps/server/src/orchestration-v2/redb_project_rows.rs",
+      "crates/core/src/project_persistence_wire.rs",
       "apps/server/src/orchestration-v2/ProjectionCommitStore.ts",
       "apps/server/src/persistence/SqliteProjectionCommitStore.ts",
       "apps/server/src/persistence/NativeProjectionCommitStore.ts",

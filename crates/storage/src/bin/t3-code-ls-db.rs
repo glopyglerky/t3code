@@ -264,6 +264,11 @@ enum Request {
         transaction_id: String,
         row: ProjectRecord,
     },
+    ApplicationProjectsReduceEvent {
+        transaction_id: String,
+        existing_json: Option<String>,
+        event_json: String,
+    },
     ApplicationViewedFilesPrepare {},
     ApplicationGuideGet {
         transaction_id: String,
@@ -424,7 +429,9 @@ enum Request {
         #[serde(default)]
         max_running_title_generations: Option<f64>,
     },
-    OutboxNextClaimableAt { max_running_title_generations: Option<f64> },
+    OutboxNextClaimableAt {
+        max_running_title_generations: Option<f64>,
+    },
     OutboxSucceed {
         effect_id: String,
         worker_id: String,
@@ -564,6 +571,7 @@ impl Request {
             | Self::ApplicationPositionsAllocate { .. }
             | Self::ApplicationProjectsSelect { .. }
             | Self::ApplicationProjectsUpsert { .. }
+            | Self::ApplicationProjectsReduceEvent { .. }
             | Self::ApplicationGuideGet { .. }
             | Self::ApplicationGuidePut { .. }
             | Self::ApplicationViewedFilesList { .. }
@@ -921,6 +929,15 @@ async fn evaluate(
             transactions.projects_upsert(&transaction_id, row).await?;
             Ok(json!({"written":true}))
         }
+        Request::ApplicationProjectsReduceEvent {
+            transaction_id,
+            existing_json,
+            event_json,
+        } => serde_json::to_value(
+            transactions
+                .projects_reduce_event(&transaction_id, existing_json.as_deref(), &event_json)
+                .await?,
+        ),
         Request::ApplicationViewedFilesPrepare {} => {
             serde_json::to_value(store.prepare_application_viewed_files().await?)
         }
@@ -1198,7 +1215,10 @@ async fn evaluate(
                 )
                 .await?,
         ),
-        Request::ApplicationOutboxNextClaimableAt { transaction_id, max_running_title_generations } => serde_json::to_value(
+        Request::ApplicationOutboxNextClaimableAt {
+            transaction_id,
+            max_running_title_generations,
+        } => serde_json::to_value(
             transactions
                 .outbox_next_claimable_at_limited(&transaction_id, max_running_title_generations)
                 .await?,
@@ -1331,9 +1351,13 @@ async fn evaluate(
                 })
                 .await?,
         ),
-        Request::OutboxNextClaimableAt { max_running_title_generations } => {
-            serde_json::to_value(store.outbox_next_claimable_at_limited(max_running_title_generations).await?)
-        }
+        Request::OutboxNextClaimableAt {
+            max_running_title_generations,
+        } => serde_json::to_value(
+            store
+                .outbox_next_claimable_at_limited(max_running_title_generations)
+                .await?,
+        ),
         Request::OutboxSucceed {
             effect_id,
             worker_id,

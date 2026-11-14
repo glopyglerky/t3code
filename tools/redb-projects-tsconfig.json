@@ -8,6 +8,7 @@
     "../apps/server/src/orchestration-v2/ProjectStore.ts",
     "../apps/server/src/orchestration-v2/ProjectRows.ts",
     "../apps/server/src/orchestration-v2/SqliteProjectRows.ts",
-    "../apps/server/src/orchestration-v2/NativeProjectRows.ts"
+    "../apps/server/src/orchestration-v2/NativeProjectRows.ts",
+    "../apps/server/src/orchestration-v2/NativeProjectStore.ts"
   ]
 }

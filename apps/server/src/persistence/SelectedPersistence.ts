@@ -7,7 +7,7 @@ import * as NativeLinkedThreads from "../pullRequest/NativeLinkedThreads.ts";
 import * as LinkedPullRequestThreads from "../pullRequest/linkedThreads.ts";
 import * as NativeProjectionStore from "../orchestration-v2/NativeProjectionStore.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
-import * as NativeProjectRows from "../orchestration-v2/NativeProjectRows.ts";
+import * as NativeProjectStore from "../orchestration-v2/NativeProjectStore.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as NativeThreadSearch from "../orchestration-v2/NativeThreadSearch.ts";
 import * as ThreadSearch from "../orchestration-v2/ThreadSearch.ts";
@@ -64,10 +64,7 @@ export const projections = select(
   native(NativeProjectionStore.layer),
   sqlite(ProjectionStore.layer),
 );
-export const projects = select(
-  native(ProjectStore.layerWithRows.pipe(Layer.provide(NativeProjectRows.layer))),
-  sqlite(ProjectStore.layer),
-);
+export const projects = select(native(NativeProjectStore.layer), sqlite(ProjectStore.layer));
 export const search = select(native(NativeThreadSearch.layer), sqlite(ThreadSearch.layer));
 export const settings = select(
   native(
