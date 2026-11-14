@@ -799,6 +799,66 @@ async fn next_document(
     .max())
 }
 
+// A completed three-source seek proves an interval in one immutable snapshot.
+// Keep only scalar results, indexed beside the query's existing sorted terms.
+const SEEK_PROOF_TERM_LIMIT: usize = 256;
+const SEEK_PROOF_BYTE_LIMIT: usize = 8192;
+
+#[derive(Clone, Copy, Default)]
+enum SeekProof {
+    #[default]
+    Unknown,
+    Searched {
+        maximum: i64,
+        found: Option<i64>,
+    },
+}
+
+impl SeekProof {
+    fn reuse(self, maximum: i64) -> Option<Option<i64>> {
+        match self {
+            Self::Searched {
+                maximum: searched,
+                found,
+            } if maximum <= searched && found.is_none_or(|rowid| rowid <= maximum) => Some(found),
+            _ => None,
+        }
+    }
+}
+
+fn seek_proofs(immutable_read: bool, terms: usize) -> Vec<SeekProof> {
+    if immutable_read
+        && terms <= SEEK_PROOF_TERM_LIMIT
+        && terms
+            .checked_mul(std::mem::size_of::<SeekProof>())
+            .is_some_and(|bytes| bytes <= SEEK_PROOF_BYTE_LIMIT)
+    {
+        vec![SeekProof::Unknown; terms]
+    } else {
+        // Writers must retain all range observations. Large queries keep the
+        // existing algorithm rather than acquiring a new query-size limit.
+        Vec::new()
+    }
+}
+
+async fn next_document_reusing(
+    tx: &mut Transaction,
+    catalog: &ApplicationCatalog,
+    term: &str,
+    maximum: i64,
+    proof: &mut SeekProof,
+) -> Result<Option<i64>> {
+    if let Some(found) = proof.reuse(maximum) {
+        tx.ensure_active()?;
+        return Ok(found);
+    }
+    // Do not install partial results or skip a non-winning source: legacy,
+    // direct and bucket checks can each expose corruption before success.
+    let found = next_document(tx, catalog, term, maximum).await?;
+    *proof = SeekProof::Searched { maximum, found };
+    Ok(found)
+}
+
 async fn positions(
     tx: &mut Transaction,
     catalog: &ApplicationCatalog,
@@ -896,18 +956,24 @@ async fn matching_documents(
     tx: &mut Transaction,
     catalog: &ApplicationCatalog,
     input: &str,
+    immutable_read: bool,
 ) -> Result<Vec<i64>> {
     let phrases = phrases(input)?;
     let terms: BTreeSet<&str> = phrases.iter().flatten().map(String::as_str).collect();
     if terms.is_empty() {
         return Ok(Vec::new());
     }
+    let mut proofs = seek_proofs(immutable_read, terms.len());
     let mut maximum = i64::MAX;
     let mut result = Vec::new();
     loop {
         let mut aligned = true;
-        for term in &terms {
-            let Some(found) = next_document(tx, catalog, term, maximum).await? else {
+        for (index, term) in terms.iter().enumerate() {
+            let found = match proofs.get_mut(index) {
+                Some(proof) => next_document_reusing(tx, catalog, term, maximum, proof).await?,
+                None => next_document(tx, catalog, term, maximum).await?,
+            };
+            let Some(found) = found else {
                 return Ok(result);
             };
             if found != maximum {
@@ -1198,8 +1264,13 @@ async fn message_hits(
         if !has_index(&mut session.transaction, &session.catalog).await? {
             return Err(invalid("lexical index is unavailable"));
         }
-        let candidates =
-            matching_documents(&mut session.transaction, &session.catalog, &input).await?;
+        let candidates = matching_documents(
+            &mut session.transaction,
+            &session.catalog,
+            &input,
+            session.read_snapshot_validation.is_some(),
+        )
+        .await?;
         let cutoff = if candidates.len() == CANDIDATE_LIMIT {
             *candidates.last().unwrap()
         } else {
@@ -1553,5 +1624,399 @@ mod tests {
         );
         assert!(validate_positions(&vec![[0, 2], [3, 4]]).is_err());
         assert!(validate_positions(&vec![[4, 3]]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod seek_reuse_tests {
+    use super::*;
+    use crate::application::ApplicationTransactionMode;
+    use crate::test_support::TestFixture;
+
+    async fn fixture() -> (TestFixture, Store, ApplicationCatalog) {
+        let fixture = TestFixture::start().await;
+        let store = fixture.initialize().await;
+        store.bootstrap_application().await.unwrap();
+        let catalog =
+            decode_catalog(&store.db.read(&schema_key()).await.unwrap().unwrap()).unwrap();
+        (fixture, store, catalog)
+    }
+
+    async fn legacy(tx: &mut Transaction, catalog: &ApplicationCatalog, rowid: i64, text: &str) {
+        for (offset, term) in unicode::trigram_iter(text).enumerate() {
+            let posting = Posting {
+                term,
+                rowid: rowid.to_string(),
+                offset: offset as u64,
+            };
+            for key in posting_keys(catalog, &posting).unwrap() {
+                tx.put(key, encode(&posting).unwrap()).await.unwrap();
+            }
+        }
+    }
+
+    async fn live(
+        tx: &mut Transaction,
+        catalog: &ApplicationCatalog,
+        rowid: i64,
+        text: &str,
+        bucketed: bool,
+        source_present: bool,
+    ) {
+        let mut postings: BTreeMap<String, Positions> = BTreeMap::new();
+        for (offset, term) in unicode::trigram_iter(text).enumerate() {
+            add_position(postings.entry(term).or_default(), offset as u64).unwrap();
+        }
+        let mut document = LiveDocument {
+            rowid: rowid.to_string(),
+            source_deleted: false,
+            source_present,
+            latest: LatestGeneration::Native {
+                terms: postings.keys().cloned().collect(),
+            },
+            suppressed: BTreeSet::new(),
+            terms: Vec::new(),
+            buckets: Vec::new(),
+        };
+        if bucketed {
+            let mut buckets: BTreeMap<u16, BTreeMap<String, Positions>> = BTreeMap::new();
+            for (term, positions) in postings {
+                buckets
+                    .entry(term_bucket(&term))
+                    .or_default()
+                    .insert(term, positions);
+            }
+            for (number, postings) in buckets {
+                let bucket = LiveBucket {
+                    rowid: rowid.to_string(),
+                    bucket: number,
+                    postings,
+                };
+                tx.put(
+                    live_bucket_key(catalog, number, rowid),
+                    encode(&bucket).unwrap(),
+                )
+                .await
+                .unwrap();
+                document.buckets.push(number);
+            }
+        } else {
+            for (term, positions) in postings {
+                let posting = LivePosting {
+                    term: term.clone(),
+                    rowid: rowid.to_string(),
+                    positions,
+                };
+                tx.put(
+                    live_posting_key(catalog, &term, rowid),
+                    encode(&posting).unwrap(),
+                )
+                .await
+                .unwrap();
+                document.terms.push(term);
+            }
+        }
+        tx.put(
+            live_document_key(catalog, rowid),
+            encode(&document).unwrap(),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn mixed_sources_keep_phrase_positions_suppression_order_and_signed_rowids() {
+        let (_fixture, store, catalog) = fixture().await;
+        let mut seed = store.db.begin().await.unwrap();
+        legacy(&mut seed, &catalog, 100, "abcabc def").await;
+        legacy(&mut seed, &catalog, 90, "abc def").await;
+        legacy(&mut seed, &catalog, 80, "zzz old").await;
+        live(&mut seed, &catalog, 80, "abcabc def", false, true).await;
+        legacy(&mut seed, &catalog, 70, "abcabc def").await;
+        seed.put(
+            live_document_key(&catalog, 70),
+            encode(&LiveDocument {
+                rowid: "70".into(),
+                source_deleted: false,
+                source_present: true,
+                latest: LatestGeneration::Missing,
+                suppressed: BTreeSet::from(["abc".into()]),
+                terms: Vec::new(),
+                buckets: Vec::new(),
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        live(&mut seed, &catalog, -3, "abcabc def", true, false).await;
+        legacy(&mut seed, &catalog, i64::MIN, "abcabc def").await;
+        seed.commit().await.unwrap();
+
+        for (query, expected) in [
+            ("\"abc\"", vec![100, 90, 80, -3, i64::MIN]),
+            ("\"abcabc\" \"def\"", vec![100, 80, -3, i64::MIN]),
+            ("\"def\" \"abc\"", vec![100, 90, 80, -3, i64::MIN]),
+            ("\"zzz\"", vec![80]),
+        ] {
+            for reuse in [false, true] {
+                let mut read = store.db.begin_read_only().await.unwrap();
+                assert_eq!(
+                    matching_documents(&mut read, &catalog, query, reuse)
+                        .await
+                        .unwrap(),
+                    expected,
+                    "query={query}, reuse={reuse}"
+                );
+                read.rollback().await.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn seek_bounds_and_read_snapshot_survive_new_commits_without_cross_query_state() {
+        let (_fixture, store, catalog) = fixture().await;
+        let mut seed = store.db.begin().await.unwrap();
+        legacy(&mut seed, &catalog, 10, "abc").await;
+        legacy(&mut seed, &catalog, -2, "abc").await;
+        legacy(&mut seed, &catalog, 20, "def").await;
+        seed.commit().await.unwrap();
+        let mut old = store.db.begin_read_only().await.unwrap();
+        let mut proof = SeekProof::Unknown;
+        for (maximum, expected) in [(10, Some(10)), (9, Some(-2)), (0, Some(-2)), (20, Some(10))] {
+            assert_eq!(
+                next_document_reusing(&mut old, &catalog, "abc", maximum, &mut proof)
+                    .await
+                    .unwrap(),
+                expected
+            );
+        }
+        let mut empty = SeekProof::Unknown;
+        for (maximum, expected) in [(5, None), (0, None), (20, Some(20))] {
+            assert_eq!(
+                next_document_reusing(&mut old, &catalog, "def", maximum, &mut empty)
+                    .await
+                    .unwrap(),
+                expected
+            );
+        }
+
+        let mut writer = store.db.begin().await.unwrap();
+        legacy(&mut writer, &catalog, 15, "abc").await;
+        writer.commit().await.unwrap();
+        assert_eq!(
+            next_document_reusing(&mut old, &catalog, "abc", 20, &mut proof)
+                .await
+                .unwrap(),
+            Some(10)
+        );
+        assert_eq!(
+            matching_documents(&mut old, &catalog, "\"abc\"", true)
+                .await
+                .unwrap(),
+            vec![10, -2]
+        );
+        let mut fresh = store.db.begin_read_only().await.unwrap();
+        assert_eq!(
+            matching_documents(&mut fresh, &catalog, "\"abc\"", true)
+                .await
+                .unwrap(),
+            vec![15, 10, -2]
+        );
+        fresh.rollback().await.unwrap();
+        old.rollback().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn non_winning_source_corruption_never_installs_a_partial_seek_proof() {
+        let (_fixture, store, catalog) = fixture().await;
+        let mut seed = store.db.begin().await.unwrap();
+        legacy(&mut seed, &catalog, 100, "abc").await;
+        seed.put(live_posting_key(&catalog, "abc", 90), b"{".to_vec())
+            .await
+            .unwrap();
+        seed.commit().await.unwrap();
+
+        for corrupt_bucket in [false, true] {
+            if corrupt_bucket {
+                let mut repair = store.db.begin().await.unwrap();
+                live(&mut repair, &catalog, 90, "abc", false, false).await;
+                repair
+                    .put(
+                        live_bucket_key(&catalog, term_bucket("abc"), 80),
+                        b"{".to_vec(),
+                    )
+                    .await
+                    .unwrap();
+                repair.commit().await.unwrap();
+            }
+            let mut read = store.db.begin_read_only().await.unwrap();
+            let mut proof = SeekProof::Unknown;
+            assert!(matches!(
+                next_document_reusing(&mut read, &catalog, "abc", 100, &mut proof).await,
+                Err(Error::IncompatibleStore)
+            ));
+            assert!(matches!(proof, SeekProof::Unknown));
+            read.rollback().await.unwrap();
+        }
+        let mut repair = store.db.begin().await.unwrap();
+        live(&mut repair, &catalog, 80, "abc", true, false).await;
+        repair.commit().await.unwrap();
+        let mut read = store.db.begin_read_only().await.unwrap();
+        assert_eq!(
+            matching_documents(&mut read, &catalog, "\"abc\"", true)
+                .await
+                .unwrap(),
+            vec![100, 90, 80]
+        );
+        read.rollback().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn scalar_state_bounds_fall_back_without_rejecting_large_queries() {
+        assert!(seek_proofs(false, 1).is_empty());
+        assert!(seek_proofs(true, usize::MAX).is_empty());
+        assert!(seek_proofs(true, SEEK_PROOF_TERM_LIMIT + 1).is_empty());
+        let proofs = seek_proofs(true, SEEK_PROOF_TERM_LIMIT);
+        assert_eq!(proofs.len(), SEEK_PROOF_TERM_LIMIT);
+        assert!(std::mem::size_of_val(proofs.as_slice()) <= SEEK_PROOF_BYTE_LIMIT);
+
+        let (_fixture, store, catalog) = fixture().await;
+        let terms: Vec<_> = (0..=SEEK_PROOF_TERM_LIMIT)
+            .map(|index| format!("{}xy", char::from_u32(0x4e00 + index as u32).unwrap()))
+            .collect();
+        let mut seed = store.db.begin().await.unwrap();
+        legacy(&mut seed, &catalog, 7, &terms.join(" ")).await;
+        seed.commit().await.unwrap();
+        for count in [SEEK_PROOF_TERM_LIMIT, SEEK_PROOF_TERM_LIMIT + 1] {
+            let query = terms[..count]
+                .iter()
+                .map(|term| format!("\"{term}\""))
+                .collect::<Vec<_>>()
+                .join(" ");
+            for reuse in [false, true] {
+                let mut read = store.db.begin_read_only().await.unwrap();
+                assert_eq!(
+                    matching_documents(&mut read, &catalog, &query, reuse)
+                        .await
+                        .unwrap(),
+                    vec![7]
+                );
+                read.rollback().await.unwrap();
+            }
+        }
+    }
+
+    fn orphan_query() -> ThreadSearchQuery {
+        ThreadSearchQuery::MessageHits {
+            r#match: Some("\"abc\"".into()),
+            substrings: "[]".into(),
+            short_spellings: "[]".into(),
+            project_id: None,
+            excluded_thread_ids: "[]".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn writer_search_keeps_range_observation_cost_and_savepoint_visibility() {
+        let (_fixture, store, catalog) = fixture().await;
+        while !store
+            .prepare_application_projection_reads()
+            .await
+            .unwrap()
+            .prepared
+        {}
+        while !store
+            .prepare_application_message_rowids()
+            .await
+            .unwrap()
+            .prepared
+        {}
+        store.prepare_application_search().await.unwrap();
+        let mut seed = store.db.begin().await.unwrap();
+        legacy(&mut seed, &catalog, 1, "abc").await;
+        seed.commit().await.unwrap();
+        let mut application = ApplicationTransactions::new(store.clone());
+        application.begin("writer").await.unwrap();
+        assert_eq!(
+            application
+                .thread_search("writer", orphan_query())
+                .await
+                .unwrap(),
+            json!([])
+        );
+        let mut session = application.take("writer").unwrap();
+        assert!(session.read_snapshot_validation.is_none());
+        let before = session.transaction.checkpoint_bytes();
+        assert_eq!(
+            matching_documents(&mut session.transaction, &catalog, "\"abc\"", false)
+                .await
+                .unwrap(),
+            vec![1]
+        );
+        let uncached_observation_bytes = session.transaction.checkpoint_bytes() - before;
+        assert!(uncached_observation_bytes > 0);
+        let before = session.transaction.checkpoint_bytes();
+        application.finish("writer", session, Ok(())).await.unwrap();
+        assert_eq!(
+            application
+                .thread_search("writer", orphan_query())
+                .await
+                .unwrap(),
+            json!([])
+        );
+        let session = application.take("writer").unwrap();
+        assert_eq!(
+            session.transaction.checkpoint_bytes() - before,
+            uncached_observation_bytes,
+            "A read-shaped search inside a writer must retain every original range observation"
+        );
+        application.finish("writer", session, Ok(())).await.unwrap();
+
+        application.savepoint("writer", "nested").await.unwrap();
+        let mut session = application.take("writer").unwrap();
+        legacy(&mut session.transaction, &catalog, 2, "abc").await;
+        assert_eq!(
+            matching_documents(
+                &mut session.transaction,
+                &catalog,
+                "\"abc\"",
+                session.read_snapshot_validation.is_some(),
+            )
+            .await
+            .unwrap(),
+            vec![2, 1]
+        );
+        application.finish("writer", session, Ok(())).await.unwrap();
+        application.rollback_to("writer", "nested").await.unwrap();
+        application.release("writer", "nested").await.unwrap();
+        let mut session = application.take("writer").unwrap();
+        assert_eq!(
+            matching_documents(
+                &mut session.transaction,
+                &catalog,
+                "\"abc\"",
+                session.read_snapshot_validation.is_some(),
+            )
+            .await
+            .unwrap(),
+            vec![1]
+        );
+        application.finish("writer", session, Ok(())).await.unwrap();
+        application.rollback("writer").await.unwrap();
+        application
+            .begin_mode("read", ApplicationTransactionMode::Read, None)
+            .await
+            .unwrap();
+        let session = application.take("read").unwrap();
+        assert!(session.read_snapshot_validation.is_some());
+        application.finish("read", session, Ok(())).await.unwrap();
+        assert_eq!(
+            application
+                .thread_search("read", orphan_query())
+                .await
+                .unwrap(),
+            json!([])
+        );
+        application.rollback("read").await.unwrap();
     }
 }
