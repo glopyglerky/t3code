@@ -47,7 +47,7 @@ type EventInput = {
   status?: number;
   method?: string;
   resourceType?: string;
-  failureCode?: string;
+  failureCode?: string | undefined;
 };
 type Clock = () => { timestampMs: number; monotonicMs: number };
 type Phase = {
