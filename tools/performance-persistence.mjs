@@ -29,6 +29,7 @@ import {
 import contract from "./performance-contract.json" with { type: "json" };
 import { createPinnedBaseline } from "./performance-baseline.mjs";
 import { processTreeRss } from "./performance-memory.mjs";
+import { observeFilesystem } from "./performance-filesystem.mjs";
 
 const root = NodeURL.fileURLToPath(new URL("../", import.meta.url));
 const workerPath = NodeURL.fileURLToPath(new URL("./performance-worker.mjs", import.meta.url));
@@ -178,6 +179,7 @@ const report = {
     "If /proc does not expose a process and its descendants, whole-process RSS is explicitly unavailable (null), never zero or a Node-only substitute.",
     "V8 GC is observed without forced collections. Node peak RSS excludes child helpers and is separately labeled; the process-tree sample includes them.",
     "Shared CI load, filesystem caching, CPU frequency and small-sample tail uncertainty remain. Inconclusive evidence cannot establish equivalence or qualify this commit.",
+    "Filesystem observations record the fixture's statfs type and block counts outside timed intervals. A filesystem name does not establish a physical device or power-loss guarantee; comparisons across different media need an explicit limitation.",
   ],
 };
 const artifacts = {
@@ -636,6 +638,7 @@ try {
     "tools/performance-baseline.mjs",
     "tools/performance-memory.mjs",
     "tools/performance-runtime.mjs",
+    "tools/performance-filesystem.mjs",
     "apps/server/src/persistence/Omdb.ts",
     "apps/server/src/orchestration-v2/NativeProjectionStore.ts",
     "apps/server/src/orchestration-v2/NativeThreadSearch.ts",
@@ -645,6 +648,9 @@ try {
   for (const path of sourcePaths)
     report.sources[path] = hash(await NodeFSP.readFile(NodePath.join(root, path)));
   fixture = await createFixture();
+  report.host.fixture_filesystem = {
+    before_setup: await observeFilesystem(fixture.root),
+  };
   report.baseline = await createPinnedBaseline(
     root,
     upstream.commit,
@@ -860,7 +866,13 @@ try {
   });
 } finally {
   NodeAssert.equal(active, undefined, "Owned worker must finish before fixture cleanup");
-  if (fixture) await fixture.close();
+  if (fixture) {
+    report.host.fixture_filesystem.after_workers = await observeFilesystem(fixture.root);
+    await fixture.close();
+    report.host.fixture_filesystem.after_cleanup = await observeFilesystem(
+      NodePath.dirname(fixture.root),
+    );
+  }
   NodeProcess.default.removeListener("SIGTERM", cancel);
   NodeProcess.default.removeListener("SIGINT", cancel);
   await save();

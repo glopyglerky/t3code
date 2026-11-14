@@ -45,6 +45,21 @@ def selectors(value: object) -> bool:
             and len(value) == len(set(value)))
 
 
+def job_results(needs: object) -> dict[str, str]:
+    """Reject failed jobs before attempting to read their missing artifacts."""
+    require(isinstance(needs, dict) and set(needs) == {"plan", *GATES},
+            "CI_NEEDS must contain exactly plan and every qualification gate")
+    results = {}
+    for job in ("plan", *GATES):
+        entry = needs[job]
+        require(isinstance(entry, dict), f"Missing result for {job}")
+        result = entry.get("result")
+        require(result in ("success", "skipped"), f"Job {job} did not succeed or skip ({result!r})")
+        results[job] = result
+    require(results["plan"] == "success", "Required job plan did not succeed")
+    return results
+
+
 def make_receipt(plan: object, needs: object, head: str, run_id: str | None = None,
                  performance: tuple[object, bytes] | None = None, run_attempt: str = "1") -> dict:
     """Validate plan/results together, retaining only compact qualification data."""
@@ -100,13 +115,8 @@ def make_receipt(plan: object, needs: object, head: str, run_id: str | None = No
         if mode == "full-fork":
             require(all(gates.values()), "Full qualification must require every gate")
 
-    require(isinstance(needs, dict) and set(needs) == {"plan", *GATES},
-            "CI_NEEDS must contain exactly plan and every qualification gate")
     results = {}
-    for job, entry in needs.items():
-        require(isinstance(entry, dict), f"Missing result for {job}")
-        result = entry.get("result")
-        require(result in ("success", "skipped"), f"Job {job} did not succeed or skip")
+    for job, result in job_results(needs).items():
         if job == "plan" or gates[job]:
             require(result == "success", f"Required job {job} did not succeed")
         if job != "plan":
@@ -187,8 +197,9 @@ def main(argv=None) -> int:
     parser.add_argument("--performance", type=Path)
     args = parser.parse_args(argv)
     try:
-        plan = json.loads(args.plan.read_bytes())
         needs = json.loads(os.environ.get("CI_NEEDS", ""))
+        job_results(needs)
+        plan = json.loads(args.plan.read_bytes())
         performance = None
         if args.performance:
             with args.performance.open("rb") as source:

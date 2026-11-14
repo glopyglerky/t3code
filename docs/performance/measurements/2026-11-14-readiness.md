@@ -109,6 +109,15 @@ APIs and selected service acquisition, not the full UI/provider/network path.
 All whole-process RSS fields correctly report unavailable in this sandbox; the
 separate Node-only peak values cannot establish total memory use or parity.
 
+The recorded fixture paths were under `/tmp`. During preparation for the later
+[dispatcher attempt](2026-11-14-dispatcher.md), this workspace's `/tmp` mount was
+observed as `tmpfs`. This earlier report did not record historical filesystem
+counters, so that later observation cannot supply its missing free-space data.
+These local commit timings must not be presented as physical-device fsync or
+power-loss tests. The dispatcher report documents the subsequent move to an
+overlay fixture directory, its capacity reason and the resulting comparison
+limits. The original readiness report and archive remain unchanged.
+
 ## Decisions after this attempt
 
 The next native investigation targets blocking task dispatch around individual

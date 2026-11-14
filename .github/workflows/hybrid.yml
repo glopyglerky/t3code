@@ -60,7 +60,8 @@ jobs:
             tools/omdb-source.test.mjs \
             tools/link-performance-runtime.test.mjs \
             tools/performance-statistics.test.mjs \
-            tools/performance-memory.test.mjs
+            tools/performance-memory.test.mjs \
+            tools/performance-filesystem.test.mjs
       - name: Plan work against the trusted upstream default branch
         run: python3 tools/plan-porting.py --repo-root "$GITHUB_WORKSPACE" --fetch-default --output "$RUNNER_TEMP/porting-plan.json" --summary "$GITHUB_STEP_SUMMARY"
       - name: Select checks from verified qualification history
@@ -308,22 +309,24 @@ jobs:
           fetch-depth: 0
           filter: blob:none
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        if: needs.plan.result == 'success'
         with:
           name: ${{ needs.plan.outputs.plan_artifact }}
           path: ${{ runner.temp }}/qualification-plan
       - name: Download the successful performance job's exact evidence
-        if: needs.plan.outputs.performance == 'true'
+        if: needs.plan.outputs.performance == 'true' && needs.performance.result == 'success'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: hybrid-performance-proof-${{ needs.performance.outputs.proof_run_attempt }}
           path: ${{ runner.temp }}/qualification-performance
       - name: Require every planned gate and its evidence to pass
+        if: always()
         env:
           CI_NEEDS: ${{ toJSON(needs) }}
           CI_HEAD: ${{ github.sha }}
           CI_RUN_ID: ${{ github.run_id }}
           CI_RUN_ATTEMPT: ${{ github.run_attempt }}
-          CI_PERFORMANCE: ${{ needs.plan.outputs.performance }}
+          CI_PERFORMANCE: ${{ needs.plan.outputs.performance == 'true' && needs.performance.result == 'success' }}
         run: |
           arguments=()
           if [[ "$CI_PERFORMANCE" == true ]]; then

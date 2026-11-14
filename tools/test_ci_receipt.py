@@ -216,9 +216,10 @@ class ReceiptCommand(unittest.TestCase):
         return subprocess.check_output(["git", "-C", str(self.root), *args],
                                        stderr=subprocess.DEVNULL, text=True).strip()
 
-    def command(self, statuses=None, **environment):
-        self.input.write_text(json.dumps(self.value))
-        self.performance.write_bytes(encoded_report(self.value)[1])
+    def command(self, statuses=None, *, write_artifacts=True, **environment):
+        if write_artifacts:
+            self.input.write_text(json.dumps(self.value))
+            self.performance.write_bytes(encoded_report(self.value)[1])
         env = {**os.environ, "CI_HEAD": self.value["head"], "CI_RUN_ID": "101",
                "CI_NEEDS": json.dumps(needs(self.value) if statuses is None else statuses), **environment}
         return subprocess.run([sys.executable, str(SCRIPT), "--plan", str(self.input),
@@ -242,6 +243,30 @@ class ReceiptCommand(unittest.TestCase):
         result = self.command(statuses)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.output.read_text(), "existing evidence\n")
+
+    def test_failed_jobs_are_reported_before_missing_plan_or_performance_files(self):
+        for job, status in (("performance", "failure"), ("performance", "cancelled"),
+                            ("application", "failure"), ("plan", "failure"), ("plan", "skipped")):
+            statuses = needs(self.value)
+            statuses[job]["result"] = status
+            statuses["performance"]["outputs"] = {}
+            with self.subTest(job=job, status=status):
+                result = self.command(statuses, write_artifacts=False)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("job " + job, result.stderr.lower())
+                self.assertNotIn("No such file", result.stderr)
+                self.assertFalse(self.output.exists())
+
+    def test_successful_job_without_its_report_still_cannot_issue_evidence(self):
+        result = self.command(write_artifacts=False)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("plan.json", result.stderr)
+        self.assertFalse(self.output.exists())
+        self.input.write_text(json.dumps(self.value))
+        result = self.command(write_artifacts=False)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("performance.json", result.stderr)
+        self.assertFalse(self.output.exists())
 
     def test_modified_or_staged_source_cannot_receive_a_commit_receipt(self):
         (self.root / "source.rs").write_text("unqualified source change\n")

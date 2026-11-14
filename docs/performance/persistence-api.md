@@ -10,9 +10,11 @@ The fixed protocol is [performance-contract.json](../../tools/performance-contra
 The runner is [performance-persistence.mjs](../../tools/performance-persistence.mjs).
 The [reference audit](../porting/ci-reference-audit-2026-11-14.md) records the
 upstream v2 regression, paired measurement and qualification sources used to
-choose this method. Both the [first complete baseline](measurements/2026-11-14-baseline.md)
-and the [readiness-cache comparison](measurements/2026-11-14-readiness.md)
-failed every latency row and remain part of the evidence.
+choose this method. The [first complete baseline](measurements/2026-11-14-baseline.md),
+[readiness-cache comparison](measurements/2026-11-14-readiness.md),
+[owned-dispatcher comparison](measurements/2026-11-14-dispatcher.md) and
+[first hosted comparison](measurements/2026-11-14-hosted-readiness.md) all failed
+every latency row. Their complete evidence and limits remain available.
 
 ## What runs
 
@@ -154,6 +156,25 @@ and after, observed GC count/duration, and raw sample distributions. Shared host
 load, CPU frequency, page-cache carryover, scheduling and finite tail samples
 still limit inference. No forced GC or discarded outlier is used to make a
 result pass.
+
+The bounded filesystem observer makes one Node `statfs` call before setup,
+after all workers and after fixture cleanup. It retains the actual fixture path,
+filesystem type ID, known Linux type name, block sizes and exact decimal block
+and file-node counts. Unknown types remain unnamed; unavailable observations
+have an explicit status and reason instead of invented zero capacity. These
+calls occur outside every timed interval, and the observer source hash is part
+of the report. A filesystem type does not prove a physical device or power-loss
+durability. Free-space counters describe the volume, not fixture or process
+memory use.
+
+Use an existing task-owned `TMPDIR` with enough space for all retained fixture
+copies. Node file copying can allocate previously sparse holes. The dispatcher
+report preserves the capacity probe that required moving the local fixture from
+`/tmp` tmpfs to the workspace overlay. That attempt also introduced complete
+frozen-runtime attestation. Both changes are explicit limits on comparisons
+across attempts; the paired stock/native observations within each attempt use
+the same selected medium. Later local attempts keep the overlay and frozen
+layout fixed. No unrelated temporary state is removed to make a run fit.
 
 Whole-process RSS is sampled every 25 ms by adding the worker and its visible
 descendants. It can miss short peaks and count shared pages more than once. If

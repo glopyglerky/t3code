@@ -81,6 +81,17 @@ class WorkflowArtifactWiring(unittest.TestCase):
                         performance.index("node tools/performance-persistence.mjs"))
         self.assertIn("run: node --test tools/performance-runtime.test.mjs", performance)
 
+    def test_failed_performance_reaches_the_receipt_rejection_without_an_empty_artifact_download(self):
+        qualification = self.hybrid.split("\n  qualification:", 1)[1]
+        selected_success = "needs.plan.outputs.performance == 'true' && needs.performance.result == 'success'"
+        self.assertIn("if: " + selected_success, qualification)
+        plan_download = qualification.split("- uses: actions/download-artifact@", 1)[1].split("- name:", 1)[0]
+        self.assertIn("if: needs.plan.result == 'success'", plan_download)
+        self.assertIn("CI_PERFORMANCE: ${{ " + selected_success + " }}", qualification)
+        self.assertIn("- name: Require every planned gate and its evidence to pass\n        if: always()", qualification)
+        self.assertIn("name: hybrid-performance-proof-${{ needs.performance.outputs.proof_run_attempt }}", qualification)
+        self.assertIn("- name: Retain raw samples, failures and comparison decisions\n        if: always()", self.hybrid)
+
 
 if __name__ == "__main__":
     unittest.main()
