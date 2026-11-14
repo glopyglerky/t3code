@@ -135,6 +135,32 @@ The subsequent dispatcher and runtime-provenance changes require their own
 exact-source application and performance gates. Earlier passing application
 artifacts cannot qualify those later runtime changes.
 
+## Verified dispatcher application flow at c3f8245
+
+The [dispatcher candidate's hosted run](https://github.com/glopyglerky/t3code-ls/actions/runs/43600673237)
+also passed native/source/component checks, production adapters and the full
+Linux application job. Its `application.json`, `client/native/proof.json` and
+`client/summary.json` records pass for clean source
+`c3f8245ed7daf3c16dcfcfbc33682811728bc5bf`, tree
+`04386131068654c883f2cca8689b5f5853c74eb3`. The same normal web-client flow
+covered project creation, controlled ACP approval, completed turn, reload,
+fresh-client recovery after a same-state server restart, and read-only native
+row/event-head inspection without application SQLite files.
+
+The [original application artifact](https://github.com/glopyglerky/t3code-ls/actions/runs/43600673237/artifacts/14116622101)
+has verified ZIP SHA256
+`e4e50ddc5efaa221c0be35ff9eeb559e0eb2b2ff4915f16378316b581d7db474`.
+It belongs to job `132467286580`, run attempt 1, and uses that run's release
+helpers through the pinned Lustr/BlueFe route. This verifies the dispatcher
+candidate within the stated Linux flow; desktop, mobile, other operating
+systems and native Lust remain outside that evidence.
+
+Its [hosted stock comparison](../performance/measurements/2026-11-14-hosted-dispatcher.md)
+still regressed in all eleven latency rows. Performance and final qualification
+therefore failed despite the successful application flow. Main remains at its
+previous qualified ancestor, and subsequent read-table and write changes need
+their own exact-source application and performance evidence.
+
 ## Qualification
 
 Source integration is complete; exact-candidate qualification is recorded by the

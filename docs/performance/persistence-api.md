@@ -13,8 +13,11 @@ upstream v2 regression, paired measurement and qualification sources used to
 choose this method. The [first complete baseline](measurements/2026-11-14-baseline.md),
 [readiness-cache comparison](measurements/2026-11-14-readiness.md),
 [owned-dispatcher comparison](measurements/2026-11-14-dispatcher.md) and
-[first hosted comparison](measurements/2026-11-14-hosted-readiness.md) all failed
-every latency row. Their complete evidence and limits remain available.
+[immutable table-handle comparison](measurements/2026-11-14-table-handle.md) all
+failed every latency row. The separate hosted
+[readiness](measurements/2026-11-14-hosted-readiness.md) and
+[dispatcher](measurements/2026-11-14-hosted-dispatcher.md) comparisons also failed
+every row. Their complete evidence and limits remain available.
 
 ## What runs
 

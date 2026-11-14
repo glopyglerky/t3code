@@ -178,3 +178,10 @@ The [earlier hosted attempt](2026-11-14-hosted-readiness.md) also retains all el
 regressions, its distinct host, and its earlier runtime-provenance limitation.
 Neither an earlier failure nor a future inconclusive result is replaced by a
 more favorable attempt.
+
+The completed [table-handle attempt](2026-11-14-table-handle.md) preserves the
+next result on the same overlay/frozen-runtime layout. It still fails every
+stock-comparison row and documents both its modest warm changes and higher
+observed cold latency. The separate
+[hosted dispatcher run](2026-11-14-hosted-dispatcher.md) also retains every failed
+row under verified production-runtime provenance.

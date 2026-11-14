@@ -1304,13 +1304,24 @@ struct StagedCommit {
     ranges: Vec<ObservedRange>,
 }
 
-fn commit_staged(transaction: WriteTransaction, staged: StagedCommit) -> Result<()> {
+fn commit_staged(transaction: WriteTransaction, mut staged: StagedCommit) -> Result<()> {
     {
         let mut table = transaction.open_table(TABLE).map_err(storage_error)?;
         for (key, observed) in staged.reads {
             let current = table.get(key.as_slice()).map_err(storage_error)?;
             if current.as_ref().map(|value| value.value()) != observed.as_deref() {
                 return Err(Error::TransactionConflict);
+            }
+            // Only a validated full observation proves an identical final value.
+            // Fingerprint-only mutations stay on the ordinary write path. Keep
+            // every later validation and the durable commit even if this removes
+            // the last staged write.
+            if staged
+                .writes
+                .get(&key)
+                .is_some_and(|value| value == &observed)
+            {
+                staged.writes.remove(&key);
             }
         }
         for (key, observed) in staged.mutation_reads {
@@ -2182,6 +2193,153 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn identical_writes_still_validate_point_range_and_fingerprint_observations() {
+        for conflict in ["point", "range", "fingerprint"] {
+            let fixture = TestFixture::start().await;
+            let store = fixture.initialize().await;
+            let peer = fixture.connect().await;
+            let same = store_key("no-op/point");
+            let blind = store_key("no-op/blind");
+            let phantom = store_key("no-op/range/a");
+            let start = store_key("no-op/range/");
+            let end = store_key("no-op/range0");
+            let mut seed = store.db.begin().await.unwrap();
+            seed.put(same.clone(), b"before".to_vec()).await.unwrap();
+            seed.put(blind.clone(), b"before".to_vec()).await.unwrap();
+            seed.commit().await.unwrap();
+
+            let mut stale = store.db.begin().await.unwrap();
+            assert_eq!(stale.get(&same).await.unwrap(), Some(b"before".to_vec()));
+            stale.put(same.clone(), b"before".to_vec()).await.unwrap();
+            match conflict {
+                "range" => assert!(stale.scan(&start, &end, 1).await.unwrap().is_empty()),
+                "fingerprint" => {
+                    stale.put(blind.clone(), b"before".to_vec()).await.unwrap();
+                    assert!(!stale.reads.contains_key(&blind));
+                    assert!(stale.mutation_reads.contains_key(&blind));
+                }
+                _ => (),
+            }
+            let changed = match conflict {
+                "range" => phantom.clone(),
+                "fingerprint" => blind.clone(),
+                _ => same.clone(),
+            };
+            let mut fresh = peer.db.begin().await.unwrap();
+            fresh.put(changed.clone(), b"after".to_vec()).await.unwrap();
+            fresh.commit().await.unwrap();
+            assert!(
+                matches!(stale.commit().await, Err(Error::TransactionConflict)),
+                "an identical point write bypassed its {conflict} conflict"
+            );
+            assert_eq!(
+                store.db.read(&changed).await.unwrap(),
+                Some(b"after".to_vec())
+            );
+            if conflict != "point" {
+                assert_eq!(
+                    store.db.read(&same).await.unwrap(),
+                    Some(b"before".to_vec())
+                );
+            }
+            peer.shutdown().await.unwrap();
+            store.shutdown().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn identical_writes_preserve_savepoints_mixed_changes_and_durable_reopen() {
+        for reserved in [false, true] {
+            let fixture = TestFixture::start().await;
+            let store = fixture.initialize().await;
+            let same = store_key("no-op/same");
+            let changed = store_key("no-op/changed");
+            let blind = store_key("no-op/blind");
+            let absent = store_key("no-op/absent");
+            let mut seed = store.db.begin().await.unwrap();
+            for key in [&same, &changed, &blind] {
+                seed.put(key.clone(), b"before".to_vec()).await.unwrap();
+            }
+            seed.commit().await.unwrap();
+            let mut writer = if reserved {
+                store
+                    .db
+                    .begin_reserved(Duration::from_millis(100), Duration::from_secs(2))
+                    .await
+                    .unwrap()
+            } else {
+                store.db.begin().await.unwrap()
+            };
+            assert_eq!(writer.get(&same).await.unwrap(), Some(b"before".to_vec()));
+            assert_eq!(writer.get(&absent).await.unwrap(), None);
+            writer.delete(same.clone()).await.unwrap();
+            writer.put(same.clone(), b"before".to_vec()).await.unwrap();
+            writer.delete(absent.clone()).await.unwrap();
+            writer.put(blind.clone(), b"before".to_vec()).await.unwrap();
+            writer
+                .put(changed.clone(), b"after".to_vec())
+                .await
+                .unwrap();
+            assert!(!writer.reads.contains_key(&blind));
+            assert!(writer.mutation_reads.contains_key(&blind));
+            let saved = writer.checkpoint();
+            writer.delete(same.clone()).await.unwrap();
+            writer
+                .put(changed.clone(), b"discarded".to_vec())
+                .await
+                .unwrap();
+            writer.restore(&saved);
+            assert_eq!(
+                writer
+                    .get_many(&[same.clone(), changed.clone(), absent.clone()])
+                    .await
+                    .unwrap(),
+                vec![Some(b"before".to_vec()), Some(b"after".to_vec()), None]
+            );
+            writer.commit().await.unwrap();
+            store.shutdown().await.unwrap();
+            let reopened = fixture.connect().await;
+            for (key, expected) in [
+                (same, Some(b"before".to_vec())),
+                (changed, Some(b"after".to_vec())),
+                (blind, Some(b"before".to_vec())),
+                (absent, None),
+            ] {
+                assert_eq!(reopened.db.read(&key).await.unwrap(), expected);
+            }
+            reopened.shutdown().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn identical_staged_values_keep_mutation_and_observation_budgets() {
+        let fixture = TestFixture::start().await;
+        let store = fixture.initialize().await;
+        let first = store_key("no-op/budget/first");
+        let second = store_key("no-op/budget/second");
+        let large = vec![17u8; MAX_BATCH_BYTES / 2];
+        for key in [&first, &second] {
+            let mut seed = store.db.begin().await.unwrap();
+            seed.put(key.clone(), large.clone()).await.unwrap();
+            seed.commit().await.unwrap();
+        }
+        let mut writer = store.db.begin().await.unwrap();
+        assert_eq!(writer.get(&first).await.unwrap(), Some(large.clone()));
+        writer.put(first.clone(), large.clone()).await.unwrap();
+        assert!(matches!(
+            writer.put(second.clone(), large.clone()).await,
+            Err(Error::ResourceLimit(ResourceLimit::MutationBytes))
+        ));
+        assert!(matches!(
+            writer.get(&second).await,
+            Err(Error::ResourceLimit(ResourceLimit::ObservationBudget))
+        ));
+        writer.rollback().await.unwrap();
+        assert_eq!(store.db.read(&first).await.unwrap(), Some(large));
+        store.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn immutable_read_snapshots_page_without_retaining_write_observations() {
         let fixture = TestFixture::start().await;
         let store = fixture.initialize().await;
@@ -2414,47 +2572,86 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn real_engine_flush_failure_has_an_unknown_commit_outcome() {
-        let fail = Arc::new(AtomicBool::new(false));
-        let control = fail.clone();
-        let database = tokio::task::spawn_blocking(move || {
-            let database = Database::builder()
-                .create_with_backend(FailingSync {
-                    inner: redb::backends::InMemoryBackend::new(),
-                    fail: control,
-                })
-                .unwrap();
-            let transaction = database.begin_write().unwrap();
-            transaction.open_table(TABLE).unwrap();
-            transaction.commit().unwrap();
-            database
-        })
-        .await
-        .unwrap();
-        let backend = Backend {
-            handles: Arc::new(DatabaseHandles {
-                path: PathBuf::new(),
-                exclusive: false,
-                read_only: false,
-                identity: None,
-                reader: None,
-                writer: Mutex::new(Some(Arc::new(database))),
-                opening: Mutex::new(()),
-            }),
-        };
-        let mut transaction = backend.begin().await.unwrap();
-        transaction
-            .put(b"receipt".to_vec(), b"possibly committed".to_vec())
+    async fn assert_durable_flush_failure(unchanged: bool, changed: bool) {
+        for reserved in [false, true] {
+            let fail = Arc::new(AtomicBool::new(false));
+            let control = fail.clone();
+            let database = tokio::task::spawn_blocking(move || {
+                let database = Database::builder()
+                    .create_with_backend(FailingSync {
+                        inner: redb::backends::InMemoryBackend::new(),
+                        fail: control,
+                    })
+                    .unwrap();
+                let transaction = database.begin_write().unwrap();
+                transaction.open_table(TABLE).unwrap();
+                transaction.commit().unwrap();
+                database
+            })
             .await
             .unwrap();
-        fail.store(true, Ordering::SeqCst);
-        assert!(matches!(
-            transaction.commit().await,
-            Err(Error::UnknownCommit)
-        ));
-        fail.store(false, Ordering::SeqCst);
-        // redb retains the earlier I/O failure; explicit close must report it too.
-        assert!(matches!(backend.shutdown().await, Err(Error::Database(_))));
+            let backend = Backend {
+                handles: Arc::new(DatabaseHandles {
+                    path: PathBuf::new(),
+                    exclusive: false,
+                    read_only: false,
+                    identity: None,
+                    reader: None,
+                    writer: Mutex::new(Some(Arc::new(database))),
+                    opening: Mutex::new(()),
+                }),
+            };
+            let same = b"same-value".to_vec();
+            if unchanged {
+                let mut seed = backend.begin().await.unwrap();
+                seed.put(same.clone(), b"before".to_vec()).await.unwrap();
+                seed.commit().await.unwrap();
+            }
+            let mut transaction = if reserved {
+                backend
+                    .begin_reserved(Duration::from_millis(100), Duration::from_secs(2))
+                    .await
+                    .unwrap()
+            } else {
+                backend.begin().await.unwrap()
+            };
+            if unchanged {
+                assert_eq!(
+                    transaction.get(&same).await.unwrap(),
+                    Some(b"before".to_vec())
+                );
+                transaction.put(same, b"before".to_vec()).await.unwrap();
+            }
+            if changed {
+                transaction
+                    .put(b"receipt".to_vec(), b"possibly committed".to_vec())
+                    .await
+                    .unwrap();
+            }
+            fail.store(true, Ordering::SeqCst);
+            assert!(
+                matches!(transaction.commit().await, Err(Error::UnknownCommit)),
+                "durable flush failure must stay uncertain (reserved={reserved})"
+            );
+            fail.store(false, Ordering::SeqCst);
+            // The real engine retains the I/O failure, including an all-identical
+            // batch. Explicit close must still report it rather than hide it.
+            assert!(matches!(backend.shutdown().await, Err(Error::Database(_))));
+        }
+    }
+
+    #[tokio::test]
+    async fn real_engine_flush_failure_has_an_unknown_commit_outcome() {
+        assert_durable_flush_failure(false, true).await;
+    }
+
+    #[tokio::test]
+    async fn mixed_identical_writes_still_require_a_durable_commit() {
+        assert_durable_flush_failure(true, true).await;
+    }
+
+    #[tokio::test]
+    async fn all_identical_writes_still_require_a_durable_commit() {
+        assert_durable_flush_failure(true, false).await;
     }
 }
