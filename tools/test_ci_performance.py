@@ -49,6 +49,13 @@ def report(plan, run_id="101"):
                                     "cold_first_operations_ms": {name: duration / 10 for name in operations},
                                     "service_open_ms": duration / 2, "cold_open_ms": duration,
                                     "digests": digests, "committed_writes": 16}})
+    dependencies = [{"importer": "apps/server", "name": name, "version": "4.1.3",
+                     "package_json_sha256": "5" * 64,
+                     "installed_path": "node_modules/.pnpm/locked/node_modules/" + name}
+                    for name in ("effect", "@effect/platform-node")]
+    resolution = [[item[field] for field in ("importer", "name", "version", "package_json_sha256", "installed_path")]
+                  for item in dependencies]
+    resolution_hash = hashlib.sha256(json.dumps(resolution, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
     return {
         "schema_version": 1, "suite": "persistence-api", "status": "passed", "mode": "qualify",
         "source_commit": plan["head"], "source_tree": plan["source_tree"],
@@ -61,9 +68,17 @@ def report(plan, run_id="101"):
         "baseline": {"commit": plan["upstream_commit"], "tree": plan["upstream_tree"],
                      "archive_sha256": "1" * 64, "dependency_lock_sha256": "2" * 64,
                      "fork_dependency_lock_sha256": "3" * 64, "sqlite_wrapper_sha256": "4" * 64,
-                     "resolved_runtime": [{"name": name, "expected_version": "4.1.3", "actual_version": "4.1.3",
-                                           "package_json_sha256": "5" * 64}
-                                          for name in ("effect", "@effect/platform-node")]},
+                     "runtime_provenance": {"status": "verified", "issues": [], "package_manager": "pnpm@12.14.0",
+                                            "installed_lock_sha256": "6" * 64, "modules_metadata_sha256": "7" * 64,
+                                            "node_executable_sha256": "8" * 64,
+                                            "external_resolution_sha256": resolution_hash, "per_workspace_resolution": True,
+                                            "installed_lock_matches_application_lock": True,
+                                            "external_packages_within_virtual_store": True},
+                     "external_dependencies": dependencies,
+                     "resolved_runtime": [{"importer": item["importer"], "name": item["name"],
+                                           "expected_version": item["version"], "actual_version": item["version"],
+                                           "package_json_sha256": item["package_json_sha256"],
+                                           "installed_path": item["installed_path"]} for item in dependencies]},
         "executable_sha256": "f" * 64, "configuration": {
             **{key: value for key, value in ci_performance.CONTRACT.items() if key not in ("schema_version", "suite", "scenarios")},
             "phase": "all",
@@ -152,6 +167,41 @@ class PerformanceEvidence(unittest.TestCase):
         for digest in (None, "", "a" * 64):
             with self.assertRaises(ValueError):
                 ci_performance.validate_report(value, raw, self.plan, "101", digest)
+
+    def test_unverified_installed_dependencies_cannot_qualify_from_matching_direct_versions(self):
+        for field, replacement in [
+            ("status", "diagnostic-unverified"), ("issues", ["external dependency outside pnpm"]),
+            ("package_manager", "npm@12"), ("package_manager", "pnpm@12.13.0"),
+            ("installed_lock_matches_application_lock", False),
+            ("external_packages_within_virtual_store", False),
+            ("per_workspace_resolution", False), ("external_resolution_sha256", None),
+            ("installed_lock_sha256", None), ("modules_metadata_sha256", ""),
+            ("node_executable_sha256", "not-a-digest"),
+        ]:
+            value = report(self.plan)
+            value["baseline"]["runtime_provenance"][field] = replacement
+            with self.subTest(field=field, replacement=replacement), self.assertRaises(ValueError):
+                self.validate(value)
+        for replacement in (None, [], {}):
+            value = report(self.plan)
+            value["baseline"]["runtime_provenance"] = replacement
+            with self.subTest(replacement=replacement), self.assertRaises(ValueError):
+                self.validate(value)
+
+    def test_retained_dependency_resolutions_bind_the_runtime_provenance(self):
+        for mutation in (
+            lambda value: value["baseline"].update(external_dependencies=[]),
+            lambda value: value["baseline"]["external_dependencies"].append(value["baseline"]["external_dependencies"][0]),
+            lambda value: value["baseline"]["external_dependencies"][0].update(version="0.0.0"),
+            lambda value: value["baseline"]["external_dependencies"][0].update(installed_path="outside/node_modules/effect"),
+            lambda value: value["baseline"]["external_dependencies"][0].update(installed_path="node_modules/.pnpm/../../outside"),
+            lambda value: value["baseline"]["resolved_runtime"][0].update(installed_path="node_modules/.pnpm/different"),
+            lambda value: value["baseline"]["resolved_runtime"][0].update(package_json_sha256="b" * 64),
+        ):
+            value = report(self.plan)
+            mutation(value)
+            with self.assertRaises(ValueError):
+                self.validate(value)
 
     def test_canonical_digest_uses_the_workers_json_number_and_property_order(self):
         value = {"2": 1.0, "10": 1e-7, "1": 1e-6, "é": -0.0, "a": 1e21}

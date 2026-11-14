@@ -34,7 +34,7 @@ HYBRID_ACCEPTANCE_TESTS = {
 POLICY_FILES = {
     "tools/ci_plan.py", "tools/ci_history.py", "tools/hybrid-checks.mjs",
     "tools/check-hybrid.mjs", "tools/build-native.mjs", "tools/native-artifacts.mjs",
-    "tools/install-toolchain.mjs", "tools/install-server-tests.mjs",
+    "tools/install-toolchain.mjs", "tools/install-server-tests.mjs", "tools/link-performance-runtime.mjs",
     "tools/fetch-migration-sources.mjs", "tools/nightly.py",
     "tools/ci_receipt.py", "tools/ci_performance.py", "tools/ci_promotion.py", "tools/test-rust.py",
     "tools/acceptance-checks.json", "tools/check-acceptance.mjs",

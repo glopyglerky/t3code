@@ -10,8 +10,9 @@ The fixed protocol is [performance-contract.json](../../tools/performance-contra
 The runner is [performance-persistence.mjs](../../tools/performance-persistence.mjs).
 The [reference audit](../porting/ci-reference-audit-2026-11-14.md) records the
 upstream v2 regression, paired measurement and qualification sources used to
-choose this method. The [first complete baseline](measurements/2026-11-14-baseline.md)
-failed every latency row and remains part of the evidence.
+choose this method. Both the [first complete baseline](measurements/2026-11-14-baseline.md)
+and the [readiness-cache comparison](measurements/2026-11-14-readiness.md)
+failed every latency row and remain part of the evidence.
 
 ## What runs
 
@@ -54,8 +55,10 @@ semantics, but are not power-loss or hardware-failure tests.
 The baseline is a complete `git archive` of the locked upstream commit, verified
 against the locked tree. Relative and workspace imports resolve inside that
 export. This avoids accidentally running a pinned top-level module with modified
-fork dependencies. External dependencies resolve to the same installed packages
-for both implementations.
+fork dependencies. Each exported workspace receives its original importer's
+installed external links, preserving dependency and peer instances; every
+workspace alias is redirected to the stock export. External dependencies resolve
+to the same installed packages as the corresponding production workspace.
 
 All settings, patches, package/snapshot resolutions and shared importers in the
 fork and upstream pnpm locks must agree. Only the exact existing `tools/oracles`
@@ -64,6 +67,18 @@ shared dependency versions are checked against the upstream production lock;
 Effect and platform-node are required. Reports retain installed package manifest
 hashes, the SQLite wrapper hash, the full source archive hash, both lock hashes,
 Node version, native executable hash and compiler/toolchain identities.
+
+Qualification also requires the installed pnpm application lock to match the
+complete source application document, including transitive package/snapshot
+resolutions. Installed package-manager metadata must match the source pin and
+isolated virtual-store layout; the Node engine must match its exact application
+pin. Every external target must resolve inside that source workspace's frozen
+`.pnpm` tree. Reports retain the installed-lock, module-metadata and Node-executable
+hashes, every external importer/name/version/manifest/path descriptor, and a
+hash of their explicit field tuples. Missing or incompatible provenance prevents
+qualification. Diagnostic mode records the issue without claiming a production
+runtime qualification. The first two timing attempts predate this additional
+attestation; their original diagnostic limits remain documented.
 
 Before any speed verdict, both backends must pass:
 
@@ -172,6 +187,10 @@ same-run release artifact, matching compiler/toolchain/helper hashes, and the
 current policy and immutable upstream identities. Source cleanliness and
 identity are checked again after measurements. Qualification exits nonzero for
 a regression, failure or inconclusive result.
+
+The supplied native executable and release-manifest hashes are rechecked after
+the workers finish, including in diagnostic mode. A concurrent binary replacement
+cannot attach mixed measurements to the starting executable's identity.
 
 Build, measurement and receipt attempts may differ when a failed-job retry
 reuses a successful dependency from the same exact workflow run and source.

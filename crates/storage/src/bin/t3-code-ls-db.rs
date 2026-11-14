@@ -1591,9 +1591,27 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[tokio::main(worker_threads = 2)]
-async fn main() {
-    if let Err(error) = run().await {
+fn main() {
+    let owned = t3_code_ls_storage::run_on_database_thread(|| {
+        let runtime = match tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        };
+        runtime.block_on(async {
+            if let Err(error) = run().await {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        });
+    });
+    if let Err(error) = owned {
         eprintln!("{error}");
         std::process::exit(1);
     }

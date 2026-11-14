@@ -103,6 +103,38 @@ qualified a main update. The subsequent policy adds required paired performance
 and reliability measurements against immutable stock source, as described in
 [the CI and measurement policy](../ci-and-porting.md).
 
+## Verified Linux application flow at bc0d469
+
+The next [hosted run](https://github.com/glopyglerky/t3code-ls/actions/runs/43597075132)
+produced passing `application.json` and `client/native/proof.json` records for
+clean source `bc0d46941ccac37a97062fb135544c62381cf453`, tree
+`ae264726ef695ccb96006236c4745f8e3c915360`. The native selection checks and
+production client/server bundle builds passed. The browser proof uses the
+retained web client on Linux x64 with the same run's release helpers, compiled
+through the pinned Lustr/BlueFe route.
+
+The flow completed normal initial setup and local project creation, approved a
+controlled ACP replay-provider request, received a completed turn on the
+original thread route, and recovered the same completed thread after client
+reload. It then restarted the server over the same state and verified durable
+recovery in a fresh client with the existing session. Read-only native
+inspection confirmed canonical omdb rows and event heads, with no application
+SQLite files. The fixture used no real provider turn or installed user state.
+
+The [application artifact](https://github.com/glopyglerky/t3code-ls/actions/runs/43597075132/artifacts/14116230036)
+was downloaded and verified against SHA256
+`17a594b69f65a47ad6e0fd14ddf33604edb75af59ab1c21f4c3e7cbb22828042`.
+It belongs to application job `132458641004`, run attempt 1. The accompanying
+native/source/component and production-adapter jobs also passed. This evidence
+covers that exact Linux source and controlled flow; it does not establish
+desktop, mobile, macOS, Windows, Iroh or native Lust acceptance.
+
+The recorded [stock comparisons](../performance/persistence-api.md) still show
+regressions, so this application evidence alone cannot qualify a main update.
+The subsequent dispatcher and runtime-provenance changes require their own
+exact-source application and performance gates. Earlier passing application
+artifacts cannot qualify those later runtime changes.
+
 ## Qualification
 
 Source integration is complete; exact-candidate qualification is recorded by the

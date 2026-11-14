@@ -58,6 +58,7 @@ jobs:
             tools/hybrid-checks.test.mjs \
             tools/check-acceptance.test.mjs \
             tools/omdb-source.test.mjs \
+            tools/link-performance-runtime.test.mjs \
             tools/performance-statistics.test.mjs \
             tools/performance-memory.test.mjs
       - name: Plan work against the trusted upstream default branch
@@ -221,6 +222,8 @@ jobs:
       T3CODE_DEV_SEED: "0"
       VP_REMOTE_CACHE: "off"
       VP_REMOTE_CACHE_URL: ""
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+      NODE_OPTIONS: --max-old-space-size=6144
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -228,8 +231,22 @@ jobs:
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 26.12.1
-          cache: npm
-          cache-dependency-path: tools/server-test-runtime/package-lock.json
+      - name: Install the pinned workspace package manager
+        run: npm install --global pnpm@12.14.0 --ignore-scripts --no-audit --no-fund
+      - name: Locate the dependency store
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - name: Cache locked dependency downloads
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-${{ runner.os }}-${{ runner.arch }}-12.14.0-${{ hashFiles('pnpm-lock.yaml') }}
+      - name: Install the locked application dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Link comparison imports from the production workspace
+        run: node tools/link-performance-runtime.mjs
+      - name: Check installed runtime provenance rejection paths
+        run: node --test tools/performance-runtime.test.mjs
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: ${{ needs.native.outputs.native_artifact }}
@@ -245,10 +262,6 @@ jobs:
           upstream_commit="$(node -p 'JSON.parse(require("node:fs").readFileSync("upstream.lock.json", "utf8")).upstream.commit')"
           [[ "$upstream_commit" =~ ^[0-9a-f]{40}$ ]]
           git fetch --no-tags --depth=1 https://github.com/pingdotgg/t3code.git "$upstream_commit"
-      - name: Install the locked comparison runtime
-        run: |
-          echo "T3_CODE_LS_TEST_RUNTIME=$RUNNER_TEMP/performance-test-runtime" >> "$GITHUB_ENV"
-          T3_CODE_LS_TEST_RUNTIME="$RUNNER_TEMP/performance-test-runtime" node tools/install-server-tests.mjs
       - name: Compare correctness, durability and every fixed workload
         run: |
           node tools/performance-persistence.mjs \

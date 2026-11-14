@@ -121,7 +121,116 @@ const create = (commandId, projectId, workspaceRoot) => ({
   title: "Rust project",
 });
 
+async function checkDispatcherFrameBoundaries() {
+  const isolated = await createFixture();
+  try {
+    const maximumBytes = 16 * 1024 * 1024;
+    // The request and batch objects occupy two of the parser's 64 levels.
+    const nested = (levels) => {
+      let value = null;
+      for (let index = 0; index < levels; index++) value = [value];
+      return value;
+    };
+    const commit = (id, revision, result) => ({
+      operation: "commit",
+      batch: {
+        command_id: id,
+        request_digest: hash(id),
+        expected_revision: revision,
+        events: [],
+        projections: [],
+        effects: [],
+        result,
+      },
+    });
+    const frameAtBytes = (request, bytes) => {
+      const body = JSON.stringify(request);
+      return body + " ".repeat(bytes - Buffer.byteLength(body) - 1) + "\n";
+    };
+    const invoke = (mode, input) =>
+      NodeChildProcess.spawnSync(database, isolated.cliArgs(mode), {
+        input,
+        encoding: "utf8",
+        env: {},
+        maxBuffer: 32 * 1024 * 1024,
+        timeout: 45_000,
+      });
+    const expected = nested(62);
+    const maximum = frameAtBytes(commit("dispatcher-depth", 0, expected), maximumBytes);
+    NodeAssert.equal(Buffer.byteLength(maximum), maximumBytes);
+    const accepted = invoke(
+      "initialize",
+      maximum +
+        [
+          commit("dispatcher-too-deep", 1, nested(63)),
+          { operation: "receipt", command_id: "dispatcher-depth" },
+          { operation: "snapshot" },
+          { operation: "shutdown" },
+        ]
+          .map((request) => JSON.stringify(request) + "\n")
+          .join(""),
+    );
+    NodeAssert.ifError(accepted.error);
+    NodeAssert.equal(accepted.status, 0, accepted.stderr);
+    NodeAssert.equal(accepted.stderr, "");
+    const results = accepted.stdout.trimEnd().split("\n").map(JSON.parse);
+    NodeAssert.equal(results.length, 5);
+    NodeAssert.deepEqual(successful(results[0]).receipt.result, expected);
+    NodeAssert.equal(results[1].ok, false);
+    NodeAssert.equal(results[1].error.kind, "invalid_request");
+    NodeAssert.deepEqual(successful(results[2]).result, expected);
+    NodeAssert.deepEqual(successful(results[3]), {
+      revision: 1,
+      last_sequence: 0,
+      projections: [],
+    });
+    NodeAssert.equal(successful(results[4]), null);
+    checked(
+      "real helper accepts a 16 MiB, 64-level frame and cleanly rejects the next nesting level",
+    );
+
+    const oversized = invoke(
+      "connect",
+      frameAtBytes(commit("dispatcher-too-large", 1, expected), maximumBytes + 1),
+    );
+    NodeAssert.ifError(oversized.error);
+    NodeAssert.equal(oversized.status, 1, oversized.stderr);
+    const rejected = oversized.stdout.trimEnd().split("\n").map(JSON.parse);
+    NodeAssert.equal(rejected.length, 1);
+    NodeAssert.equal(rejected[0].ok, false);
+    NodeAssert.equal(rejected[0].error.kind, "invalid_request");
+    NodeAssert.match(oversized.stderr, /frame exceeds 16 MiB/);
+
+    const reopened = invoke(
+      "connect",
+      [
+        { operation: "snapshot" },
+        { operation: "receipt", command_id: "dispatcher-too-deep" },
+        { operation: "receipt", command_id: "dispatcher-too-large" },
+        { operation: "receipt", command_id: "dispatcher-depth" },
+        { operation: "shutdown" },
+      ]
+        .map((request) => JSON.stringify(request) + "\n")
+        .join(""),
+    );
+    NodeAssert.ifError(reopened.error);
+    NodeAssert.equal(reopened.status, 0, reopened.stderr);
+    NodeAssert.equal(reopened.stderr, "");
+    const retained = reopened.stdout.trimEnd().split("\n").map(JSON.parse);
+    NodeAssert.equal(retained.length, 5);
+    NodeAssert.deepEqual(successful(retained[0]), successful(results[3]));
+    NodeAssert.equal(successful(retained[1]), null);
+    NodeAssert.equal(successful(retained[2]), null);
+    NodeAssert.deepEqual(successful(retained[3]).result, expected);
+    NodeAssert.equal(successful(retained[4]), null);
+    checked("real helper rejects the next frame byte without persisting either rejected receipt");
+  } finally {
+    await isolated.close();
+  }
+}
+
 try {
+  await checkDispatcherFrameBoundaries();
   for (const mode of ["local", "read-only-local", "exclusive-local"]) {
     // Open failures are request-correlated protocol errors, not an unsolicited
     // transport exit. They must still leave the missing database untouched.
@@ -156,7 +265,9 @@ try {
     NodeAssert.equal(noRequest.stderr, "");
     NodeAssert.deepEqual(await NodeFSP.readdir(root), []);
   }
-  checked("missing-store opens return one typed rejection only after a request and create no files");
+  checked(
+    "missing-store opens return one typed rejection only after a request and create no files",
+  );
   for (const args of [
     ["initialize-loopback", "ws://127.0.0.1:8000"],
     ["loopback", "ws://127.0.0.1:8000"],

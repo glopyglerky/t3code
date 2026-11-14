@@ -65,6 +65,22 @@ class WorkflowArtifactWiring(unittest.TestCase):
         self.assertIn("value: ${{ jobs.qualify.outputs.native_artifact }}", self.native)
         self.assertIn("proof_run_attempt: ${{ steps.proof.outputs.proof_run_attempt }}", self.hybrid)
 
+    def test_performance_installs_the_same_frozen_production_graph_as_the_application(self):
+        application = self.hybrid.split("\n  application:", 1)[1].split("\n  performance:", 1)[0]
+        performance = self.hybrid.split("\n  performance:", 1)[1].split("\n  qualification:", 1)[0]
+        for job in (application, performance):
+            self.assertIn("node-version: 26.12.1", job)
+            self.assertIn("npm install --global pnpm@12.14.0 --ignore-scripts --no-audit --no-fund", job)
+            self.assertIn("run: pnpm install --frozen-lockfile", job)
+            self.assertIn("hashFiles('pnpm-lock.yaml')", job)
+        self.assertNotIn("install-server-tests.mjs", performance)
+        self.assertNotIn("cache-dependency-path: tools/server-test-runtime", performance)
+        self.assertLess(performance.index("run: pnpm install --frozen-lockfile"),
+                        performance.index("run: node tools/link-performance-runtime.mjs"))
+        self.assertLess(performance.index("run: node tools/link-performance-runtime.mjs"),
+                        performance.index("node tools/performance-persistence.mjs"))
+        self.assertIn("run: node --test tools/performance-runtime.test.mjs", performance)
+
 
 if __name__ == "__main__":
     unittest.main()

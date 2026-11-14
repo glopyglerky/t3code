@@ -181,15 +181,49 @@ def validate_baseline(report: dict):
                   "sqlite_wrapper_sha256"):
         require(isinstance(baseline.get(field), str) and bool(DIGEST.fullmatch(baseline[field])),
                 f"stock export omits {field}")
+    provenance = baseline.get("runtime_provenance")
+    require(isinstance(provenance, dict) and provenance.get("status") == "verified"
+            and provenance.get("issues") == [] and provenance.get("package_manager") == "pnpm@12.14.0"
+            and provenance.get("installed_lock_matches_application_lock") is True
+            and provenance.get("external_packages_within_virtual_store") is True
+            and provenance.get("per_workspace_resolution") is True,
+            "comparison dependencies were not verified against the frozen production pnpm installation")
+    for field in ("installed_lock_sha256", "modules_metadata_sha256", "node_executable_sha256", "external_resolution_sha256"):
+        require(isinstance(provenance.get(field), str) and bool(DIGEST.fullmatch(provenance[field])),
+                f"comparison runtime omits {field}")
+    dependencies = baseline.get("external_dependencies")
+    fields = ("importer", "name", "version", "package_json_sha256", "installed_path")
+    require(isinstance(dependencies, list) and bool(dependencies)
+            and all(isinstance(item, dict)
+                    and all(isinstance(item.get(field), str) and bool(item[field]) for field in fields)
+                    and DIGEST.fullmatch(item["package_json_sha256"])
+                    and item["installed_path"].startswith("node_modules/.pnpm/")
+                    and not any(part in (".", "..", "") for part in item["installed_path"].split("/"))
+                    and "\\" not in item["installed_path"] for item in dependencies),
+            "comparison omits installed external dependency locations or points outside the frozen store")
+    installed = {(item["importer"], item["name"]): item for item in dependencies}
+    require(len(installed) == len(dependencies), "comparison repeats an installed dependency resolution")
+    retained = [[item[field] for field in fields] for item in dependencies]
+    require(hashlib.sha256(json.dumps(retained, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+            == provenance["external_resolution_sha256"],
+            "installed dependency resolution digest contradicts the retained package evidence")
     runtime = baseline.get("resolved_runtime")
     require(isinstance(runtime, list) and bool(runtime)
             and all(isinstance(item, dict) and isinstance(item.get("name"), str)
+                    and isinstance(item.get("importer"), str)
                     and isinstance(item.get("expected_version"), str) and bool(item["expected_version"])
                     and item.get("actual_version") == item["expected_version"]
                     and isinstance(item.get("package_json_sha256"), str)
                     and DIGEST.fullmatch(item["package_json_sha256"]) for item in runtime)
             and {"effect", "@effect/platform-node"} <= {item["name"] for item in runtime},
             "stock and native critical dependency versions are not bound to the same lock")
+    for item in runtime:
+        descriptor = installed.get((item["importer"], item["name"]), installed.get((".", item["name"])))
+        require(descriptor is not None
+                and descriptor["version"] == item["actual_version"]
+                and descriptor["package_json_sha256"] == item["package_json_sha256"]
+                and descriptor["installed_path"] == item.get("installed_path"),
+                "resolved production dependency contradicts its retained installed package")
 
 
 def valid_result(row: object) -> bool:

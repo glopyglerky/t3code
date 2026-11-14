@@ -635,6 +635,7 @@ try {
     "tools/performance-contract.json",
     "tools/performance-baseline.mjs",
     "tools/performance-memory.mjs",
+    "tools/performance-runtime.mjs",
     "apps/server/src/persistence/Omdb.ts",
     "apps/server/src/orchestration-v2/NativeProjectionStore.ts",
     "apps/server/src/orchestration-v2/NativeThreadSearch.ts",
@@ -649,6 +650,7 @@ try {
     upstream.commit,
     upstream.root_tree,
     NodePath.join(fixture.root, "upstream"),
+    { qualify: mode === "qualify" },
   );
   const baselineModule = async (path) => ({
     module: await import(NodeURL.pathToFileURL(NodePath.join(report.baseline.root, path)).href),
@@ -769,6 +771,17 @@ try {
     sourceHash,
     "Immutable source fixture was mutated",
   );
+  NodeAssert.equal(
+    hash(await NodeFSP.readFile(options.database)),
+    report.executable_sha256,
+    "Native helper changed during measurement",
+  );
+  if (options.manifest)
+    NodeAssert.equal(
+      hash(await NodeFSP.readFile(options.manifest)),
+      report.native_manifest_sha256,
+      "Native release manifest changed during measurement",
+    );
   NodeAssert.equal(
     git("rev-parse", "HEAD"),
     report.source_commit,

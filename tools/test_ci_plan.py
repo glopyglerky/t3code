@@ -131,7 +131,7 @@ class SelectionTests(unittest.TestCase):
         self.assertFalse(result["upstream_tests"])
 
     def test_measurement_contract_and_runner_changes_force_every_gate(self):
-        for path in ("tools/performance-contract.json", "tools/performance-statistics.mjs",
+        for path in ("tools/link-performance-runtime.mjs", "tools/performance-contract.json", "tools/performance-statistics.mjs",
                      "tools/performance-worker.mjs", "tools/ci_performance.py", "tools/ci_promotion.py"):
             with self.subTest(path=path):
                 result = self.select([path])

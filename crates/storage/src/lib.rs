@@ -2,6 +2,8 @@
 
 mod backend;
 
+pub use backend::run_on_database_thread;
+
 #[path = "../../../apps/server/src/persistence/redb_transactions.rs"]
 pub mod application;
 #[path = "../../../apps/server/src/persistence/redb_auth_rows.rs"]
