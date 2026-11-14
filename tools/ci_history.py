@@ -184,20 +184,38 @@ def _git(root: Path, *args: str, timeout: float = 10) -> str:
 
 
 def find_qualification(root: Path, repository: str, head: str, policy_digest: str,
-                       current_run_id: str, token: str | None) -> dict | None:
+                       current_run_id: str, token: str | None, *,
+                       expected_run_id: int | None = None,
+                       expected_commit: str | None = None,
+                       fetch_missing: bool = False) -> dict | None:
     """Return a verified identical commit or successful ancestor, else None.
 
     Inspect at most one bounded page and twelve eligible artifacts. Reused
     receipts only suppress another run of this exact source and CI policy. A
     verified ancestor, rather than event.before, anchors incremental selection.
+    A consumer may revalidate one exact planned run without searching for a
+    newer baseline. Missing evidence then rejects that selected baseline.
     """
     if not SHA.fullmatch(head) or not DIGEST.fullmatch(policy_digest):
         return None
     deadline = time.monotonic() + TIME_BUDGET
     try:
         client = GitHub(repository, token)
-        response = client.json("/actions/workflows/hybrid.yml/runs?status=success&per_page=50")
-        runs = response.get("workflow_runs") if isinstance(response, dict) else None
+        if expected_run_id is not None or expected_commit is not None:
+            if (type(expected_run_id) is not int or expected_run_id <= 0
+                    or not isinstance(expected_commit, str) or not SHA.fullmatch(expected_commit)):
+                return None
+            selected = client.json(f"/actions/runs/{expected_run_id}")
+            if (not eligible_run(selected, repository, current_run_id)
+                    or selected["id"] != expected_run_id
+                    or selected["head_sha"] != expected_commit):
+                return None
+            runs = [selected]
+        else:
+            if fetch_missing:
+                return None
+            response = client.json("/actions/workflows/hybrid.yml/runs?status=success&per_page=50")
+            runs = response.get("workflow_runs") if isinstance(response, dict) else None
         if not isinstance(runs, list):
             return None
         eligible = [run for run in runs if eligible_run(run, repository, current_run_id)]
@@ -209,6 +227,15 @@ def find_qualification(root: Path, repository: str, head: str, policy_digest: st
                 return None
             commit = run["head_sha"]
             try:
+                if fetch_missing:
+                    try:
+                        _git(root, "cat-file", "-e", f"{commit}^{{commit}}", timeout=min(10, remaining))
+                    except subprocess.SubprocessError:
+                        # Eligibility and the exact planned commit were checked
+                        # against GitHub first; never fetch a caller's ref name.
+                        _git(root, "fetch", "--no-tags", "--no-write-fetch-head",
+                             f"https://github.com/{repository}.git", commit,
+                             timeout=min(10, remaining))
                 _git(root, "merge-base", "--is-ancestor", commit, head, timeout=min(10, remaining))
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:

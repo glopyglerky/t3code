@@ -480,6 +480,9 @@ def main(argv=None):
                                            policy_digest(nightly.read_tree(root, head)),
                                            os.environ.get("GITHUB_RUN_ID", ""), os.environ.get("GITHUB_TOKEN"))
     plan = make_plan(root, head, qualification, args.full)
+    plan.update(ci_repository=os.environ.get("GITHUB_REPOSITORY"),
+                ci_run_id=os.environ.get("GITHUB_RUN_ID"),
+                ci_run_attempt=os.environ.get("GITHUB_RUN_ATTEMPT"))
     write_plan(plan, args.output, args.github_output, args.summary)
     print(json.dumps({"mode": plan["mode"], "gates": plan["gates"], "base": plan["base"]}))
     return 0

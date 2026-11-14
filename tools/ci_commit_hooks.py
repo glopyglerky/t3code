@@ -14,6 +14,10 @@ import subprocess
 import sys
 import time
 
+import nightly
+from ci_history import find_qualification
+from ci_plan import policy_digest
+
 
 class HookError(ValueError):
     pass
@@ -25,6 +29,12 @@ TERMINATION_GRACE_SECONDS = 10
 def require(condition: bool, message: str):
     if not condition:
         raise HookError(message)
+
+
+def immutable_sha(value: object) -> str:
+    require(isinstance(value, str) and re.fullmatch(r"[a-f0-9]{40}", value) is not None,
+            "A hook source reference must be an immutable 40-hex commit or tree")
+    return value
 
 
 def git(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
@@ -43,6 +53,81 @@ def status(root: Path) -> bytes:
 def digest(path: Path) -> dict:
     data = path.read_bytes()
     return {"path": str(path), "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+
+
+def hook_baseline(root: Path, plan_path: Path, env: dict[str, str], head: str, tree: str) -> dict:
+    """Cover inherited fork changes, using the same verified baseline as CI."""
+    plan_path = plan_path.resolve()
+    require(plan_path.is_relative_to(Path(env["RUNNER_TEMP"]).resolve())
+            and not plan_path.is_relative_to(root), "The CI plan must be outside the checkout in RUNNER_TEMP")
+    with plan_path.open("rb") as source:
+        raw = source.read(2 * 1024 * 1024 + 1)
+    require(len(raw) <= 2 * 1024 * 1024, "The CI plan exceeds its bound")
+    plan = json.loads(raw)
+    require(isinstance(plan, dict) and type(plan.get("schema_version")) is int
+            and plan["schema_version"] == 1, "Unsupported CI plan")
+    require(plan.get("head") == head and plan.get("source_tree") == tree,
+            "The CI plan must bind the exact candidate source")
+    repository = env.get("GITHUB_REPOSITORY", "")
+    require(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) is not None
+            and plan.get("ci_repository") == repository,
+            "The CI plan must bind the current repository")
+    require(plan.get("ci_run_id") == env["GITHUB_RUN_ID"]
+            and isinstance(plan.get("ci_run_attempt"), str)
+            and re.fullmatch(r"[1-9][0-9]*", plan["ci_run_attempt"]) is not None
+            and int(plan["ci_run_attempt"]) <= int(env["GITHUB_RUN_ATTEMPT"]),
+            "The CI plan must come from this run and an existing producing attempt")
+    current_policy = policy_digest(nightly.read_tree(root, head))
+    require(plan.get("policy_digest") == current_policy, "The CI plan has a stale policy")
+    lock = json.loads(git(root, "show", f"{head}:upstream.lock.json").stdout)
+    require(isinstance(lock, dict) and isinstance(lock.get("upstream"), dict),
+            "The committed upstream reference is malformed")
+    upstream = lock.get("upstream", {})
+    require(upstream.get("repository") == "pingdotgg/t3code", "Untrusted upstream repository")
+    upstream_commit = immutable_sha(upstream.get("commit"))
+    upstream_tree = immutable_sha(upstream.get("root_tree"))
+    require(plan.get("upstream_commit") == upstream_commit
+            and plan.get("upstream_tree") == upstream_tree,
+            "The CI plan has a different immutable upstream reference")
+    base = plan.get("base")
+    provenance = None
+    if base is not None:
+        base = immutable_sha(base)
+        require(type(plan.get("base_run_id")) is int and plan["base_run_id"] > 0,
+                "A qualified hook baseline requires its producing run")
+        provenance = find_qualification(
+            root, repository, head, current_policy, env["GITHUB_RUN_ID"], env.get("GITHUB_TOKEN"),
+            expected_run_id=plan["base_run_id"], expected_commit=base, fetch_missing=True)
+        require(provenance is not None and provenance.get("commit") == base
+                and provenance.get("run_id") == plan["base_run_id"],
+                "The selected qualified ancestor could not be revalidated")
+        reason = "verified-qualified-ancestor"
+    else:
+        require(plan.get("base_run_id") is None, "An absent qualified baseline cannot name a run")
+        base = upstream_commit
+        if git(root, "cat-file", "-e", f"{base}^{{commit}}", check=False).returncode:
+            git(root, "fetch", "--no-tags", "--no-write-fetch-head",
+                "https://github.com/pingdotgg/t3code.git", base)
+        require(value(root, "rev-parse", f"{base}^{{tree}}") == upstream_tree,
+                "The trusted upstream commit and tree disagree")
+        reason = "all-fork-differences-from-trusted-upstream"
+    require(git(root, "merge-base", "--is-ancestor", base, head, check=False).returncode == 0,
+            "The hook baseline must be an ancestor of the candidate")
+    changed = git(root, "diff", "--name-only", "--no-renames", "-z", base, head).stdout
+    require(changed, "The candidate has no fork changes against its hook baseline")
+    return {
+        "hook_base": base, "hook_base_tree": value(root, "rev-parse", f"{base}^{{tree}}"),
+        "hook_base_reason": reason, "qualified_base_run_id": plan.get("base_run_id"),
+        "qualified_base_receipt_sha256": (hashlib.sha256(json.dumps(
+            provenance["receipt"], sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            if provenance is not None else None),
+        "ci_plan": {"path": str(plan_path), "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
+                    "producing_run_attempt": plan["ci_run_attempt"]},
+        "policy_digest": current_policy, "upstream_commit": upstream_commit,
+        "upstream_tree": upstream_tree,
+        "changed_paths": [os.fsdecode(path) for path in changed.split(b"\0") if path],
+        "changed_paths_sha256": hashlib.sha256(changed).hexdigest(),
+    }
 
 
 def require_checkout(root: Path, output: Path, env: dict[str, str]) -> tuple[str, str, str]:
@@ -186,9 +271,12 @@ def require_unchanged(proof: dict, tree: str, parent: str):
     require(proof["observed_head"] == parent, "The hook changed the temporary detached HEAD")
 
 
-def verify_hooks(root: Path, output: Path, env: dict[str, str], timeout_seconds: float = 600) -> dict:
+def verify_hooks(root: Path, output: Path, env: dict[str, str], plan_path: Path,
+                 timeout_seconds: float = 600) -> dict:
     root, output = root.resolve(), output.resolve()
     head, tree, parent = require_checkout(root, output, env)
+    baseline = hook_baseline(root, plan_path, env, head, tree)
+    hook_base = baseline["hook_base"]
     output.parent.mkdir(parents=True, exist_ok=True)
     stdout_path = output.with_suffix(".stdout.log")
     stderr_path = output.with_suffix(".stderr.log")
@@ -201,8 +289,6 @@ def verify_hooks(root: Path, output: Path, env: dict[str, str], timeout_seconds:
             "Both normal Knip scans and their task must be configured")
     vp = root / "node_modules" / ".bin" / "vp"
     require(vp.is_file() and os.access(vp, os.X_OK), "The frozen workspace Vite runner is missing")
-    changed = git(root, "diff", "--name-only", "--no-renames", "-z", parent, head).stdout
-    require(changed, "The candidate has no changes against its first parent")
     proof = {
         "schema_version": 1, "status": "running", "source_commit": head,
         "source_tree": tree, "first_parent": parent,
@@ -210,7 +296,7 @@ def verify_hooks(root: Path, output: Path, env: dict[str, str], timeout_seconds:
         "command": ["git", "hook", "run", "pre-commit"],
         "timeout_seconds": timeout_seconds,
         "configured_knip_tasks": {name: scripts[name] for name in names},
-        "changed_paths": [os.fsdecode(path) for path in changed.split(b"\0") if path],
+        **baseline,
         "hook_source": digest(root / ".vite-hooks" / "pre-commit"),
         "task_config": digest(root / "vite.config.ts"),
         "source_clean_before": True,
@@ -221,12 +307,14 @@ def verify_hooks(root: Path, output: Path, env: dict[str, str], timeout_seconds:
     start = time.monotonic()
     try:
         # This detached runner HEAD is temporary. The index and working source
-        # remain the candidate, so the real hook sees its exact first-parent diff.
+        # remain the candidate, so the real hook also sees unqualified inherited
+        # fork changes, even when this commit only changes an unrelated file.
         moved = True
-        git(root, "update-ref", "--no-deref", "HEAD", parent, head)
+        git(root, "update-ref", "--no-deref", "HEAD", hook_base, head)
         git(root, "read-tree", tree)
         require(value(root, "write-tree") == tree, "Staged candidate identity changed")
         child_env = dict(env, VP_RUN_CONCURRENCY_LIMIT="1", GIT_TERMINAL_PROMPT="0")
+        child_env.pop("GITHUB_TOKEN", None)
         with stdout_path.open("xb") as stdout, stderr_path.open("xb") as stderr:
             proof["hook_result"] = run_owned(
                 ["git", "--no-replace-objects", "hook", "run", "pre-commit"],
@@ -238,7 +326,9 @@ def verify_hooks(root: Path, output: Path, env: dict[str, str], timeout_seconds:
             require(proof["hook_result"]["exit_code"] == 0,
                     f"The normal pre-commit hook failed with status {proof['hook_result']['exit_code']}")
             proof.update(observe(root))
-            require_unchanged(proof, tree, parent)
+            require_unchanged(proof, tree, hook_base)
+            require(digest(plan_path)["sha256"] == baseline["ci_plan"]["sha256"],
+                    "The CI plan changed during hook execution")
         proof["status"] = "passed"
     except (HookError, OSError, ValueError, subprocess.SubprocessError) as failure:
         error = failure
@@ -277,15 +367,16 @@ def verify_hooks(root: Path, output: Path, env: dict[str, str], timeout_seconds:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--plan", type=Path, required=True)
     args = parser.parse_args(argv)
     def interrupted(signum, _frame):
         raise HookError(f"Hook verification interrupted by signal {signum}")
     previous = {number: signal.signal(number, interrupted) for number in (signal.SIGINT, signal.SIGTERM)}
     try:
-        proof = verify_hooks(Path.cwd(), args.output, dict(os.environ))
+        proof = verify_hooks(Path.cwd(), args.output, dict(os.environ), args.plan)
         print(json.dumps(proof, indent=2))
         return 0
-    except (HookError, OSError, ValueError, subprocess.SubprocessError) as error:
+    except (HookError, OSError, ValueError, subprocess.SubprocessError, nightly.TrackingError) as error:
         print(f"Hosted commit hooks rejected: {error}", file=sys.stderr)
         return 1
     finally:

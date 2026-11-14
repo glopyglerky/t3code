@@ -43,8 +43,16 @@ paired suite and every failed result above remain unchanged.
 The [finer a2fb attribution](measurements/2026-11-14-finer-attribution-a2fb16d.md)
 retains the approved finer observer and all its per-operation distributions.
 Its inclusive digest-formatting spans motivate a separate
-[persisted-digest compatibility experiment](../porting/2026-11-14-request-digest-hex.md),
-which has local compatibility evidence and no measured speed result yet.
+[persisted-digest compatibility experiment](../porting/2026-11-14-request-digest-hex.md).
+Its [first hosted comparison](measurements/2026-11-14-digest-hex.md) passed the
+defined persistence correctness checks and failed all eleven speed rows; its
+application job stopped at eight lint findings in the normal hook. The separate
+[browser type successor](measurements/2026-11-14-browser-type.md) passed the
+scoped Linux application flow and again failed every speed row. Its narrower
+first-parent hook did not cover the inherited failed lint files. The
+[hook coverage correction](../porting/2026-11-14-inherited-hook-coverage.md)
+records that gap and the source-bound baseline requirement. Both comparisons
+retain every raw sample and failure; neither establishes a causal digest gain.
 The isolated [history borrowing hosted run](measurements/2026-11-14-history-eligible-borrow.md)
 passed its functional gates and failed all eleven speed rows. Its complete
 samples, tails, host differences and failed qualification remain available;

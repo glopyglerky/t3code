@@ -182,6 +182,8 @@ class QualifiedHistory(unittest.TestCase):
             if path == "/actions/workflows/hybrid.yml/runs?status=success&per_page=50":
                 return {"workflow_runs": runs}
             identifier = int(path.split("/")[3])
+            if path == f"/actions/runs/{identifier}":
+                return next((entry for entry in runs if entry["id"] == identifier), {})
             attempt = receipts.get(identifier, {}).get("run_attempt", 1)
             entry = {"id": identifier, "name": f"ci-qualification-{attempt}", "expired": False,
                      "size_in_bytes": 1024, **overrides.get(identifier, {})}
@@ -205,6 +207,52 @@ class QualifiedHistory(unittest.TestCase):
         self.assertEqual(result["commit"], self.base)
         self.assertFalse(result["reused"])
         self.assertIn("code.rs", self.git("diff", "--name-only", result["commit"], self.head))
+
+    def test_consumer_revalidates_only_the_exact_planned_successful_run(self):
+        client = self.client([run(self.head, 11), run(self.base, 10)],
+                             {10: self.record(self.base), 11: self.record(self.head, 11)})
+        with patch("ci_history.GitHub", return_value=client):
+            result = ci_history.find_qualification(
+                self.root, REPO, self.head, POLICY, "99", "token",
+                expected_run_id=10, expected_commit=self.base, fetch_missing=True)
+        self.assertEqual(result["commit"], self.base)
+        self.assertEqual(result["run_id"], 10)
+        client.json.assert_any_call("/actions/runs/10")
+        self.assertNotIn("/actions/workflows/hybrid.yml/runs?status=success&per_page=50",
+                         [call.args[0] for call in client.json.call_args_list])
+
+    def test_forged_or_failed_planned_run_is_not_fetched_or_reused(self):
+        for selected in (run(self.base, 10, conclusion="failure"), run(self.failed, 10),
+                         run(self.base, 11), run(self.base, 10, head_repository={"full_name": "other/repo"})):
+            client = self.client([selected], {10: self.record(self.base)})
+            with self.subTest(selected=selected), patch("ci_history.GitHub", return_value=client), \
+                    patch("ci_history._git") as git_call:
+                result = ci_history.find_qualification(
+                    self.root, REPO, self.head, POLICY, "99", "token",
+                    expected_run_id=10, expected_commit=self.base, fetch_missing=True)
+                self.assertIsNone(result)
+                git_call.assert_not_called()
+                client.artifact.assert_not_called()
+
+    def test_only_validated_missing_commit_is_fetched_by_immutable_sha(self):
+        client = self.client([run(self.base, 10)], {10: self.record(self.base)})
+        original = ci_history._git
+        calls = []
+        def missing_once(root, *args, **kwargs):
+            calls.append(args)
+            if args[0] == "cat-file":
+                raise subprocess.CalledProcessError(1, ["git", *args])
+            if args[0] == "fetch":
+                return ""
+            return original(root, *args, **kwargs)
+        with patch("ci_history.GitHub", return_value=client), patch("ci_history._git", missing_once):
+            result = ci_history.find_qualification(
+                self.root, REPO, self.head, POLICY, "99", "token",
+                expected_run_id=10, expected_commit=self.base, fetch_missing=True)
+        self.assertEqual(result["commit"], self.base)
+        self.assertEqual([args for args in calls if args[0] == "fetch"],
+                         [("fetch", "--no-tags", "--no-write-fetch-head",
+                           "https://github.com/glopyglerky/t3code-ls.git", self.base)])
 
     def test_exact_commit_reuse_wins_over_a_more_recent_ancestor_run(self):
         client = self.client([run(self.base, 12), run(self.head, 10)],

@@ -11,6 +11,8 @@ import time
 import unittest
 from unittest.mock import patch
 
+import nightly
+from ci_plan import policy_digest
 from ci_commit_hooks import HookError, digest, git, restore, verify_hooks
 
 
@@ -19,6 +21,14 @@ import os,pathlib,subprocess,sys,time
 root=pathlib.Path.cwd()
 mode=os.environ.get("FIXTURE_HOOK", "pass")
 print("normal pre-commit hook", flush=True)
+if mode == "inherited":
+ selected=subprocess.check_output(["git","diff","--cached","--name-only"],text=True).splitlines()
+ print("selected paths: "+repr(selected),flush=True)
+ if "candidate.txt" in selected and "inherited finding" in (root/"candidate.txt").read_text():
+  print("inherited source is still invalid",file=sys.stderr,flush=True)
+  sys.exit(7)
+if mode == "plan-change":
+ pathlib.Path(os.environ["FIXTURE_PLAN"]).write_text("{}")
 if mode == "fail":
  print("deliberate unused-code finding",file=sys.stderr,flush=True)
  sys.exit(7)
@@ -50,6 +60,7 @@ class HostedCommitHooks(unittest.TestCase):
                     if not key.startswith("GIT_") and key not in ("HUSKY", "VP_GIT_HOOKS", "VITE_GIT_HOOKS")}
         self.env.update(GITHUB_ACTIONS="true", CI="true", GITHUB_WORKSPACE=str(self.root),
                         RUNNER_TEMP=str(self.runner), GITHUB_RUN_ID="123", GITHUB_RUN_ATTEMPT="2",
+                        GITHUB_REPOSITORY="glopyglerky/t3code-ls",
                         RUNNER_ENVIRONMENT="github-hosted",
                         HOME=str(self.home), XDG_CONFIG_HOME=str(self.home / ".config"),
                         FIXTURE_CHILD_PID=str(self.runner / "owned-child.pid"))
@@ -65,10 +76,17 @@ class HostedCommitHooks(unittest.TestCase):
             "knip:check:exports": "knip --workspace apps/server --exports --no-config-hints",
         }}))
         (self.root / "vite.config.ts").write_text("// Controlled hook task fixture.\n")
+        (self.root / "upstream-only.ts").write_text("// Unchanged trusted upstream source.\n")
         self.git("add", ".")
         self.git("commit", "-qm", "fixture base")
         self.parent = self.git("rev-parse", "HEAD")
+        self.upstream = self.parent
+        self.upstream_tree = self.git("rev-parse", "HEAD^{tree}")
+        (self.root / "upstream.lock.json").write_text(json.dumps({"upstream": {
+            "repository": "pingdotgg/t3code", "commit": self.upstream, "root_tree": self.upstream_tree,
+        }}))
         (self.root / "candidate.txt").write_text("candidate source\n")
+        self.expected_candidate = "candidate source\n"
         self.git("add", ".")
         self.git("commit", "-qm", "fixture candidate")
         self.head = self.git("rev-parse", "HEAD")
@@ -86,19 +104,41 @@ class HostedCommitHooks(unittest.TestCase):
         binary.write_text('#!/bin/sh\n[ "$1" = run ] && [ "$2" = knip:check ] || exit 90\nprintf "full files/dependencies scan\\nfull exports scan\\n"\nexit "${FIXTURE_KNIP_EXIT:-0}"\n')
         binary.chmod(0o755)
         self.output = self.runner / "proof.json"
+        self.plan = self.runner / "ci-plan.json"
+        self.env["FIXTURE_PLAN"] = str(self.plan)
+        self.write_plan()
+
+    def write_plan(self, **changes):
+        value = {
+            "schema_version": 1, "head": self.head, "source_tree": self.tree,
+            "policy_digest": policy_digest(nightly.read_tree(self.root, self.head)),
+            "upstream_commit": self.upstream, "upstream_tree": self.upstream_tree,
+            "base": None, "base_run_id": None, "ci_repository": self.env["GITHUB_REPOSITORY"],
+            "ci_run_id": "123", "ci_run_attempt": "1", **changes,
+        }
+        self.plan.write_text(json.dumps(value))
+
+    def commit_candidate(self, message):
+        self.git("add", "--all")
+        self.git("-c", "core.hooksPath=/dev/null", "commit", "-qm", message)
+        self.parent = self.git("rev-parse", "HEAD^1")
+        self.head = self.git("rev-parse", "HEAD")
+        self.tree = self.git("rev-parse", "HEAD^{tree}")
+        self.env["GITHUB_SHA"] = self.head
+        self.write_plan()
 
     def git(self, *args):
         return subprocess.run(["git", "-C", str(self.root), *args], env=self.env,
                               check=True, capture_output=True, text=True).stdout.strip()
 
     def run_hook(self, **changes):
-        return verify_hooks(self.root, self.output, dict(self.env, **changes))
+        return verify_hooks(self.root, self.output, dict(self.env, **changes), self.plan)
 
     def assert_restored(self):
         self.assertEqual(self.git("rev-parse", "HEAD"), self.head)
         self.assertEqual(self.git("write-tree"), self.tree)
         self.assertEqual(self.git("status", "--porcelain", "--untracked-files=all"), "")
-        self.assertEqual((self.root / "candidate.txt").read_text(), "candidate source\n")
+        self.assertEqual((self.root / "candidate.txt").read_text(), self.expected_candidate)
         self.assertTrue((self.root / "node_modules/.bin/vp").is_file())
         self.assertEqual(subprocess.run(["git", "-C", str(self.root), "symbolic-ref", "-q", "HEAD"],
                                        capture_output=True).returncode, 1)
@@ -109,7 +149,11 @@ class HostedCommitHooks(unittest.TestCase):
         self.assertEqual(proof["source_commit"], self.head)
         self.assertEqual(proof["source_tree"], self.tree)
         self.assertEqual(proof["first_parent"], self.parent)
-        self.assertEqual(proof["changed_paths"], ["candidate.txt"])
+        self.assertEqual(proof["changed_paths"], ["candidate.txt", "upstream.lock.json"])
+        self.assertEqual(proof["hook_base"], self.upstream)
+        self.assertEqual(proof["hook_base_reason"], "all-fork-differences-from-trusted-upstream")
+        self.assertEqual(proof["ci_plan"]["producing_run_attempt"], "1")
+        self.assertNotIn("upstream-only.ts", proof["changed_paths"])
         self.assertEqual(proof["hook_result"], {"exit_code": 0, "timed_out": False})
         log = self.output.with_suffix(".stdout.log").read_text() + self.output.with_suffix(".stderr.log").read_text()
         self.assertIn("normal pre-commit hook", log)
@@ -123,6 +167,80 @@ class HostedCommitHooks(unittest.TestCase):
         proof = json.loads(self.output.read_text())
         self.assertEqual(proof["status"], "failed")
         self.assertIn("deliberate unused-code finding", self.output.with_suffix(".stderr.log").read_text())
+        self.assert_restored()
+
+    def test_unrelated_followup_still_checks_inherited_failed_fork_source(self):
+        self.expected_candidate = "inherited finding\n"
+        (self.root / "candidate.txt").write_text(self.expected_candidate)
+        self.commit_candidate("unqualified source finding")
+        (self.root / "followup.md").write_text("unrelated documentation\n")
+        self.commit_candidate("later documentation does not qualify source")
+        self.assertEqual(self.git("diff", "--name-only", self.parent, self.head), "followup.md")
+        with self.assertRaisesRegex(HookError, "status 7"):
+            self.run_hook(FIXTURE_HOOK="inherited")
+        proof = json.loads(self.output.read_text())
+        self.assertEqual(proof["first_parent"], self.parent)
+        self.assertNotEqual(proof["first_parent"], proof["hook_base"])
+        self.assertIn("candidate.txt", proof["changed_paths"])
+        self.assertNotIn("upstream-only.ts", proof["changed_paths"])
+        self.assertIn("inherited source is still invalid", self.output.with_suffix(".stderr.log").read_text())
+        self.assert_restored()
+
+    def test_verified_qualified_ancestor_is_revalidated_before_selecting_its_delta(self):
+        base = self.head
+        (self.root / "followup.md").write_text("later fork edit\n")
+        self.commit_candidate("followup after qualified code")
+        self.write_plan(base=base, base_run_id=10)
+        record = {"commit": base, "run_id": 10, "receipt": {"source_commit": base}}
+        with patch("ci_commit_hooks.find_qualification", return_value=record) as verify:
+            proof = self.run_hook()
+        self.assertEqual(proof["hook_base"], base)
+        self.assertEqual(proof["hook_base_reason"], "verified-qualified-ancestor")
+        self.assertEqual(proof["changed_paths"], ["followup.md"])
+        self.assertEqual(verify.call_args.kwargs,
+                         {"expected_run_id": 10, "expected_commit": base, "fetch_missing": True})
+        self.assert_restored()
+
+    def test_stale_wrong_run_wrong_policy_and_forged_base_refuse_before_hook(self):
+        mutations = [
+            ({"head": "a" * 40}, "exact candidate"),
+            ({"source_tree": "a" * 40}, "exact candidate"),
+            ({"ci_repository": "someone/else"}, "current repository"),
+            ({"ci_run_id": "124"}, "this run"),
+            ({"ci_run_attempt": "3"}, "producing attempt"),
+            ({"ci_run_attempt": "0"}, "producing attempt"),
+            ({"policy_digest": "a" * 64}, "stale policy"),
+            ({"upstream_commit": "a" * 40}, "upstream reference"),
+            ({"base": None, "base_run_id": 10}, "absent qualified baseline"),
+            ({"base": "main", "base_run_id": 10}, "immutable 40-hex"),
+        ]
+        for changes, message in mutations:
+            with self.subTest(changes=changes):
+                self.write_plan(**changes)
+                with self.assertRaisesRegex(HookError, message):
+                    self.run_hook()
+                self.assertFalse(self.output.exists())
+                self.assert_restored()
+        self.write_plan(base=self.parent, base_run_id=10)
+        with patch("ci_commit_hooks.find_qualification", return_value=None):
+            with self.assertRaisesRegex(HookError, "could not be revalidated"):
+                self.run_hook()
+        self.assert_restored()
+
+    def test_nonancestor_qualified_base_cannot_hide_candidate_changes(self):
+        unrelated = self.git("commit-tree", self.tree, "-m", "unrelated source history")
+        self.write_plan(base=unrelated, base_run_id=10)
+        record = {"commit": unrelated, "run_id": 10, "receipt": {"source_commit": unrelated}}
+        with patch("ci_commit_hooks.find_qualification", return_value=record):
+            with self.assertRaisesRegex(HookError, "must be an ancestor"):
+                self.run_hook()
+        self.assertFalse(self.output.exists())
+        self.assert_restored()
+
+    def test_plan_mutation_after_hook_is_rejected_with_exact_restoration(self):
+        with self.assertRaisesRegex(HookError, "plan changed"):
+            self.run_hook(FIXTURE_HOOK="plan-change")
+        self.assertEqual(json.loads(self.output.read_text())["status"], "failed")
         self.assert_restored()
 
     def test_full_knip_failure_cannot_become_a_pass(self):
@@ -156,7 +274,8 @@ class HostedCommitHooks(unittest.TestCase):
     def test_timeout_stops_owned_descendant_before_restoring_source(self):
         with patch("ci_commit_hooks.TERMINATION_GRACE_SECONDS", 0.2):
             with self.assertRaisesRegex(HookError, "timed out"):
-                verify_hooks(self.root, self.output, dict(self.env, FIXTURE_HOOK="sleep"), timeout_seconds=0.5)
+                verify_hooks(self.root, self.output, dict(self.env, FIXTURE_HOOK="sleep"),
+                             self.plan, timeout_seconds=0.5)
         proof = json.loads(self.output.read_text())
         self.assertTrue(proof["hook_result"]["timed_out"])
         child_pid = int((self.runner / "owned-child.pid").read_text())
@@ -226,7 +345,8 @@ class HostedCommitHooks(unittest.TestCase):
 
     def test_cancellation_closes_group_and_restores_detached_candidate(self):
         script = Path(__file__).with_name("ci_commit_hooks.py")
-        child = subprocess.Popen([sys.executable, str(script), "--output", str(self.output)],
+        child = subprocess.Popen([sys.executable, str(script), "--output", str(self.output),
+                                  "--plan", str(self.plan)],
                                  cwd=self.root, env=dict(self.env, FIXTURE_HOOK="sleep"),
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:

@@ -50,9 +50,9 @@ class WorkflowArtifactWiring(unittest.TestCase):
         downloads = artifact_names(self.hybrid, "download")
         names = [resolve(name, 2, 1, 1, 1) for name in downloads]
         self.assertEqual(names.count("hybrid-native-binaries-1"), 3)
-        self.assertEqual(names.count("ci-plan-1"), 2)
+        self.assertEqual(names.count("ci-plan-1"), 3)
         self.assertEqual(names.count("hybrid-performance-proof-1"), 1)
-        self.assertEqual(len(names), 6)
+        self.assertEqual(len(names), 7)
         names = [resolve(name, 2, 1, 1, 2) for name in downloads]
         self.assertIn("hybrid-performance-proof-2", names)
         self.assertNotIn("hybrid-native-binaries-2", names)
@@ -97,16 +97,23 @@ class WorkflowArtifactWiring(unittest.TestCase):
 
     def test_full_normal_hooks_are_required_before_application_and_retained_after_failure(self):
         application = self.hybrid.split("\n  application:", 1)[1].split("\n  performance:", 1)[0]
-        self.assertIn("fetch-depth: 2", application)
+        self.assertIn("fetch-depth: 0", application)
+        self.assertIn("filter: blob:none", application)
+        self.assertIn("permissions:\n      contents: read\n      actions: read", application)
+        self.assertIn("name: ${{ needs.plan.outputs.plan_artifact }}", application)
+        self.assertIn("path: ${{ runner.temp }}/application-plan", application)
         self.assertIn('test "$(git rev-parse HEAD)" = "$GITHUB_SHA"', application)
         self.assertIn('git checkout --detach "$GITHUB_SHA"', application)
-        invocation = 'python3 tools/ci_commit_hooks.py --output "$RUNNER_TEMP/commit-hook-proof/proof.json"'
+        invocation = 'python3 tools/ci_commit_hooks.py --plan "$RUNNER_TEMP/application-plan/ci-plan.json" --output "$RUNNER_TEMP/commit-hook-proof/proof.json"'
         self.assertIn(invocation, application)
+        self.assertLess(application.index("name: ${{ needs.plan.outputs.plan_artifact }}"), application.index(invocation))
         self.assertLess(application.index("pnpm install --frozen-lockfile"), application.index(invocation))
         self.assertLess(application.index(invocation), application.index("node tools/check-hybrid.mjs --verify-binaries"))
         self.assertIn("${{ runner.temp }}/commit-hook-proof/", application)
         self.assertIn("- name: Retain application evidence\n        if: always()", application)
         hook_step = application.split("- name: Run the normal candidate hooks", 1)[1].split("- uses:", 1)[0]
+        self.assertIn("GITHUB_TOKEN: ${{ github.token }}", hook_step)
+        self.assertNotIn("GITHUB_TOKEN:", application.split("- name: Run the normal candidate hooks", 1)[0])
         self.assertNotIn("continue-on-error", hook_step)
         self.assertNotIn("if:", hook_step)
 
