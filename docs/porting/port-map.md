@@ -13,18 +13,28 @@ the current crates in place so source movement does not obscure behavior changes
 The recovered decision and process ports are marked `integrated`. This means the
 restored application contains their production calls. It does not certify that
 the recovered application or any target build passed its new acceptance gates.
-The standalone native API, redb backend and Iroh transport remain `candidate`.
-No entry in the initial map authorizes source retirement.
+The standalone native API and Iroh transport remain `candidate`. The native
+application persistence boundary is `integrated` on its selected Linux route;
+its exact-source application and performance qualification is still required.
+Those states do not authorize source retirement.
+
+The [f751c848 integration](default-f751c848.md) preserves the native process and
+database routes while updating the shared awareness mapper and retained retry,
+snooze and Markdown behavior. Its source inventory includes the unchanged
+platform ownership of the imported terminal assets. The current source history
+and every mapped oracle blob name that fixed upstream revision; previous
+measurements remain evidence for their original revisions. No new original
+source is retired by this integration.
 
 ## States
 
-| State | Required meaning |
-| --- | --- |
-| `candidate` | A Rust component exists. Required original application code stays. |
-| `integrated` | A production application path calls the component. Acceptance is still pending. |
-| `accepted` | The stated target has current application, contract, failure and build evidence. |
-| `retired` | Required consumers have qualified replacements and the listed original source can be removed. |
-| `synced` | The replacement and its acceptance evidence include the recorded integrated upstream revision. |
+| State        | Required meaning                                                                               |
+| ------------ | ---------------------------------------------------------------------------------------------- |
+| `candidate`  | A Rust component exists. Required original application code stays.                             |
+| `integrated` | A production application path calls the component. Acceptance is still pending.                |
+| `accepted`   | The stated target has current application, contract, failure and build evidence.               |
+| `retired`    | Required consumers have qualified replacements and the listed original source can be removed.  |
+| `synced`     | The replacement and its acceptance evidence include the recorded integrated upstream revision. |
 
 Platform routes describe selection before execution. An uncertain native provider
 request or mutation must not be retried through another implementation.
@@ -119,12 +129,7 @@ replacement. A receipt has these fields:
   "upstream_commit": "<40-character integrated upstream commit>",
   "compiler_route": "lustr-bluefe-compatibility",
   "run_url": "https://github.com/glopyglerky/t3code-ls/actions/runs/<numeric-run-id>",
-  "checks": [
-    "normal-client-flow",
-    "contract-parity",
-    "failure-recovery",
-    "target-build"
-  ],
+  "checks": ["normal-client-flow", "contract-parity", "failure-recovery", "target-build"],
   "source_hashes": {
     "<each mapped input and every tracked file in rust_crates>": "<Git blob hash>",
     "Cargo.toml": "<Git blob hash>",

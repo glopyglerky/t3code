@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "recovery_commit": "d29a94f3a175eac1f26c548023fedd8695cedfaf",
-  "integrated_upstream_commit": "5fe2f7e4567d9e530ded0dabc9d706db27d77b84",
+  "integrated_upstream_commit": "f751c8488f7ca1e659e44ef12b05861c1bcf9bfb",
   "source_history": [
     "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
     "822671581383a357c5dc8d3ea9984b408c3e03c6",
@@ -16,7 +16,8 @@
     "c7a3f02e3851923ced8ebd000db79f641e11b038",
     "121f0cf014dcd6e94327588bf3f1f200a5f07ad7",
     "913d7fc45ec5814fff25c819cfe4de193ea42d63",
-    "5fe2f7e4567d9e530ded0dabc9d706db27d77b84"
+    "5fe2f7e4567d9e530ded0dabc9d706db27d77b84",
+    "f751c8488f7ca1e659e44ef12b05861c1bcf9bfb"
   ],
   "upstream_removals": [
     {
@@ -748,7 +749,7 @@
     "ios",
     "android"
   ],
-  "qualification": "Upstream 5fe2f7e4 is integrated with retained production Rust adapters. Native schema 91 and the selected application services require exact-commit qualification against this immutable source and its SQLite reader runtime. Earlier 913d7fc4 measurements do not qualify the new oracle. Source integration does not establish unqualified platform acceptance.",
+  "qualification": "Upstream f751c848 is integrated with retained production Rust adapters and the native initial-message repair. Schema 91 and the selected application services require exact-source qualification against this immutable stock reference. Earlier 5fe2f7e4 and 913d7fc4 correctness or performance results do not qualify the new integration. Source integration does not establish platform acceptance or a speed improvement.",
   "compiler_policy": "The current full-Rust route is the pinned Lustr coordinator with rustc-derived BlueFe. Direct native Lust coverage requires its own exact compiler identity and behavior receipts. Application CI consumes qualified compiler artifacts.",
   "layout_policy": "Retain upstream paths. Current crates are preserved during recovery; domain_owner records where their responsibilities belong. Move source separately from behavior changes.",
   "intentional_divergences": [
@@ -761,7 +762,7 @@
       "id": "command-and-dispatch-policy",
       "state": "integrated",
       "domain_owner": "apps/server/src/orchestration-v2",
-      "reviewed_upstream_commit": "5fe2f7e4567d9e530ded0dabc9d706db27d77b84",
+      "reviewed_upstream_commit": "f751c8488f7ca1e659e44ef12b05861c1bcf9bfb",
       "upstream_sources": [
         {
           "path": "apps/server/src/orchestration-v2/CommandPolicy.ts",
@@ -810,7 +811,7 @@
       "id": "project-commands",
       "state": "integrated",
       "domain_owner": "apps/server/src/project",
-      "reviewed_upstream_commit": "5fe2f7e4567d9e530ded0dabc9d706db27d77b84",
+      "reviewed_upstream_commit": "f751c8488f7ca1e659e44ef12b05861c1bcf9bfb",
       "upstream_sources": [
         {
           "path": "apps/server/src/orchestration-v2/ProjectCommands.ts",
@@ -862,7 +863,7 @@
       "id": "guest-share-decisions",
       "state": "integrated",
       "domain_owner": "apps/server/src/guest",
-      "reviewed_upstream_commit": "5fe2f7e4567d9e530ded0dabc9d706db27d77b84",
+      "reviewed_upstream_commit": "f751c8488f7ca1e659e44ef12b05861c1bcf9bfb",
       "upstream_sources": [
         {
           "path": "apps/server/src/orchestration-v2/GuestShareDecider.ts",
@@ -919,7 +920,7 @@
       "id": "provider-recovery",
       "state": "integrated",
       "domain_owner": "apps/server/src/orchestration-v2",
-      "reviewed_upstream_commit": "5fe2f7e4567d9e530ded0dabc9d706db27d77b84",
+      "reviewed_upstream_commit": "f751c8488f7ca1e659e44ef12b05861c1bcf9bfb",
       "upstream_sources": [
         {
           "path": "packages/provider-core/src/server/subagentProjection.ts",
@@ -971,7 +972,7 @@
       "id": "provider-maintenance",
       "state": "integrated",
       "domain_owner": "packages/provider-core/src/server",
-      "reviewed_upstream_commit": "5fe2f7e4567d9e530ded0dabc9d706db27d77b84",
+      "reviewed_upstream_commit": "f751c8488f7ca1e659e44ef12b05861c1bcf9bfb",
       "upstream_sources": [
         {
           "path": "packages/provider-core/src/server/maintenanceResolver.ts",
@@ -1024,7 +1025,7 @@
       "id": "codex-structured-generation",
       "state": "integrated",
       "domain_owner": "apps/server/src/textGeneration",
-      "reviewed_upstream_commit": "5fe2f7e4567d9e530ded0dabc9d706db27d77b84",
+      "reviewed_upstream_commit": "f751c8488f7ca1e659e44ef12b05861c1bcf9bfb",
       "upstream_sources": [
         {
           "path": "apps/server/src/textGeneration/CodexTextGeneration.ts",
@@ -1079,7 +1080,7 @@
       "id": "codex-process-runtime",
       "state": "integrated",
       "domain_owner": "apps/server/src/provider",
-      "reviewed_upstream_commit": "5fe2f7e4567d9e530ded0dabc9d706db27d77b84",
+      "reviewed_upstream_commit": "f751c8488f7ca1e659e44ef12b05861c1bcf9bfb",
       "upstream_sources": [
         {
           "path": "apps/server/src/provider/CodexProvider.ts",
@@ -1087,7 +1088,7 @@
         },
         {
           "path": "apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts",
-          "blob": "f7d3b49a687e51723143f5f7ad8dd53a830fbe25"
+          "blob": "1589b7d1ea46f7272988c4953b7d1fd9c0d3f3ab"
         }
       ],
       "rust_paths": [
@@ -1126,14 +1127,14 @@
       ],
       "acceptance_tests": ["tools/check-provider-adapter.mjs", "tools/check-provider.mjs"],
       "retired_paths": [],
-      "notes": "Rust owns the Unix child-process protocol transport. Existing provider schemas, orchestration event translation and Windows process path remain required.",
+      "notes": "Rust owns the Unix child-process protocol transport. Provider retry deadlines, schemas and orchestration event translation remain in the shared upstream adapter; repeated retry notices retain the original retry-window deadline. Windows retains its process path. Native selection is preserved before effects, and uncertain provider actions never retry through the retained implementation.",
       "rust_crates": ["crates/core"]
     },
     {
       "id": "redb-persistence",
       "state": "integrated",
       "domain_owner": "apps/server/src/persistence",
-      "reviewed_upstream_commit": "5fe2f7e4567d9e530ded0dabc9d706db27d77b84",
+      "reviewed_upstream_commit": "f751c8488f7ca1e659e44ef12b05861c1bcf9bfb",
       "upstream_sources": [
         {
           "path": "apps/server/integration/transferBudgetV2.integration.test.ts",
@@ -1209,7 +1210,7 @@
         },
         {
           "path": "apps/server/src/orchestration-v2/ProjectionStore.ts",
-          "blob": "32007af08573fed58f86ba569a7f40573e267b8b"
+          "blob": "e0b0b3035d5eba5e3bd325008e538b1086a678cf"
         },
         {
           "path": "apps/server/src/orchestration-v2/ProviderCommitBatch.ts",
@@ -1413,11 +1414,11 @@
         },
         {
           "path": "packages/shared/src/markdownPipeline.ts",
-          "blob": "2b0953fbadba553f5e3a7fd2517d98b29846ad08"
+          "blob": "ad77b6d928aee8136423ad1b5e13cda1094594cd"
         },
         {
           "path": "apps/server/src/orchestration-v2/messageSearchIndex.ts",
-          "blob": "87d7256b6809d67fa5bbe65dabed4595d1b15560"
+          "blob": "c35f35eac37d1c6f7863f246984c7004f47e2262"
         },
         {
           "path": "packages/shared/src/assistantCitations.ts",
@@ -1773,14 +1774,14 @@
         "tools/check-redb-cli.mjs"
       ],
       "retired_paths": [],
-      "notes": "The selected production server and CLI use the complete omdb application boundary through one transaction owner. Native upgrades from the exact schema80, schema88 and schema89 histories to91 preserve activated data and import lineage. Schema80 backfills citation-aware message search, turn item counts and custom project titles; schema89 adds indexed worktree and family shell selection before payload decoding. Typed native APIs cover atomic event guards, outbox claims, compaction filters, fork visibility, shell and recovery state, attachment retention, scheduler compare-and-set, KeepAwake active-run existence and legacy subagent identifier retention. The active-run query stops at the first indexed match. Queue-only run filters use the existing global queued-run index and recheck thread ownership, avoiding completed history. Explicit run-ID filters read compact keys directly; includeLatestRun preserves full-thread candidates and original filtering/order semantics. Bootstrap and CLI preserve upgrade ownership and never reopen SQLite after native activation. SQLite remains the migration source, immutable behavior comparison and unqualified-platform implementation. Fresh exact-commit platform receipts remain required. The retained native project API and standalone plan-and-project executable share the core project projection reducer and remain independently compared with immutable ProjectStore behavior; the selected application graph uses shared ProjectStore semantics over native project rows. Schema 91 retains atomic schema-89 upgrades and adds persistent Connect device trust and denied requests. Conditional subagent writes and partial thread visits use the same transaction owner. Native active-thread listing, inherited deleted-source shells, continuation-message reads and scheduled scratch-folder protection track the integrated source. Manual-continuation prompt selection and text normalization remain shared application algorithms; native row services receive the selected IDs and return raw text to the shared find parser. The 5fe2f7e4 source advance retains those shared implementations and the upstream SQLite reader-admission changes, which require fresh stock/native evidence. Shell counts use the canonical migration-85 groups and signed global queued-input subtraction. Bounded group/cardinality witnesses are maintained in the projection transaction. The turn-item managed owner advances to projection-commit-v2 before count-index preparation, fencing older schema-91 writers; count/migration differentials and ownership/conflict tests remain required. The separate old-helper compatibility script records an explicitly supplied preserved executable and does not claim an optional CI acceptance pass.",
+      "notes": "The selected production server and CLI use the complete omdb application boundary through one transaction owner. Native upgrades from the exact schema80, schema88 and schema89 histories to91 preserve activated data and import lineage. Schema80 backfills citation-aware message search, turn item counts and custom project titles; schema89 adds indexed worktree and family shell selection before payload decoding. Typed native APIs cover atomic event guards, outbox claims, compaction filters, fork visibility, shell and recovery state, attachment retention, scheduler compare-and-set, KeepAwake active-run existence and legacy subagent identifier retention. The active-run query stops at the first indexed match. Queue-only run filters use the existing global queued-run index and recheck thread ownership, avoiding completed history. Explicit run-ID filters read compact keys directly; includeLatestRun preserves full-thread candidates and original filtering/order semantics. Bootstrap and CLI preserve upgrade ownership and never reopen SQLite after native activation. SQLite remains the migration source, immutable behavior comparison and unqualified-platform implementation. Fresh exact-commit platform receipts remain required. The retained native project API and standalone plan-and-project executable share the core project projection reducer and remain independently compared with immutable ProjectStore behavior; the selected application graph uses shared ProjectStore semantics over native project rows. Schema 91 retains atomic schema-89 upgrades and adds persistent Connect device trust and denied requests. Conditional subagent writes and partial thread visits use the same transaction owner. Native active-thread listing, inherited deleted-source shells, continuation-message reads and scheduled scratch-folder protection track the integrated source. Manual-continuation prompt selection and text normalization remain shared application algorithms; native row services receive the selected IDs and return raw text to the shared find parser. The 5fe2f7e4 source advance retains those shared implementations and the upstream SQLite reader-admission changes, which require fresh stock/native evidence. Shell counts use the canonical migration-85 groups and signed global queued-input subtraction. Bounded group/cardinality witnesses are maintained in the projection transaction. The turn-item managed owner advances to projection-commit-v2 before count-index preparation, fencing older schema-91 writers; count/migration differentials and ownership/conflict tests remain required. The separate old-helper compatibility script records an explicitly supplied preserved executable and does not claim an optional CI acceptance pass. The f751c848 awareness mapper supplies snooze timestamps and pending guest-message counts from the existing native thread payload; relay snooze policy and Arabic-punctuation rendered-text parsing remain shared upstream behavior. No schema or index-generation change follows from this tail, and no additional source is retired.",
       "rust_crates": ["crates/core", "crates/storage"]
     },
     {
       "id": "iroh-transport",
       "state": "candidate",
       "domain_owner": "infra/relay",
-      "reviewed_upstream_commit": "5fe2f7e4567d9e530ded0dabc9d706db27d77b84",
+      "reviewed_upstream_commit": "f751c8488f7ca1e659e44ef12b05861c1bcf9bfb",
       "upstream_sources": [
         {
           "path": "apps/server/src/ws.ts",
@@ -1825,7 +1826,7 @@
       "id": "native-api-component",
       "state": "candidate",
       "domain_owner": "apps/server",
-      "reviewed_upstream_commit": "5fe2f7e4567d9e530ded0dabc9d706db27d77b84",
+      "reviewed_upstream_commit": "f751c8488f7ca1e659e44ef12b05861c1bcf9bfb",
       "upstream_sources": [
         {
           "path": "packages/contracts/src/orchestrationV2.ts",

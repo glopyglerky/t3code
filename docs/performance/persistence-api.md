@@ -20,7 +20,17 @@ failed every latency row. The separate hosted
 [dispatcher](measurements/2026-11-14-hosted-dispatcher.md),
 [table-handle](measurements/2026-11-14-hosted-table-handle.md) and
 [write-pruning](measurements/2026-11-14-hosted-write-pruning.md) comparisons also
-failed every row. Their complete evidence and limits remain available.
+failed every row. The later [hosted comparison against upstream 5fe](measurements/2026-11-14-hosted-5fe.md)
+passed its functional gates and failed all eleven performance rows. Its changed
+oracle, runtime and host are explicit limits on comparisons across attempts.
+Their complete evidence and limits remain available.
+
+The separate [a2fb request attribution diagnostic](measurements/2026-11-14-attribution-a2fb16d.md)
+retains a reviewed isolated observer, its actual build/runtime receipts and all
+probes-off/on distributions. It points to repeated helper reads and processing
+as a reason to test bounded history lookup reuse. Its one fixed-order worker per
+probe condition cannot qualify performance or establish a causal speedup; the
+paired suite and every failed result above remain unchanged.
 
 The [compiler provenance correction](measurements/2026-11-14-compiler-provenance-erratum.md)
 explains an earlier metadata error: local diagnostics copied the expected

@@ -426,6 +426,10 @@ const threadEvent = (id, extra = {}) =>
     },
     { threadId: id },
   );
+const awarenessSnooze = {
+  snoozedAt: "2026-11-10T11:00:00.000Z",
+  snoozedUntil: "2026-11-10T13:00:00.000Z",
+};
 const taskEvent = (id, type, status, ordinal, extra = {}) => {
   const { text: _text, streaming: _streaming, ...base } = jsonPayloads.turnItem;
   return makeEvent("turn-item.updated", {
@@ -469,6 +473,20 @@ const exercise = Effect.fn("checkRedbProjectionShells.exercise")(function* ({
   NodeAssert.equal(yield* store.getThreadShell("missing"), null);
   result.awareness = yield* store.getAgentAwarenessSnapshot();
   result.awarenessOne = yield* store.getAgentAwarenessSnapshot("thread:side");
+  const awareness = normalized(result.awareness);
+  const idleAwareness = awareness.threads.find((thread) => thread.id === "thread:idle");
+  const sideAwareness = normalized(result.awarenessOne).threads[0];
+  const mainAwareness = awareness.threads.find((thread) => thread.id === "thread:main");
+  NodeAssert.ok(idleAwareness && sideAwareness && mainAwareness);
+  for (const thread of [idleAwareness, sideAwareness]) {
+    NodeAssert.equal(thread.snoozedAt, awarenessSnooze.snoozedAt);
+    NodeAssert.equal(thread.snoozedUntil, awarenessSnooze.snoozedUntil);
+  }
+  NodeAssert.equal(idleAwareness.pendingGuestMessageCount, 2);
+  NodeAssert.equal(sideAwareness.pendingGuestMessageCount, 0);
+  NodeAssert.equal(mainAwareness.pendingGuestMessageCount, 0);
+  NodeAssert.equal(mainAwareness.snoozedAt, null);
+  NodeAssert.equal(mainAwareness.snoozedUntil, null);
   result.pullSnapshot = yield* store.getPullRequestSnapshot({});
   result.pullArchived = yield* store.getPullRequestSnapshot({
     threadId: "thread:archived",
@@ -645,13 +663,19 @@ try {
           "thread:idle",
           {
             worktreePath: "/fixture/one",
+            ...awarenessSnooze,
             guestShare: {
               id: "share:fixture",
               host: "fixture.test",
               createdAt: fixedTime,
               expiresAt: "2026-11-11T12:00:00.000Z",
               guestName: null,
-              messages: [],
+              messages: ["pending", "sent", "dismissed", "pending"].map((status, index) => ({
+                id: `guest-message:awareness:${index}`,
+                text: `Guest message ${index}`,
+                status,
+                submittedAt: fixedTime,
+              })),
             },
           },
         ],
@@ -670,6 +694,7 @@ try {
         [
           "thread:side",
           {
+            ...awarenessSnooze,
             lineage: {
               parentThreadId: "thread:main",
               relationshipToParent: "fork",
@@ -757,6 +782,7 @@ try {
     "Settlement lists, compact active index, user-authored timestamps and older-settled cursors/counts agree",
     "Held queues, failed roots, silent compaction, rolled-back counts and pending tool work retain source presentation",
     "Shell reads inside a writer observe staged rows and rollback restores all summaries",
+    "Global and per-thread awareness preserve snooze timestamps, null defaults and only pending guest-message counts for relay decisions",
   );
   await withServices("redb", source, ({ store }) =>
     Effect.gen(function* () {

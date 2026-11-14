@@ -237,6 +237,20 @@ const normalizationCases = [
       ["literal©.txt", 0],
     ],
   },
+  {
+    id: "arabic-bare-url",
+    text: "منشور على https://example.com/report، ونسخته",
+    matches: [["report، ونسخته", 1]],
+  },
+  {
+    id: "arabic-emphasized-url",
+    text: "هل يعمل **http://localhost:3000**؟ نعم؛ www.example.com۔",
+    matches: [
+      ["3000؟", 1],
+      ["3000**", 0],
+      ["example.com۔", 1],
+    ],
+  },
 ];
 
 async function withServices(kind, filename, use) {
@@ -388,7 +402,7 @@ try {
     "Three real thread timelines, including nested inherited forks, use unchanged upstream visibility and find navigation",
     "140 imported message/plan items cross the 128-row payload batch and preserve bounded first-hit/completion frames",
     "Fourteen query/navigation forms preserve Markdown rendering, Unicode, counts, anchors, offsets and wraparound",
-    "Six real write/read cases preserve displayed parenthesis paths, escaped paths, entity decoding, Windows plan paths and literal ampersands in Codex citations, with explicit nonempty and excluded-text counts",
+    "Eight real write/read cases preserve displayed parenthesis paths, escaped paths, entity decoding, Windows plan paths, literal ampersands in Codex citations and Arabic URL punctuation, with explicit nonempty and excluded-text counts",
     "The shared find/Markdown/citation parser bytes match the immutable upstream sources exactly",
     "Parent-only events invalidate descendant scan caches; failed root writes leave no visible find state",
   );
