@@ -23,6 +23,13 @@ Every existing performance attempt through the write-pruning comparison used
 upstream 913d7fc4. Those measurements remain evidence about that source and
 cannot qualify this cutoff.
 
+The [first hosted attempt and initial-message repair](2026-11-14-initial-message-integration.md)
+record the subsequent result for candidate `a2fb16d8`: all 419 Rust tests and
+source guards passed, then the production TypeScript check found a missed
+native-decider call in the newly imported initial-message path. Application,
+hosted normal-hook and performance gates did not run. The failed evidence is
+retained, and the repaired candidate requires its own complete qualification.
+
 The local normal commit hook passed formatting and lint, then stopped during
 the complete Knip task without a finding or explanatory diagnostic. Two owned
 diagnostic invocations of the unchanged files/dependencies scan received
