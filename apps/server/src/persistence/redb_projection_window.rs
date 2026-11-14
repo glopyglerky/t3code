@@ -61,6 +61,46 @@ const MAX_RAW_ANCHORS: usize = 152;
 const MAX_TURN_ITEMS: usize = 500;
 const TURN_SNAPSHOT_ROWS: usize = 502;
 const INLINE_WORK_LIMIT: usize = 150;
+const NODE_ROOT_CACHE_ENTRIES: usize = 256;
+const NODE_ROOT_CACHE_BYTES: usize = 64 * 1024;
+
+/// One retained-window query may visit the same node for many turn items.
+/// Keep only successfully validated roots (including missing nodes), and only
+/// while the caller owns an immutable read snapshot. Writers still read their
+/// current staged overlay and retain the original observations and budgets.
+#[derive(Default)]
+struct NodeRoots {
+    values: BTreeMap<String, Option<String>>,
+    bytes: usize,
+}
+
+impl NodeRoots {
+    async fn read(&mut self, session: &mut Session, id: &str) -> Result<Option<String>> {
+        let immutable = session.read_snapshot_validation.is_some();
+        if immutable {
+            if let Some(root) = self.values.get(id) {
+                ensure_ready(session).await?;
+                return Ok(root.clone());
+            }
+        }
+        let node = read_metadata(session, NODES, id).await?;
+        let root = node
+            .as_ref()
+            .map(|node| string(node, "root_node_id"))
+            .transpose()?;
+        let bytes = id
+            .len()
+            .saturating_add(root.as_ref().map_or(0, String::len));
+        if immutable
+            && self.values.len() < NODE_ROOT_CACHE_ENTRIES
+            && bytes <= NODE_ROOT_CACHE_BYTES.saturating_sub(self.bytes)
+        {
+            self.values.insert(id.to_owned(), root.clone());
+            self.bytes += bytes;
+        }
+        Ok(root)
+    }
+}
 
 fn cloned(row: &IndexedRow) -> IndexedRow {
     IndexedRow {
@@ -154,6 +194,7 @@ async fn retained(
     let mut runs = BTreeMap::new();
     let mut run_items = BTreeMap::new();
     let mut attempts = BTreeMap::new();
+    let mut node_roots = NodeRoots::default();
     let own_runs = metadata(session, RUNS, "thread_id", thread).await?;
     for run in &own_runs {
         runs.insert(id(run, RUNS)?, cloned(run));
@@ -267,15 +308,11 @@ async fn retained(
         let mut matched_attempt = None;
         if window.defer_work == Some(true) {
             let node_id = null_string(row, "node_id")?;
-            let node = match node_id.as_deref() {
-                Some(id) => read_metadata(session, NODES, id).await?,
+            let root = match node_id.as_deref() {
+                Some(id) => node_roots.read(session, id).await?,
                 None => None,
-            };
-            let root = node
-                .as_ref()
-                .map(|node| string(node, "root_node_id"))
-                .transpose()?
-                .or(node_id);
+            }
+            .or(node_id);
             if let Some(attempts) = related_attempts {
                 for attempt in attempts {
                     if string(attempt, "root_node_id").ok() == root
@@ -1234,5 +1271,500 @@ impl ApplicationTransactions {
         let mut session = self.take(id)?;
         let result = history_query(&mut session, query).await;
         self.finish(id, session, result).await
+    }
+}
+
+#[cfg(test)]
+mod node_root_reuse_tests {
+    use super::*;
+    use crate::application::ApplicationTransactionMode;
+    use crate::test_support::TestFixture;
+
+    const NOW: &str = "2026-11-10T12:34:56.123Z";
+
+    async fn fixture() -> (
+        TestFixture,
+        Store,
+        ApplicationTransactions,
+        ApplicationCatalog,
+    ) {
+        let fixture = TestFixture::start().await;
+        let store = fixture.initialize().await;
+        store.bootstrap_application().await.unwrap();
+        while !store
+            .prepare_application_projection_reads()
+            .await
+            .unwrap()
+            .prepared
+        {}
+        let catalog =
+            decode_catalog(&store.db.read(&schema_key()).await.unwrap().unwrap()).unwrap();
+        let application = ApplicationTransactions::new(store.clone());
+        (fixture, store, application, catalog)
+    }
+
+    // Address the compact witness itself so corruption tests do not have to
+    // weaken canonical projection writes or their ownership checks.
+    fn node_key(catalog: &ApplicationCatalog, id: &str) -> Vec<u8> {
+        store_key(&format!(
+            "application/generation/{}/projection-reads/v1/window-meta/{}/{}",
+            catalog.generation,
+            NODES,
+            request_digest(&json!([text_cell(id)])),
+        ))
+    }
+
+    fn node_metadata(id: &str, root: &str) -> Value {
+        json!({
+            "table": NODES,
+            "primary": [text_cell(id)],
+            "order": { "epoch": 1, "ordinal": 1 },
+            "row": {
+                "node_id": text_cell(id),
+                "thread_id": text_cell("foreign-thread"),
+                "root_node_id": text_cell(root),
+            },
+        })
+    }
+
+    async fn replace(store: &Store, key: &[u8], value: Option<Vec<u8>>) {
+        let mut transaction = store.db.begin().await.unwrap();
+        match value {
+            Some(value) => transaction.put(key.to_vec(), value).await.unwrap(),
+            None => transaction.delete(key.to_vec()).await.unwrap(),
+        }
+        transaction.commit().await.unwrap();
+    }
+
+    async fn read_session(application: &mut ApplicationTransactions, id: &str) -> Session {
+        application
+            .begin_mode(id, ApplicationTransactionMode::Read, None)
+            .await
+            .unwrap();
+        application.take(id).unwrap()
+    }
+
+    #[tokio::test]
+    async fn shared_foreign_and_missing_node_roots_remain_correct_beyond_the_entry_cap() {
+        let (_fixture, store, mut application, catalog) = fixture().await;
+        let mut seed = store.db.begin().await.unwrap();
+        seed.put(
+            node_key(&catalog, "shared"),
+            encode(&node_metadata("shared", "foreign-root")).unwrap(),
+        )
+        .await
+        .unwrap();
+        for index in 0..=NODE_ROOT_CACHE_ENTRIES {
+            let id = format!("node-{index}");
+            seed.put(
+                node_key(&catalog, &id),
+                encode(&node_metadata(&id, &format!("root-{index}"))).unwrap(),
+            )
+            .await
+            .unwrap();
+        }
+        seed.commit().await.unwrap();
+        let mut session = read_session(&mut application, "read").await;
+        let mut roots = NodeRoots::default();
+        for _ in 0..1_500 {
+            assert_eq!(
+                roots.read(&mut session, "shared").await.unwrap().as_deref(),
+                Some("foreign-root")
+            );
+        }
+        for _ in 0..2 {
+            assert_eq!(roots.read(&mut session, "missing").await.unwrap(), None);
+        }
+        for index in 0..=NODE_ROOT_CACHE_ENTRIES {
+            let id = format!("node-{index}");
+            assert_eq!(
+                roots.read(&mut session, &id).await.unwrap(),
+                Some(format!("root-{index}"))
+            );
+        }
+        assert_eq!(roots.values.len(), NODE_ROOT_CACHE_ENTRIES);
+        assert!(roots.bytes <= NODE_ROOT_CACHE_BYTES);
+        assert!(
+            !roots
+                .values
+                .contains_key(&format!("node-{NODE_ROOT_CACHE_ENTRIES}"))
+        );
+        assert_eq!(
+            roots
+                .read(&mut session, &format!("node-{NODE_ROOT_CACHE_ENTRIES}"))
+                .await
+                .unwrap(),
+            Some(format!("root-{NODE_ROOT_CACHE_ENTRIES}"))
+        );
+        session.transaction.rollback().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn roots_beyond_the_byte_cap_are_read_without_being_retained() {
+        let (_fixture, store, mut application, catalog) = fixture().await;
+        let root = "r".repeat(NODE_ROOT_CACHE_BYTES / 2 - 16);
+        let large = "x".repeat(NODE_ROOT_CACHE_BYTES + 1);
+        for (id, value) in [
+            ("first", &root),
+            ("second", &root),
+            ("third", &root),
+            ("large", &large),
+        ] {
+            replace(
+                &store,
+                &node_key(&catalog, id),
+                Some(encode(&node_metadata(id, value)).unwrap()),
+            )
+            .await;
+        }
+        let mut session = read_session(&mut application, "read").await;
+        let mut roots = NodeRoots::default();
+        for id in ["first", "second", "third", "third"] {
+            assert_eq!(
+                roots.read(&mut session, id).await.unwrap().as_deref(),
+                Some(root.as_str())
+            );
+        }
+        for _ in 0..2 {
+            assert_eq!(
+                roots.read(&mut session, "large").await.unwrap().as_deref(),
+                Some(large.as_str())
+            );
+        }
+        assert_eq!(roots.values.len(), 2);
+        assert!(!roots.values.contains_key("third"));
+        assert!(!roots.values.contains_key("large"));
+        assert!(roots.bytes <= NODE_ROOT_CACHE_BYTES);
+        session.transaction.rollback().await.unwrap();
+    }
+
+    async fn seed_items(application: &mut ApplicationTransactions) {
+        let mut events = vec![(
+            "thread.created",
+            json!({
+                "id":"thread", "projectId":"project", "title":"Thread", "providerInstanceId":"instance",
+                "runtimeMode":"full-access", "interactionMode":"default", "activeProviderThreadId":null,
+                "createdAt":NOW, "updatedAt":NOW, "archivedAt":null, "deletedAt":null,
+                "lineage":{"relationshipToParent":"root"},
+            }),
+        )];
+        for (id, ordinal, node) in [("first", 1, "good"), ("second", 2, "bad")] {
+            events.push(("turn-item.updated", json!({
+                "id":id, "threadId":"thread", "runId":null, "nodeId":node,
+                "providerThreadId":null, "providerTurnId":null, "parentItemId":null,
+                "ordinal":ordinal, "type":"reasoning", "status":"completed", "text":id, "updatedAt":NOW,
+            })));
+        }
+        apply_events(application, events).await;
+    }
+
+    async fn apply_events(application: &mut ApplicationTransactions, events: Vec<(&str, Value)>) {
+        application.begin("seed-items").await.unwrap();
+        for (kind, payload) in events {
+            let mut event = ProjectionApply {
+                event_type: kind.into(),
+                thread_id: "thread".into(),
+                occurred_at: NOW.into(),
+                payload_json: payload.to_string(),
+                normalization: None,
+            };
+            if let Some(context) = application
+                .projections_normalization("seed-items", event.clone())
+                .await
+                .unwrap()
+            {
+                event.normalization = Some(ProjectionNormalizedPayload {
+                    expected_payload_json: context.payload_json.clone(),
+                    payload_json: context.payload_json,
+                });
+            }
+            application
+                .projections_apply("seed-items", event)
+                .await
+                .unwrap();
+        }
+        application.commit("seed-items").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn records_reuse_missing_and_foreign_roots_and_reject_queries_after_closure() {
+        let (_fixture, store, mut application, catalog) = fixture().await;
+        seed_items(&mut application).await;
+        let mut events = Vec::new();
+        for (index, node, root) in [(1, "missing", "missing"), (2, "foreign", "foreign-root")] {
+            let run = format!("run-{index}");
+            let attempt = format!("attempt-{index}");
+            events.push((
+                "run.created",
+                json!({
+                    "id":run, "threadId":"thread", "ordinal":index, "providerInstanceId":"instance",
+                    "providerThreadId":null, "status":"running", "activeAttemptId":attempt,
+                    "requestedAt":NOW, "completedAt":null,
+                }),
+            ));
+            events.push((
+                "run-attempt.created",
+                json!({
+                    "id":attempt, "runId":run, "attemptOrdinal":1, "rootNodeId":root,
+                    "providerInstanceId":"instance", "providerThreadId":format!("provider-{index}"), "providerTurnId":null,
+                    "status":"superseded", "completedAt":NOW,
+                }),
+            ));
+            let message = format!("message-{index}");
+            events.push(("message.updated", json!({
+                "id":message, "threadId":"thread", "runId":run, "nodeId":node,
+                "role":"user", "text":"Fixture input", "createdBy":"user", "creationSource":"web",
+                "streaming":false, "createdAt":NOW, "updatedAt":NOW,
+            })));
+            for offset in 0..=INLINE_WORK_LIMIT + 1 {
+                let mut item = json!({
+                    "id":format!("item-{index}-{offset}"), "threadId":"thread", "runId":run, "nodeId":node,
+                    "providerThreadId":null, "providerTurnId":null, "parentItemId":null,
+                    "ordinal":index * 1000 + offset, "type":"reasoning", "status":"completed",
+                    "text":"Completed fixture work", "updatedAt":NOW,
+                });
+                if offset == 0 {
+                    item["type"] = json!("user_message");
+                    item["inputIntent"] = json!("turn_start");
+                    item["createdBy"] = json!("user");
+                    item["creationSource"] = json!("web");
+                    item["messageId"] = json!(message);
+                    item["attachments"] = json!([]);
+                }
+                events.push(("turn-item.updated", item));
+            }
+        }
+        apply_events(&mut application, events).await;
+        replace(
+            &store,
+            &node_key(&catalog, "foreign"),
+            Some(encode(&node_metadata("foreign", "foreign-root")).unwrap()),
+        )
+        .await;
+        let request = ProjectionRecordsQuery {
+            thread_id: "thread".into(),
+            fields: vec![ProjectionRecordField::TurnItems],
+            filter: None,
+            window: Some(ProjectionRecordWindow {
+                row_limit: 75,
+                user_turn_limit: Some(10),
+                defer_work: Some(true),
+                anchor_item_id: None,
+                required_run_id: None,
+                fork_created_at: None,
+            }),
+        };
+        for commit in [false, true] {
+            application
+                .begin_mode("public", ApplicationTransactionMode::Read, None)
+                .await
+                .unwrap();
+            let result = application
+                .projection_records("public", request.clone())
+                .await
+                .unwrap();
+            // A running run folds completed work here only if its superseded
+            // attempt was matched through the missing-node fallback or the
+            // foreign node's root. Each run revisits that node more than 150 times.
+            assert_eq!(result.deferred_work.len(), 2);
+            assert!(
+                result
+                    .deferred_work
+                    .iter()
+                    .all(|group| group.item_count == INLINE_WORK_LIMIT + 1)
+            );
+            if commit {
+                application.commit("public").await.unwrap();
+            } else {
+                application.rollback("public").await.unwrap();
+            }
+            assert!(
+                matches!(application.projection_records("public", request.clone()).await,
+                Err(Error::Invalid(message)) if message == "application transaction does not exist")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn retained_window_does_not_read_ineligible_nodes_or_cache_first_use_corruption() {
+        let (_fixture, store, mut application, catalog) = fixture().await;
+        seed_items(&mut application).await;
+        replace(
+            &store,
+            &node_key(&catalog, "good"),
+            Some(encode(&node_metadata("good", "foreign-root")).unwrap()),
+        )
+        .await;
+        let anchored = ProjectionRecordWindow {
+            row_limit: 75,
+            user_turn_limit: None,
+            defer_work: Some(true),
+            anchor_item_id: Some("first".into()),
+            required_run_id: None,
+            fork_created_at: None,
+        };
+        for corrupt in 0..3 {
+            let mut value = node_metadata("bad", "root");
+            match corrupt {
+                0 => value["table"] = json!(THREADS),
+                1 => value["primary"] = json!([text_cell("another-node")]),
+                _ => value["row"]["root_node_id"] = int_cell(7),
+            }
+            replace(
+                &store,
+                &node_key(&catalog, "bad"),
+                Some(encode(&value).unwrap()),
+            )
+            .await;
+            let mut session = read_session(&mut application, "read").await;
+            let selected = retained(&mut session, "thread", &anchored).await.unwrap();
+            assert_eq!(selected.rows.len(), 1);
+            assert_eq!(id(&selected.rows[0], ITEMS).unwrap(), "first");
+            assert!(matches!(
+                retained(
+                    &mut session,
+                    "thread",
+                    &ProjectionRecordWindow {
+                        anchor_item_id: None,
+                        ..anchored.clone()
+                    }
+                )
+                .await,
+                Err(Error::IncompatibleStore)
+            ));
+            let mut roots = NodeRoots::default();
+            assert!(matches!(
+                roots.read(&mut session, "bad").await,
+                Err(Error::IncompatibleStore)
+            ));
+            assert!(roots.values.is_empty());
+            session.transaction.rollback().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn node_reuse_stays_with_one_snapshot_across_updates_deletion_and_corruption() {
+        let (_fixture, store, mut application, catalog) = fixture().await;
+        let key = node_key(&catalog, "node");
+        replace(
+            &store,
+            &key,
+            Some(encode(&node_metadata("node", "old-root")).unwrap()),
+        )
+        .await;
+        let mut old = read_session(&mut application, "old").await;
+        let mut old_roots = NodeRoots::default();
+        assert_eq!(
+            old_roots.read(&mut old, "node").await.unwrap().as_deref(),
+            Some("old-root")
+        );
+        let mut corrupt = node_metadata("node", "unreadable");
+        corrupt["row"]["root_node_id"] = Value::Null;
+        let mutations = [
+            Some(encode(&node_metadata("node", "new-root")).unwrap()),
+            None,
+            Some(encode(&corrupt).unwrap()),
+        ];
+        for (index, bytes) in mutations.into_iter().enumerate() {
+            replace(&store, &key, bytes).await;
+            assert_eq!(
+                old_roots.read(&mut old, "node").await.unwrap().as_deref(),
+                Some("old-root")
+            );
+            assert_eq!(
+                NodeRoots::default()
+                    .read(&mut old, "node")
+                    .await
+                    .unwrap()
+                    .as_deref(),
+                Some("old-root")
+            );
+            let mut fresh = read_session(&mut application, "fresh").await;
+            let current = NodeRoots::default().read(&mut fresh, "node").await;
+            match index {
+                0 => assert_eq!(current.unwrap().as_deref(), Some("new-root")),
+                1 => assert_eq!(current.unwrap(), None),
+                _ => assert!(matches!(current, Err(Error::IncompatibleStore))),
+            }
+            fresh.transaction.rollback().await.unwrap();
+        }
+        old.transaction.rollback().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn writers_keep_staged_root_validation_savepoint_restore_and_observation_limits() {
+        let (_fixture, store, mut application, catalog) = fixture().await;
+        let key = node_key(&catalog, "node");
+        replace(
+            &store,
+            &key,
+            Some(encode(&node_metadata("node", "old-root")).unwrap()),
+        )
+        .await;
+        let large_size = crate::MAX_BATCH_BYTES - 64 * 1024;
+        replace(&store, b"node-root-budget/a", Some(vec![b'a'; large_size])).await;
+        replace(&store, b"node-root-budget/b", Some(vec![b'b'; 64 * 1024])).await;
+        application.begin("writer").await.unwrap();
+        let mut writer = application.take("writer").unwrap();
+        let mut roots = NodeRoots::default();
+        assert_eq!(
+            roots.read(&mut writer, "node").await.unwrap().as_deref(),
+            Some("old-root")
+        );
+        let checkpoint = writer.transaction.checkpoint();
+        writer
+            .transaction
+            .put(
+                key.clone(),
+                encode(&node_metadata("node", "staged-root")).unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            roots.read(&mut writer, "node").await.unwrap().as_deref(),
+            Some("staged-root")
+        );
+        writer.transaction.restore(&checkpoint);
+        assert_eq!(
+            roots.read(&mut writer, "node").await.unwrap().as_deref(),
+            Some("old-root")
+        );
+        let mut corrupt = node_metadata("node", "root");
+        corrupt["row"]["root_node_id"] = int_cell(7);
+        writer
+            .transaction
+            .put(key, encode(&corrupt).unwrap())
+            .await
+            .unwrap();
+        assert!(matches!(
+            roots.read(&mut writer, "node").await,
+            Err(Error::IncompatibleStore)
+        ));
+        // Inspect the helper before the public finish path would abort this
+        // corrupted transaction; restoration here tests its staged read source.
+        writer.transaction.restore(&checkpoint);
+        assert!(roots.values.is_empty());
+        assert_eq!(roots.bytes, 0);
+        assert_eq!(
+            writer
+                .transaction
+                .get(b"node-root-budget/a")
+                .await
+                .unwrap()
+                .unwrap()
+                .len(),
+            large_size
+        );
+        assert_eq!(
+            roots.read(&mut writer, "node").await.unwrap().as_deref(),
+            Some("old-root")
+        );
+        assert!(matches!(
+            writer.transaction.get(b"node-root-budget/b").await,
+            Err(Error::ResourceLimit(
+                crate::ResourceLimit::ObservationBudget
+            ))
+        ));
+        writer.transaction.rollback().await.unwrap();
     }
 }
