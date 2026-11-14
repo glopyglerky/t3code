@@ -38,8 +38,31 @@ const HANDOFFS: &str = "orchestration_v2_projection_context_handoffs";
 const TRANSFERS: &str = "orchestration_v2_projection_context_transfers";
 const METADATA: &str = "orchestration_v2_projection_metadata";
 const OWNER: &str = "projection-commit-v1";
+const ITEMS_OWNER: &str = "projection-commit-v2";
 const PREPARE_ROWS: usize = 32;
 const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
+
+fn expected_owner(name: &str) -> &'static str {
+    if name == ITEMS { ITEMS_OWNER } else { OWNER }
+}
+
+pub(crate) async fn validate_item_owner(
+    tx: &mut Transaction,
+    catalog: &ApplicationCatalog,
+) -> Result<()> {
+    if tx
+        .get(&managed_marker(catalog, ITEMS))
+        .await?
+        .as_deref()
+        .map(decode::<String>)
+        .transpose()?
+        .as_deref()
+        != Some(ITEMS_OWNER)
+    {
+        return Err(Error::IncompatibleStore);
+    }
+    Ok(())
+}
 
 #[path = "redb_projection_lookup.rs"]
 mod lookup;
@@ -929,8 +952,8 @@ async fn ready(session: &mut Session) -> Result<()> {
         .iter()
         .map(|spec| managed_marker(&session.catalog, spec.name))
         .collect();
-    let validate_owner = |bytes: Option<&[u8]>| -> Result<()> {
-        if bytes.map(decode::<String>).transpose()?.as_deref() != Some(OWNER) {
+    let validate_owner = |name: &str, bytes: Option<&[u8]>| -> Result<()> {
+        if bytes.map(decode::<String>).transpose()?.as_deref() != Some(expected_owner(name)) {
             Err(Error::IncompatibleStore)
         } else {
             Ok(())
@@ -939,15 +962,15 @@ async fn ready(session: &mut Session) -> Result<()> {
     if session.read_snapshot_validation.is_some() {
         match session.transaction.get_many(&markers).await {
             Ok(values) => {
-                for value in values {
-                    validate_owner(value.as_deref())?;
+                for (spec, value) in SPECS.iter().zip(values) {
+                    validate_owner(spec.name, value.as_deref())?;
                 }
             }
             Err(Error::ResourceLimit(crate::ResourceLimit::ReadBytes)) => {
                 // Valid owner markers are tiny. Preserve ordered corruption rejection
                 // if malformed marker bytes exceed the bounded batch allocation.
-                for marker in markers {
-                    validate_owner(session.transaction.get(&marker).await?.as_deref())?;
+                for (spec, marker) in SPECS.iter().zip(markers) {
+                    validate_owner(spec.name, session.transaction.get(&marker).await?.as_deref())?;
                 }
             }
             Err(error) => return Err(error),
@@ -955,8 +978,8 @@ async fn ready(session: &mut Session) -> Result<()> {
     } else {
         // Writers must observe and validate each marker in order: a later
         // observation-budget failure must not mask an earlier corrupt owner.
-        for marker in markers {
-            validate_owner(session.transaction.get(&marker).await?.as_deref())?;
+        for (spec, marker) in SPECS.iter().zip(markers) {
+            validate_owner(spec.name, session.transaction.get(&marker).await?.as_deref())?;
         }
     }
     if let Some(validation) = &mut session.read_snapshot_validation {
@@ -1190,25 +1213,60 @@ impl Store {
     pub async fn prepare_application_projections(&self) -> Result<ProjectionPreparation> {
         let mut limit = PREPARE_ROWS;
         loop {
-            match self.prepare_projection_batch(limit).await {
+            match self.prepare_projection_batch(limit, None).await {
                 Err(Error::ResourceLimit(_)) if limit > 1 => limit = (limit / 2).max(1),
                 result => return result,
             }
         }
     }
 
-    async fn prepare_projection_batch(&self, limit: usize) -> Result<ProjectionPreparation> {
+    pub(crate) async fn prepare_projections_for_catalog(
+        &self,
+        catalog: &ApplicationCatalog,
+    ) -> Result<ProjectionPreparation> {
+        self.db.require_exclusive()?;
+        let mut limit = PREPARE_ROWS;
+        loop {
+            match self.prepare_projection_batch(limit, Some(catalog)).await {
+                Err(Error::ResourceLimit(_)) if limit > 1 => limit = (limit / 2).max(1),
+                result => return result,
+            }
+        }
+    }
+
+    async fn prepare_projection_batch(
+        &self,
+        limit: usize,
+        target: Option<&ApplicationCatalog>,
+    ) -> Result<ProjectionPreparation> {
         let mut tx = self
             .db
             .begin_reserved(Duration::from_secs(5), Duration::from_secs(300))
             .await?;
-        let catalog = decode_catalog(
+        let active = decode_catalog(
             &tx.get(&schema_key())
                 .await?
                 .ok_or_else(|| invalid("application schema is not initialized"))?,
         )?;
+        let new_count_table = target.is_some()
+            && !active.schema.tables.iter().any(|table| {
+                table.name == crate::application_turn_item_counts::TABLE
+            });
+        let catalog = match target {
+            Some(catalog) if *catalog != active => catalog.clone(),
+            Some(_) => return Err(Error::IncompatibleStore),
+            None => active,
+        };
         validate_schema(&catalog)?;
         let state = tx.get(&key(&catalog, "preparation")).await?;
+        let count_marker = managed_marker(&catalog, crate::application_turn_item_counts::TABLE);
+        let count_owner = tx
+            .get(&count_marker)
+            .await?
+            .as_deref()
+            .map(decode::<String>)
+            .transpose()?;
+        let mut transitioned = false;
         let mut state = if let Some(bytes) = state {
             let state: Preparation = decode(&bytes)?;
             if state.version != 1
@@ -1217,29 +1275,57 @@ impl Store {
             {
                 return Err(Error::IncompatibleStore);
             }
+            if count_owner.is_none() && new_count_table {
+                tx.put(count_marker.clone(), encode(&OWNER)?).await?;
+                transitioned = true;
+            } else if count_owner.as_deref() != Some(OWNER) {
+                return Err(Error::IncompatibleStore);
+            }
             for spec in SPECS {
-                if tx
+                let found = tx
                     .get(&managed_marker(&catalog, spec.name))
                     .await?
                     .as_deref()
                     .map(decode::<String>)
-                    .transpose()?
-                    .as_deref()
-                    != Some(OWNER)
-                {
+                    .transpose()?;
+                if spec.name == ITEMS && found.as_deref() == Some(OWNER) {
+                    transitioned = true;
+                } else if found.as_deref() != Some(expected_owner(spec.name)) {
                     return Err(Error::IncompatibleStore);
                 }
             }
+            if transitioned {
+                if target.is_none() {
+                    crate::application_turn_item_counts::require_unprepared_namespace(
+                        &mut tx, &catalog,
+                    ).await?;
+                }
+                // Every older projection writer observes this marker before
+                // changing items. Reserved writers finish before this fence;
+                // optimistic writers with the old observation must conflict.
+                tx.put(managed_marker(&catalog, ITEMS), encode(&ITEMS_OWNER)?).await?;
+            }
             state
         } else {
-            tx.put(managed_marker(&catalog, crate::application_turn_item_counts::TABLE), encode(&OWNER)?).await?;
+            if target.is_none() {
+                crate::application_turn_item_counts::require_unprepared_namespace(
+                    &mut tx, &catalog,
+                ).await?;
+            }
+            match count_owner.as_deref() {
+                None => (),
+                Some(OWNER) if target.is_some() => (),
+                Some(OWNER) if Self::published_projection_count_owner(&mut tx, &catalog).await? => (),
+                _ => return Err(Error::IncompatibleStore),
+            }
             for spec in SPECS {
                 let marker = managed_marker(&catalog, spec.name);
                 if tx.get(&marker).await?.is_some() {
                     return Err(Error::IncompatibleStore);
                 }
-                tx.put(marker, encode(&OWNER)?).await?;
+                tx.put(marker, encode(&expected_owner(spec.name))?).await?;
             }
+            tx.put(count_marker, encode(&OWNER)?).await?;
             // SQLite FTS shadow tables are deliberately excluded from imports.
             // A future native search reader must rebuild from these source rows.
             tx.put(
@@ -1259,7 +1345,11 @@ impl Store {
             }
         };
         if state.ready {
-            tx.rollback().await?;
+            if transitioned {
+                tx.commit().await?;
+            } else {
+                tx.rollback().await?;
+            }
             return Ok(ProjectionPreparation {
                 prepared: true,
                 indexed_rows: state.indexed_rows,

@@ -1262,6 +1262,172 @@ async fn schema_mismatch_is_rejected_before_any_projection_ownership_is_claimed(
     );
 }
 
+async fn legacy_projection_fixture() -> (TestFixture, Store, ApplicationCatalog) {
+    let fixture = TestFixture::start().await;
+    let store = fixture.initialize().await;
+    initialize(&store).await;
+    prepare(&store).await;
+    let catalog = decode_catalog(&store.db.read(&schema_key()).await.unwrap().unwrap()).unwrap();
+    let mut tx = store.db.begin().await.unwrap();
+    tx.put(managed_marker(&catalog, ITEMS), encode(&OWNER).unwrap())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    (fixture, store, catalog)
+}
+
+// The old ready() observes every SPECS marker before it can mutate any item.
+// Keep that observation protocol in the real engine tests; the separate
+// preserved-executable fixture verifies the actual older helper's refusal.
+async fn legacy_projection_ready(
+    tx: &mut Transaction,
+    catalog: &ApplicationCatalog,
+) -> Result<()> {
+    let state: Preparation = decode(
+        &tx.get(&key(catalog, "preparation"))
+            .await?
+            .ok_or(Error::IncompatibleStore)?,
+    )?;
+    if state.version != 1 || !state.ready || state.table_index != SPECS.len() {
+        return Err(Error::IncompatibleStore);
+    }
+    for spec in SPECS {
+        if tx.get(&managed_marker(catalog, spec.name)).await?
+            .as_deref().map(decode::<String>).transpose()?.as_deref() != Some(OWNER)
+        {
+            return Err(Error::IncompatibleStore);
+        }
+    }
+    Ok(())
+}
+
+async fn legacy_count_write(
+    tx: &mut Transaction,
+    catalog: &ApplicationCatalog,
+    count: i64,
+) {
+    legacy_projection_ready(tx, catalog).await.unwrap();
+    write_application_row(
+        tx,
+        catalog,
+        crate::application_turn_item_counts::TABLE,
+        Map::from_iter([
+            ("thread_id".into(), text_cell("legacy-thread")),
+            ("run_key".into(), text_cell("legacy-run")),
+            ("item_count".into(), int_cell(count)),
+        ]),
+    ).await.unwrap();
+}
+
+#[tokio::test]
+async fn item_owner_transition_conflicts_old_optimistic_writer_and_preserves_old_snapshot() {
+    let (_fixture, store, catalog) = legacy_projection_fixture().await;
+    let mut new_application = ApplicationTransactions::new(store.clone());
+    new_application.begin("unfenced").await.unwrap();
+    assert!(matches!(apply(&mut new_application, "unfenced",
+        event("thread.created", "blocked", thread("blocked"))).await,
+        Err(Error::IncompatibleStore)));
+    assert!(!new_application.has_active_writer());
+    let mut old_reader = store.db.begin_read_only().await.unwrap();
+    legacy_projection_ready(&mut old_reader, &catalog).await.unwrap();
+    let mut old_writer = store.db.begin().await.unwrap();
+    legacy_count_write(&mut old_writer, &catalog, 7).await;
+
+    assert!(store.prepare_application_projections().await.unwrap().prepared);
+    assert!(matches!(old_writer.commit().await, Err(Error::TransactionConflict)));
+    let mut fresh = store.db.begin_read_only().await.unwrap();
+    assert!(matches!(legacy_projection_ready(&mut fresh, &catalog).await, Err(Error::IncompatibleStore)));
+    validate_item_owner(&mut fresh, &catalog).await.unwrap();
+    assert!(read_row(&mut fresh, &catalog, crate::application_turn_item_counts::TABLE,
+        &[text_cell("legacy-thread"), text_cell("legacy-run")]).await.unwrap().is_none());
+    fresh.rollback().await.unwrap();
+
+    // The old immutable snapshot remains valid, including across its own
+    // savepoint; it cannot be promoted into a writer or see the new owner.
+    let checkpoint = old_reader.checkpoint();
+    legacy_projection_ready(&mut old_reader, &catalog).await.unwrap();
+    old_reader.restore(&checkpoint);
+    old_reader.rollback().await.unwrap();
+    prepare_reads(&store).await;
+    new_application.begin("new-writer").await.unwrap();
+    apply(&mut new_application, "new-writer", event("thread.created", "new-thread", thread("new-thread")))
+        .await.unwrap();
+    new_application.commit("new-writer").await.unwrap();
+    assert!(store.prepare_application_projections().await.unwrap().prepared);
+    let mut verified = store.db.begin_read_only().await.unwrap();
+    validate_item_owner(&mut verified, &catalog).await.unwrap();
+    verified.rollback().await.unwrap();
+    store.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn item_owner_transition_waits_for_old_reserved_writer_before_count_backfill() {
+    let (_fixture, store, catalog) = legacy_projection_fixture().await;
+    let mut old_writer = store.db.begin_reserved(Duration::from_secs(5), Duration::from_secs(300))
+        .await.unwrap();
+    legacy_count_write(&mut old_writer, &catalog, 5).await;
+    let mut transition = Box::pin(store.prepare_application_projections());
+    assert!(tokio::time::timeout(Duration::from_millis(20), &mut transition).await.is_err());
+    old_writer.commit().await.unwrap();
+    assert!(transition.await.unwrap().prepared);
+    prepare_reads(&store).await;
+    let mut reader = store.db.begin_read_only().await.unwrap();
+    validate_item_owner(&mut reader, &catalog).await.unwrap();
+    crate::application_turn_item_counts::ensure_ready(&mut reader, &catalog).await.unwrap();
+    let groups = crate::application_turn_item_counts::read_page(
+        &mut reader, &catalog, "legacy-thread", None,
+    ).await.unwrap();
+    assert_eq!(groups.rows.len(), 1);
+    assert_eq!(groups.rows[0].run_key, "legacy-run");
+    assert_eq!(groups.rows[0].item_count, 5);
+    assert!(groups.after.is_none());
+    reader.rollback().await.unwrap();
+    store.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn owner_transition_rejects_unknown_owners_and_unfenced_count_namespaces_atomically() {
+    for case in [
+        "foreign-initial", "unproven-initial", "namespace-initial",
+        "missing-existing", "foreign-existing", "unknown-item", "namespace-existing",
+    ] {
+        let fixture = TestFixture::start().await;
+        let store = fixture.initialize().await;
+        initialize(&store).await;
+        let existing = !case.ends_with("initial");
+        if existing { prepare(&store).await; }
+        let catalog = decode_catalog(&store.db.read(&schema_key()).await.unwrap().unwrap()).unwrap();
+        let count = managed_marker(&catalog, crate::application_turn_item_counts::TABLE);
+        let item = managed_marker(&catalog, ITEMS);
+        let namespace = store_key(&format!(
+            "application/generation/{}/projection-shell-counts/v1/untrusted", catalog.generation,
+        ));
+        let mut tx = store.db.begin().await.unwrap();
+        match case {
+            "foreign-initial" | "foreign-existing" => tx.put(count.clone(), encode(&"foreign").unwrap()).await.unwrap(),
+            "unproven-initial" => tx.put(count.clone(), encode(&OWNER).unwrap()).await.unwrap(),
+            "missing-existing" => { tx.delete(count.clone()).await.unwrap(); },
+            "unknown-item" => tx.put(item.clone(), encode(&"projection-commit-v99").unwrap()).await.unwrap(),
+            "namespace-initial" | "namespace-existing" => {
+                if existing { tx.put(item.clone(), encode(&OWNER).unwrap()).await.unwrap(); }
+                tx.put(namespace.clone(), b"untrusted".to_vec()).await.unwrap();
+            },
+            _ => unreachable!(),
+        }
+        tx.commit().await.unwrap();
+        let before = [
+            store.db.read(&count).await.unwrap(), store.db.read(&item).await.unwrap(),
+            store.db.read(&namespace).await.unwrap(), store.db.read(&key(&catalog, "preparation")).await.unwrap(),
+        ];
+        assert!(matches!(store.prepare_application_projections().await, Err(Error::IncompatibleStore)), "{case}");
+        assert_eq!(before, [
+            store.db.read(&count).await.unwrap(), store.db.read(&item).await.unwrap(),
+            store.db.read(&namespace).await.unwrap(), store.db.read(&key(&catalog, "preparation")).await.unwrap(),
+        ], "{case}");
+        store.shutdown().await.unwrap();
+    }
+}
+
 #[tokio::test]
 async fn normalization_is_required_witnessed_and_rolls_back_with_its_projection() {
     let fixture = TestFixture::start().await;
@@ -1398,32 +1564,167 @@ async fn turn_item_counts_follow_cross_run_moves_deletion_and_nested_rollback() 
     prepare(&store).await;
     prepare_reads(&store).await;
     let counts = crate::application_turn_item_counts::TABLE;
-    let item = |thread: &str, run: Option<&str>| json!({
-        "id":"counted-item","threadId":thread,"runId":run,"nodeId":null,
-        "providerThreadId":null,"providerTurnId":null,"parentItemId":null,"ordinal":1,
-        "type":"assistant_message","status":"completed","updatedAt":NOW,
-    });
+    app.begin("generic-count-write").await.unwrap();
+    assert!(matches!(
+        app.put(
+            "generic-count-write",
+            counts,
+            vec![text_cell("first"), text_cell("")],
+            Map::from_iter([
+                ("thread_id".into(), text_cell("first")),
+                ("run_key".into(), text_cell("")),
+                ("item_count".into(), int_cell(1)),
+            ])
+        )
+        .await,
+        Err(Error::Invalid(_))
+    ));
+    let item = |thread: &str, run: Option<&str>| {
+        json!({
+            "id":"counted-item","threadId":thread,"runId":run,"nodeId":null,
+            "providerThreadId":null,"providerTurnId":null,"parentItemId":null,"ordinal":1,
+            "type":"assistant_message","status":"completed","updatedAt":NOW,
+        })
+    };
     app.begin("write").await.unwrap();
-    apply(&mut app, "write", event("turn-item.updated", "first", item("first", None))).await.unwrap();
-    let count = app.get("write", counts, &[text_cell("first"), text_cell("")]).await.unwrap().unwrap();
+    apply(
+        &mut app,
+        "write",
+        event("turn-item.updated", "first", item("first", None)),
+    )
+    .await
+    .unwrap();
+    let count = app
+        .get("write", counts, &[text_cell("first"), text_cell("")])
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(integer(&count, "item_count").unwrap(), 1);
+    assert_eq!(
+        app.projections_shell(
+            "write",
+            ProjectionShellQuery::ItemCounts {
+                thread_ids: vec!["first".into(), "second".into()]
+            }
+        )
+        .await
+        .unwrap(),
+        json!([
+            {"thread_id":"first","item_count":1,"runless_item_count":1}
+        ])
+    );
     app.savepoint("write", "move").await.unwrap();
-    apply(&mut app, "write", event("turn-item.updated", "second", item("second", Some("run")))).await.unwrap();
-    assert!(app.get("write", counts, &[text_cell("first"), text_cell("")]).await.unwrap().is_none());
-    assert_eq!(integer(&app.get("write", counts, &[text_cell("second"), text_cell("run")]).await.unwrap().unwrap(), "item_count").unwrap(), 1);
+    apply(
+        &mut app,
+        "write",
+        event("turn-item.updated", "second", item("second", Some("run"))),
+    )
+    .await
+    .unwrap();
+    assert!(
+        app.get("write", counts, &[text_cell("first"), text_cell("")])
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        integer(
+            &app.get("write", counts, &[text_cell("second"), text_cell("run")])
+                .await
+                .unwrap()
+                .unwrap(),
+            "item_count"
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        app.projections_shell(
+            "write",
+            ProjectionShellQuery::RunItemCounts {
+                thread_ids: vec!["first".into(), "second".into()]
+            }
+        )
+        .await
+        .unwrap(),
+        json!([
+            {"thread_id":"second","run_id":"run","item_count":1}
+        ])
+    );
     app.rollback_to("write", "move").await.unwrap();
-    assert!(app.get("write", counts, &[text_cell("second"), text_cell("run")]).await.unwrap().is_none());
-    assert_eq!(integer(&app.get("write", counts, &[text_cell("first"), text_cell("")]).await.unwrap().unwrap(), "item_count").unwrap(), 1);
+    assert!(
+        app.get("write", counts, &[text_cell("second"), text_cell("run")])
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        integer(
+            &app.get("write", counts, &[text_cell("first"), text_cell("")])
+                .await
+                .unwrap()
+                .unwrap(),
+            "item_count"
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        app.projections_shell(
+            "write",
+            ProjectionShellQuery::ItemCounts {
+                thread_ids: vec!["first".into(), "second".into()]
+            }
+        )
+        .await
+        .unwrap(),
+        json!([
+            {"thread_id":"first","item_count":1,"runless_item_count":1}
+        ])
+    );
     // The projection owner's deletion path must remove an empty group in the
     // same transaction, including data removed by retention/normalization.
     let mut session = app.take("write").unwrap();
-    delete_row(&mut session.transaction, &session.catalog, ITEMS, &[text_cell("counted-item")]).await.unwrap();
+    delete_row(
+        &mut session.transaction,
+        &session.catalog,
+        ITEMS,
+        &[text_cell("counted-item")],
+    )
+    .await
+    .unwrap();
     app.finish("write", session, Ok(())).await.unwrap();
-    assert!(app.get("write", counts, &[text_cell("first"), text_cell("")]).await.unwrap().is_none());
+    assert!(
+        app.get("write", counts, &[text_cell("first"), text_cell("")])
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        app.projections_shell(
+            "write",
+            ProjectionShellQuery::ItemCounts {
+                thread_ids: vec!["first".into()]
+            }
+        )
+        .await
+        .unwrap(),
+        json!([])
+    );
     app.rollback("write").await.unwrap();
     app.begin("verify").await.unwrap();
-    assert!(app.get("verify", ITEMS, &[text_cell("counted-item")]).await.unwrap().is_none());
-    assert!(app.get("verify", counts, &[text_cell("first"), text_cell("")]).await.unwrap().is_none());
+    assert!(
+        app.get("verify", ITEMS, &[text_cell("counted-item")])
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        app.get("verify", counts, &[text_cell("first"), text_cell("")])
+            .await
+            .unwrap()
+            .is_none()
+    );
     app.rollback("verify").await.unwrap();
 }
 

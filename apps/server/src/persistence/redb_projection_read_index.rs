@@ -589,6 +589,25 @@ pub(crate) async fn any_equal(
     Ok(found)
 }
 
+/// Count a selected relationship without retaining source rows or their payloads.
+pub(crate) async fn count_matching(
+    session: &mut Session,
+    name: &str,
+    column: &str,
+    value: &Value,
+    mut predicate: impl FnMut(&Map<String, Value>) -> Result<bool>,
+) -> Result<i64> {
+    let mut count = 0_i64;
+    visit_equal_rows(session, name, column, value, 128, |row| {
+        if predicate(&row.row)? {
+            count = count.checked_add(1).ok_or(Error::IncompatibleStore)?;
+        }
+        Ok(true)
+    })
+    .await?;
+    Ok(count)
+}
+
 pub(crate) async fn all_rows(session: &mut Session, name: &str) -> Result<Vec<IndexedRow>> {
     equal_rows(session, name, "all", &Value::Null).await
 }
@@ -701,6 +720,13 @@ impl Store {
         catalog: &ApplicationCatalog,
     ) -> Result<ProjectionPreparation> {
         self.db.require_exclusive()?;
+        let base = self.prepare_projections_for_catalog(catalog).await?;
+        if !base.prepared {
+            return Ok(ProjectionPreparation {
+                prepared: false,
+                indexed_rows: 0,
+            });
+        }
         let mut limit = PREPARE_ROWS;
         loop {
             match self
@@ -748,10 +774,24 @@ impl Store {
             return Err(Error::IncompatibleStore);
         }
         if state.ready {
-            tx.rollback().await?;
+            let (counts, changed) = crate::application_turn_item_counts::prepare_batch(
+                &mut tx,
+                &catalog,
+                limit,
+            )
+            .await?;
+            let indexed_rows = state
+                .indexed_rows
+                .checked_add(counts.indexed_rows)
+                .ok_or(Error::IncompatibleStore)?;
+            if changed {
+                tx.commit().await?;
+            } else {
+                tx.rollback().await?;
+            }
             return Ok(ProjectionPreparation {
-                prepared: true,
-                indexed_rows: state.indexed_rows,
+                prepared: counts.prepared,
+                indexed_rows,
             });
         }
         let spec = &SPECS[state.table_index];
@@ -795,7 +835,9 @@ impl Store {
         tx.put(state_key, encode(&state)?).await?;
         tx.commit().await?;
         Ok(ProjectionPreparation {
-            prepared: state.ready,
+            // The next bounded batch also prepares the count-group index. An
+            // already-ready v1 relationship marker alone cannot activate it.
+            prepared: false,
             indexed_rows: state.indexed_rows,
         })
     }

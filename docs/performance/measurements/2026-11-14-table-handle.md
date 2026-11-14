@@ -1,5 +1,10 @@
 # Immutable table-handle measurement, 2026-11-14
 
+> Later compiler-provenance correction: this diagnostic supplied no native build
+> manifest. Its compiler route and identity fields describe expected pins, not
+> verified build evidence. See the [erratum](2026-11-14-compiler-provenance-erratum.md).
+> Original raw evidence, hashes and timing results are unchanged.
+
 **Decision: reject qualification and retain the tested table-handle design
 provisionally while isolating the next write experiment.** All eleven latency
 rows still regress against stock. The native warm medians changed only modestly
@@ -172,3 +177,9 @@ The [hosted dispatcher report](2026-11-14-hosted-dispatcher.md) preserves its
 independent eleven-row failure, verified production runtime and passed original
 Linux browser/restart flow. Functional passes and previous native improvements
 cannot replace the required stock-speed result.
+
+The completed [write-pruning attempt](2026-11-14-write-pruning.md) retains the
+next result against the same upstream revision. Its visit median remained
+essentially unchanged and every stock-comparison row still failed. The separate
+[hosted table-handle run](2026-11-14-hosted-table-handle.md) also retains all eleven
+regressions, its different CPU/filesystem observations and verified runtime.

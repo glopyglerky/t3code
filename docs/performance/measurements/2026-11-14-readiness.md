@@ -1,5 +1,10 @@
 # Readiness-cache measurement, 2026-11-14
 
+> Later compiler-provenance correction: this diagnostic supplied no native build
+> manifest. Its compiler route and identity fields describe expected pins, not
+> verified build evidence. See the [erratum](2026-11-14-compiler-provenance-erratum.md).
+> Original raw evidence, hashes and timing results are unchanged.
+
 **Decision: retain the correctness-preserving readiness fix, continue optimization,
 and reject performance qualification.** All eleven fixed latency rows still have
 their entire paired 95% native/stock interval above 1.0. Correctness, ordering,

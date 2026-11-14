@@ -12,12 +12,33 @@ The [reference audit](../porting/ci-reference-audit-2026-11-14.md) records the
 upstream v2 regression, paired measurement and qualification sources used to
 choose this method. The [first complete baseline](measurements/2026-11-14-baseline.md),
 [readiness-cache comparison](measurements/2026-11-14-readiness.md),
-[owned-dispatcher comparison](measurements/2026-11-14-dispatcher.md) and
-[immutable table-handle comparison](measurements/2026-11-14-table-handle.md) all
+[owned-dispatcher comparison](measurements/2026-11-14-dispatcher.md),
+[immutable table-handle comparison](measurements/2026-11-14-table-handle.md) and
+[observed-value write comparison](measurements/2026-11-14-write-pruning.md) all
 failed every latency row. The separate hosted
-[readiness](measurements/2026-11-14-hosted-readiness.md) and
-[dispatcher](measurements/2026-11-14-hosted-dispatcher.md) comparisons also failed
-every row. Their complete evidence and limits remain available.
+[readiness](measurements/2026-11-14-hosted-readiness.md),
+[dispatcher](measurements/2026-11-14-hosted-dispatcher.md),
+[table-handle](measurements/2026-11-14-hosted-table-handle.md) and
+[write-pruning](measurements/2026-11-14-hosted-write-pruning.md) comparisons also
+failed every row. Their complete evidence and limits remain available.
+
+The [compiler provenance correction](measurements/2026-11-14-compiler-provenance-erratum.md)
+explains an earlier metadata error: local diagnostics copied the expected
+compiler route and identity from configuration without a bound build manifest.
+Their original samples and failed verdicts remain unchanged. Current reports
+separate expected pins from manifest-reported build information.
+
+### Later implementation decision
+
+After the completed table-handle and observed-value write-pruning experiments,
+both provisional optimizations were removed from the next candidate. Neither
+established a benefit that justified retaining its extra cached state or commit
+branches. The backend returns to the previously tested dispatcher behavior;
+general snapshot, conflict and durable-flush regression coverage remains. The
+historical reports and raw archives above continue to describe the exact code
+that ran. In particular, the hosted write-tail failure remains recorded without
+a causal claim about pruning. The separate sidebar correctness/count work and
+upstream synchronization proceed with the same fixed performance requirements.
 
 ## What runs
 
@@ -71,7 +92,8 @@ importer is allowed as an additional harness importer. Resolved direct server an
 shared dependency versions are checked against the upstream production lock;
 Effect and platform-node are required. Reports retain installed package manifest
 hashes, the SQLite wrapper hash, the full source archive hash, both lock hashes,
-Node version, native executable hash and compiler/toolchain identities.
+Node version, native executable hash, expected compiler/toolchain identities and
+the separately scoped build-manifest provenance.
 
 Qualification also requires the installed pnpm application lock to match the
 complete source application document, including transitive package/snapshot
@@ -211,6 +233,18 @@ same-run release artifact, matching compiler/toolchain/helper hashes, and the
 current policy and immutable upstream identities. Source cleanliness and
 identity are checked again after measurements. Qualification exits nonzero for
 a regression, failure or inconclusive result.
+
+Compiler provenance is explicit. Without a build manifest, diagnostics report
+`compiler_provenance: unverified` and leave the reported route and identity null.
+A diagnostic manifest that matches the executable hash is `manifest-reported`;
+its source, route and profile are reported claims. Qualification sets
+`verified-ci-manifest` only after checking the exact source/tree, clean state,
+workflow run, executable and lock hashes, required Lustr route and release
+profile. This verifies the manifest binding, not an independent identification
+of the compiler from binary contents. `expected_compiler_identity` always keeps
+the configured pin separate. `compiler_identity` stays null unless the manifest
+explicitly supplies one, even when its lock hash matches. The current release
+manifest does not supply that field.
 
 The supplied native executable and release-manifest hashes are rechecked after
 the workers finish, including in diagnostic mode. A concurrent binary replacement

@@ -21,6 +21,7 @@ import {
   withSqlite,
 } from "./redb-domain-fixture.mjs";
 import { jsonPayloads, sampleEvents, makeEvent, fixedTime } from "./redb-event-sink-fixtures.mjs";
+import { compareProjectionCounts } from "./redb-projection-count-fixture.mjs";
 
 const [executable, proofPath] = process.argv.slice(2);
 NodeAssert.ok(
@@ -765,12 +766,14 @@ try {
   checks.push("Shell summaries survive native helper restart");
   await compareIndexed(false);
   await compareIndexed(true);
+  const countProof = await compareProjectionCounts(executable);
   checks.push(
     "Indexed family/worktree intersections preserve duplicate and missing IDs, deleted roots, empty filters and stable ordering",
     "Archive-column shell/index/pull-request filters and retained JSON-filter APIs agree despite deliberately inconsistent imported archive fields",
     "Unrelated malformed payloads are excluded before narrow shell decoding; malformed selected or family-reference rows still fail",
     "SQLite worktree/family reads use expression indexes and shell counts use covering run-status indexes",
     "Family/worktree index changes follow staged updates, nested rollback, committed movement, deletion rollback and helper restart",
+    "Canonical aggregate counts preserve global cross-thread queued subtraction, signed results, dangling runs, NULL/empty keys, duplicate JSON members and unrelated malformed reasoning payloads",
   );
   NodeAssert.equal(hash(await NodeFSP.readFile(source)), sourceHash);
   await finishProof({
@@ -779,7 +782,7 @@ try {
     proofPath,
     checks,
     sourceHash,
-    oracles: [oracle.source],
+    oracles: [oracle.source, countProof.migrationSource],
     sourcePaths: [
       "apps/server/src/orchestration-v2/ProjectionStore.ts",
       "apps/server/src/orchestration-v2/NativeProjectionStore.ts",
@@ -790,6 +793,9 @@ try {
       "apps/server/src/persistence/redb_projection_window_index.rs",
       "apps/server/src/persistence/redb_projection_read_index.rs",
       "apps/server/src/persistence/redb_projection_derived_indexes.rs",
+      "apps/server/src/persistence/redb_turn_item_counts.rs",
+      "apps/server/src/persistence/redb_schema_upgrade.rs",
+      "tools/redb-projection-count-fixture.mjs",
       "tools/check-redb-projection-shells.mjs",
     ],
   });

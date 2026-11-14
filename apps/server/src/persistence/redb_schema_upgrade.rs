@@ -4,7 +4,7 @@
 //! including writes an older executable may have made after an interrupted run.
 use super::*;
 use crate::application::{ApplicationRow, encode_row, row_key};
-use crate::application_rows::{managed_marker, nullable_cell, read_row};
+use crate::application_rows::{managed_marker, nullable, nullable_cell, read_row};
 use crate::backend::Transaction;
 use crate::{request_digest, store_key};
 use serde_json::{Map, Value};
@@ -16,6 +16,7 @@ const EVENTS: &str = "orchestration_events";
 const SESSIONS: &str = "auth_sessions";
 const LINKS: &str = "auth_pairing_links";
 const PAGE: usize = 32;
+const COUNT_ORIGIN_NAMESPACE: &[u8] = b"upgrade-count-origins/v1/";
 fn prefix(generation: &str) -> Vec<u8> {
     store_key(&format!("application/generation/{generation}/"))
 }
@@ -26,6 +27,51 @@ fn end(prefix: &[u8]) -> Vec<u8> {
 }
 fn encode(value: &impl Serialize) -> Result<Vec<u8>> {
     serde_json::to_vec(value).map_err(|_| Error::IncompatibleStore)
+}
+
+#[derive(Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct CountOrigin {
+    generation: String,
+    thread_id: String,
+    run_id: Option<String>,
+}
+
+fn count_origin_prefix(catalog: &ApplicationCatalog) -> Vec<u8> {
+    let mut key = prefix(&catalog.generation);
+    key.extend_from_slice(COUNT_ORIGIN_NAMESPACE);
+    key
+}
+
+async fn validate_count_origin(
+    tx: &mut Transaction,
+    catalog: &ApplicationCatalog,
+    row: &Map<String, Value>,
+) -> Result<()> {
+    let run_id = nullable(row, "run_id")?;
+    if run_id.as_deref().is_some_and(|run| !run.is_empty()) {
+        return Ok(());
+    }
+    let witness = CountOrigin {
+        generation: catalog.generation.clone(),
+        thread_id: text(row, "thread_id")?,
+        run_id,
+    };
+    let mut key = count_origin_prefix(catalog);
+    key.extend_from_slice(request_digest(&json!(witness.thread_id)).as_bytes());
+    if let Some(bytes) = tx.get(&key).await? {
+        let previous: CountOrigin =
+            serde_json::from_slice(&bytes).map_err(|_| Error::IncompatibleStore)?;
+        if previous != witness {
+            // Migration 85 GROUP BY keeps NULL and empty run IDs distinct,
+            // then COALESCE maps both groups to the same unique count key.
+            // Reject that source collision instead of silently summing it.
+            return Err(Error::IncompatibleStore);
+        }
+    } else {
+        tx.put(key, encode(&witness)?).await?;
+    }
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize)]
@@ -313,6 +359,7 @@ enum Stage {
     Projects,
     ProjectEvents,
     Counts,
+    ClearCountOrigins,
     AuthSessions,
     AuthLinks,
 }
@@ -411,6 +458,7 @@ async fn transform(
             }
         }
         Stage::Counts => {
+            validate_count_origin(tx, target, &old.row).await?;
             crate::application_turn_item_counts::replace(tx, target, None, Some(&old.row)).await?
         }
         Stage::AuthSessions | Stage::AuthLinks => {
@@ -429,12 +477,36 @@ async fn transform(
             )
             .await?;
         }
-        Stage::Clear | Stage::Copy => return Err(Error::IncompatibleStore),
+        Stage::Clear | Stage::Copy | Stage::ClearCountOrigins => return Err(Error::IncompatibleStore),
     }
     Ok(())
 }
 
 impl Store {
+    /// Older schema-91 publication claimed the count table before the first
+    /// projection preparation. Accept that interrupted state only for the
+    /// exact published target and retained, supported source history.
+    pub(crate) async fn published_projection_count_owner(
+        tx: &mut Transaction,
+        catalog: &ApplicationCatalog,
+    ) -> Result<bool> {
+        let Some(bytes) = tx.get(&lineage_91_key(catalog)).await? else {
+            return Ok(false);
+        };
+        let lineage: ImportLineage =
+            serde_json::from_slice(&bytes).map_err(|_| Error::IncompatibleStore)?;
+        let current = definition()?;
+        if lineage.version != 1
+            || *catalog != target_91(&lineage.source, &current)
+            || lineage.source.generation == catalog.generation
+        {
+            return Err(Error::IncompatibleStore);
+        }
+        validate_history(tx, catalog, &current.migrations).await?;
+        source_definition(tx, &lineage.source).await?;
+        Ok(true)
+    }
+
     pub(super) async fn upgrade_application_91(
         &self,
         source: ApplicationCatalog,
@@ -454,6 +526,7 @@ impl Store {
                 Stage::Projects,
                 Stage::ProjectEvents,
                 Stage::Counts,
+                Stage::ClearCountOrigins,
             ] {
                 self.upgrade_stage(&source, &target, stage).await?;
             }
@@ -495,6 +568,7 @@ impl Store {
         let scan_prefix = match stage {
             Stage::Clear => prefix(&target.generation),
             Stage::Copy => prefix(&source.generation),
+            Stage::ClearCountOrigins => count_origin_prefix(target),
             _ => row_prefix(
                 &source.generation,
                 stage.table().ok_or(Error::IncompatibleStore)?,
@@ -511,11 +585,20 @@ impl Store {
         let mut last = None;
         for (key, bytes) in page {
             match stage {
-                Stage::Clear => tx.delete(key.clone()).await?,
+                Stage::Clear | Stage::ClearCountOrigins => tx.delete(key.clone()).await?,
                 Stage::Copy => {
                     let suffix = key
                         .strip_prefix(scan_prefix.as_slice())
                         .ok_or(Error::IncompatibleStore)?;
+                    // Count groups enumerate canonical migration-85 rows. Their
+                    // preparation witness belongs to the source generation;
+                    // rebuild it after all target count rows are staged.
+                    if suffix.starts_with(crate::application_turn_item_counts::INDEX_NAMESPACE)
+                        || suffix.starts_with(COUNT_ORIGIN_NAMESPACE)
+                    {
+                        last = Some(key);
+                        continue;
+                    }
                     // Authentication gained proof-key indexes and columns. Its
                     // old preparation witness cannot qualify the staged catalog.
                     let auth_changed =
@@ -599,6 +682,7 @@ impl Store {
             Stage::Projects,
             Stage::ProjectEvents,
             Stage::Counts,
+            Stage::ClearCountOrigins,
         ] {
             self.upgrade_stage(&source, &target, stage).await?;
         }
@@ -669,6 +753,8 @@ impl Store {
         {
             return Err(Error::IncompatibleStore);
         }
+        crate::application_projections::validate_item_owner(&mut tx, &target).await?;
+        crate::application_turn_item_counts::ensure_ready(&mut tx, &target).await?;
         for migration in migrations.iter().skip(previous_migrations) {
             write_row(
                 &mut tx,
@@ -696,11 +782,6 @@ impl Store {
                 serde_json::to_value(&migrations).map_err(|_| Error::IncompatibleStore)?;
             tx.put(header_key, encode(&header)?).await?;
         }
-        tx.put(
-            managed_marker(&target, crate::application_turn_item_counts::TABLE),
-            encode(&"projection-commit-v1")?,
-        )
-        .await?;
         tx.put(lineage, encode(&ImportLineage { version: 1, source })?)
             .await?;
         // The sole publish point: canonical rows, index backfills and migration

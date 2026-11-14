@@ -1,5 +1,10 @@
 # Hosted readiness comparison, 2026-11-14
 
+> Later compiler-provenance correction: the supplied release manifest bound the
+> reported route/profile, but the raw `compiler_identity` field came from the
+> expected lock. See the [erratum](2026-11-14-compiler-provenance-erratum.md).
+> Original raw evidence, hashes and failed timing verdicts are unchanged.
+
 **Decision: reject qualification.** The first hosted performance attempt passed
 its correctness, ordering, nonempty-cardinality, rollback and committed-reopen
 checks, but every fixed latency row regressed against the pinned stock source.

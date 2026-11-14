@@ -1,5 +1,10 @@
 # Hosted dispatcher comparison, 2026-11-14
 
+> Later compiler-provenance correction: the supplied release manifest bound the
+> reported route/profile, but the raw `compiler_identity` field came from the
+> expected lock. See the [erratum](2026-11-14-compiler-provenance-erratum.md).
+> Original raw evidence, hashes and failed timing verdicts are unchanged.
+
 **Decision: reject qualification.** Every fixed latency row regressed against the
 pinned stock baseline, with all eleven 95% paired intervals entirely above 1.0.
 Correctness passed, the source remained clean, the helper was a same-run release

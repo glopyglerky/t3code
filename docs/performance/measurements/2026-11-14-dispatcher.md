@@ -1,5 +1,10 @@
 # Owned-dispatcher measurement, 2026-11-14
 
+> Later compiler-provenance correction: this diagnostic supplied no native build
+> manifest. Its compiler route and identity fields describe expected pins, not
+> verified build evidence. See the [erratum](2026-11-14-compiler-provenance-erratum.md).
+> Original raw evidence, hashes and timing results are unchanged.
+
 **Decision: reject performance qualification and continue the bounded read-path
 optimization.** Correctness passed, but every one of the eleven fixed latency
 rows has its entire paired 95% native/stock interval above 1.0. The full eight

@@ -30,6 +30,7 @@ import contract from "./performance-contract.json" with { type: "json" };
 import { createPinnedBaseline } from "./performance-baseline.mjs";
 import { processTreeRss } from "./performance-memory.mjs";
 import { observeFilesystem } from "./performance-filesystem.mjs";
+import { compilerProvenanceMarkdown, resolveCompilerProvenance } from "./performance-compiler.mjs";
 
 const root = NodeURL.fileURLToPath(new URL("../", import.meta.url));
 const workerPath = NodeURL.fileURLToPath(new URL("./performance-worker.mjs", import.meta.url));
@@ -126,9 +127,7 @@ const report = {
   policy_digest: null,
   upstream_commit: upstream.commit,
   upstream_tree: upstream.root_tree,
-  compiler_route: "bluefe-rustc-via-lustr",
-  compiler_identity: toolchain.compatibility,
-  build_profile: "unverified-diagnostic",
+  ...resolveCompilerProvenance({ expectedCompilerIdentity: toolchain.compatibility }),
   toolchain_lock_sha256: hash(toolchainBytes),
   native_manifest_sha256: null,
   executable_sha256: hash(await NodeFSP.readFile(options.database)),
@@ -195,8 +194,7 @@ function markdown() {
     "",
     `Fork commit: \`${report.source_commit}\`. Tree: \`${report.source_tree}\`. Dirty: ${report.source_tree_dirty}.`,
     `Pinned upstream: \`${report.upstream_commit}\`. Tree: \`${report.upstream_tree}\`.`,
-    `Compiler route: ${report.compiler_route}. Build profile: ${report.build_profile}.`,
-    `Compiler revision: \`${toolchain.compatibility.compiler_revision}\`. Coordinator: \`${toolchain.compatibility.coordinator_revision}\`.`,
+    ...compilerProvenanceMarkdown(report),
     `Executable SHA-256: \`${report.executable_sha256}\`. Toolchain lock: \`${report.toolchain_lock_sha256}\`.`,
     `Manifest SHA-256: \`${report.native_manifest_sha256 ?? "not supplied"}\`. Policy: \`${report.policy_digest ?? "not supplied"}\`.`,
     "",
@@ -597,24 +595,12 @@ const canonical = (value) =>
 let fixture;
 try {
   await save();
+  let manifest = null;
   if (options.manifest) {
     const bytes = await NodeFSP.readFile(options.manifest);
-    const manifest = JSON.parse(bytes);
+    manifest = JSON.parse(bytes);
     report.native_manifest_sha256 = hash(bytes);
     report.native_build_run_attempt = manifest.ci_run_attempt ?? null;
-    report.build_profile = manifest.build_profile ?? "unverified-diagnostic";
-    NodeAssert.equal(manifest.files[NodePath.basename(options.database)], report.executable_sha256);
-    if (mode === "qualify") {
-      NodeAssert.equal(manifest.source_commit, report.source_commit);
-      NodeAssert.equal(manifest.source_tree, report.source_tree);
-      NodeAssert.equal(manifest.source_tree_dirty, false);
-      NodeAssert.equal(manifest.build_profile, "release");
-      NodeAssert.equal(manifest.compiler_route, report.compiler_route);
-      NodeAssert.equal(manifest.toolchain_lock_sha256, report.toolchain_lock_sha256);
-      NodeAssert.equal(manifest.ci_run_id, report.ci_run_id);
-      NodeAssert.ok(report.ci_run_id !== null);
-      NodeAssert.ok(report.ci_run_attempt !== null);
-    }
   }
   if (options.plan) {
     const plan = JSON.parse(await NodeFSP.readFile(options.plan, "utf8"));
@@ -630,6 +616,16 @@ try {
     );
     NodeAssert.equal(report.source_tree_dirty, false, "Qualification requires a clean source tree");
   }
+  Object.assign(
+    report,
+    resolveCompilerProvenance({
+      expectedCompilerIdentity: toolchain.compatibility,
+      mode,
+      manifest,
+      executableName: NodePath.basename(options.database),
+      current: report,
+    }),
+  );
   const sourcePaths = [
     "tools/performance-persistence.mjs",
     "tools/performance-worker.mjs",
@@ -639,6 +635,7 @@ try {
     "tools/performance-memory.mjs",
     "tools/performance-runtime.mjs",
     "tools/performance-filesystem.mjs",
+    "tools/performance-compiler.mjs",
     "apps/server/src/persistence/Omdb.ts",
     "apps/server/src/orchestration-v2/NativeProjectionStore.ts",
     "apps/server/src/orchestration-v2/NativeThreadSearch.ts",

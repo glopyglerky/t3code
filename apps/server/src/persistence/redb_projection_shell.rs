@@ -727,61 +727,126 @@ async fn settlement(session: &mut Session, thread: &Meta) -> Result<Option<Value
 }
 
 async fn item_counts(session: &mut Session, ids: &[String], per_run: bool) -> Result<Value> {
-    let mut groups: BTreeMap<(String, Option<String>), (u64, u64)> = BTreeMap::new();
-    for item in selected(session, ITEMS, Some(ids)).await? {
-        let key = (
-            text(&item.row, "thread_id")?,
-            nullable(&item.row, "run_id")?,
-        );
-        let counts = groups.entry(key).or_default();
-        counts.0 += 1;
-        counts.1 += u64::from(
-            item.col("type") == Some("user_message")
-                && item.pstr("inputIntent") == Some("queued_turn"),
-        );
-    }
-    let mut rows = Vec::new();
-    let mut totals: BTreeMap<String, (u64, u64)> = BTreeMap::new();
-    for ((thread, run), (count, queued)) in groups {
-        let mut visible_count = count;
-        let mut rolled_back = false;
-        let mut found = false;
-        if let Some(run_id) = &run {
-            if let Some(record) = point(session, RUNS, run_id).await? {
-                found = true;
-                rolled_back = record.col("status") == Some("rolled_back");
-                let cancelled_attempt = if per_run && rolled_back {
-                    related(session, ATTEMPTS, "run_id", run_id)
-                        .await?
-                        .iter()
-                        .any(|attempt| attempt.col("status") == Some("cancelled"))
+    use crate::application_turn_item_counts as counts;
+
+    counts::ensure_ready(&mut session.transaction, &session.catalog).await?;
+    let mut rows = BTreeMap::new();
+    let mut totals = Vec::new();
+    for thread in ids.iter().collect::<BTreeSet<_>>() {
+        let expected_groups =
+            counts::expected_groups(&mut session.transaction, &session.catalog, thread).await?;
+        let mut visited_groups = 0_u64;
+        let mut after: Option<Vec<u8>> = None;
+        let mut total: Option<(i64, i64)> = None;
+        loop {
+            let page = counts::read_page(
+                &mut session.transaction,
+                &session.catalog,
+                thread,
+                after.as_deref(),
+            )
+            .await?;
+            for group in page.rows {
+                visited_groups = visited_groups
+                    .checked_add(1)
+                    .ok_or(Error::IncompatibleStore)?;
+                if visited_groups > expected_groups {
+                    return Err(Error::IncompatibleStore);
+                }
+                if per_run && group.run_key.is_empty() {
+                    continue;
+                }
+                // The SQL join is by run_id alone. A foreign-thread run can
+                // qualify a group; a missing nonempty run yields SQL NULL and
+                // contributes zero only to the total query, not the per-run one.
+                let run = read_row(
+                    &mut session.transaction,
+                    &session.catalog,
+                    RUNS,
+                    &[text_cell(&group.run_key)],
+                )
+                .await?;
+                let status = run
+                    .as_ref()
+                    .map(|row| nullable(&row.row, "status"))
+                    .transpose()?
+                    .flatten();
+                let included = per_run
+                    || group.run_key.is_empty()
+                    || status
+                        .as_deref()
+                        .is_some_and(|status| status != "rolled_back");
+                let cancelled_attempt = if per_run && status.as_deref() == Some("rolled_back") {
+                    read_index::any_equal(
+                        session,
+                        ATTEMPTS,
+                        "run_id",
+                        &text_cell(&group.run_key),
+                        |row| Ok(nullable(row, "status")?.as_deref() == Some("cancelled")),
+                    )
+                    .await?
                 } else {
                     false
                 };
-                if matches!(record.col("status"), Some("queued" | "cancelled")) || cancelled_attempt
+                let mut visible = if included { group.item_count } else { 0 };
+                if included
+                    && (matches!(status.as_deref(), Some("queued" | "cancelled"))
+                        || cancelled_attempt)
                 {
-                    visible_count -= queued;
+                    // Upstream deliberately counts queued input globally by run
+                    // ID, without a thread filter. A foreign group's subtraction
+                    // may exceed its item_count, so the result must stay signed.
+                    let queued = read_index::count_matching(
+                        session,
+                        ITEMS,
+                        "run_id",
+                        &text_cell(&group.run_key),
+                        |row| {
+                            Ok(text(row, "type")? == "user_message"
+                                && read_index::derived::json_identity(
+                                    &text(row, "payload_json")?,
+                                    &["inputIntent"],
+                                )? == Some(text_cell("queued_turn")))
+                        },
+                    )
+                    .await?;
+                    visible = visible
+                        .checked_sub(queued)
+                        .ok_or(Error::IncompatibleStore)?;
+                }
+                if per_run {
+                    rows.insert((group.thread_id, group.run_key), visible);
+                } else {
+                    let values = total.get_or_insert((0, 0));
+                    values.0 = values
+                        .0
+                        .checked_add(visible)
+                        .ok_or(Error::IncompatibleStore)?;
+                    if group.run_key.is_empty() {
+                        values.1 = values
+                            .1
+                            .checked_add(group.item_count)
+                            .ok_or(Error::IncompatibleStore)?;
+                    }
                 }
             }
+            match page.after {
+                Some(cursor) => after = Some(cursor),
+                None => break,
+            }
         }
-        if per_run {
-            if let Some(run) = run {
-                rows.push(json!({"thread_id":thread,"run_id":run,"item_count":visible_count}));
-            }
-        } else {
-            let total = totals.entry(thread).or_default();
-            if run.is_none() {
-                total.0 += count;
-                total.1 += count;
-            } else if found && !rolled_back {
-                total.0 += visible_count;
-            }
+        if visited_groups != expected_groups {
+            return Err(Error::IncompatibleStore);
+        }
+        if let Some((count, runless)) = total {
+            totals
+                .push(json!({"thread_id":thread,"item_count":count,"runless_item_count":runless}));
         }
     }
     if per_run {
-        Ok(json!(rows))
+        Ok(json!(rows.into_iter().map(|((thread,run),count)|json!({"thread_id":thread,"run_id":run,"item_count":count})).collect::<Vec<_>>()))
     } else {
-        Ok(json!(totals.into_iter().map(|(thread,(total,runless))|json!({"thread_id":thread,"item_count":total,"runless_item_count":runless})).collect::<Vec<_>>()))
+        Ok(json!(totals))
     }
 }
 

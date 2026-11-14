@@ -54,7 +54,7 @@ permit arbitrary catalogs or histories to reinterpret an old receipt.
 Schema 91 adds persistent Connect device authorization and denied-request state.
 The upgrade publishes a new generation, rebuilds derived projection read metadata
 and prepares the current auth indexes before the new catalog becomes visible.
-The [current integration record](default-913d7fc4.md) describes the corresponding
+The [schema-91 integration record](default-913d7fc4.md) describes the corresponding
 API changes and retained schema-89 fixture.
 
 A graceful interruption of a current-schema import can resume. Other historical

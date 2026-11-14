@@ -3,7 +3,7 @@
 The source advances from `c7a3f02e3851923ced8ebd000db79f641e11b038` to
 `913d7fc45ec5814fff25c819cfe4de193ea42d63`, the upstream default branch cutoff
 fetched on 2026-11-14. This integrates 293 upstream commits and changes across
-887 upstream paths. The merge keeps both histories and the qualified fork
+887 upstream paths. The merge keeps both histories and the existing fork
 ancestor `3577878a5e008c8af87a8fbdae13d26dea1c2f50`.
 
 The earlier scan at `121f0cf014dcd6e94327588bf3f1f200a5f07ad7` covered the
@@ -157,9 +157,58 @@ systems and native Lust remain outside that evidence.
 
 Its [hosted stock comparison](../performance/measurements/2026-11-14-hosted-dispatcher.md)
 still regressed in all eleven latency rows. Performance and final qualification
-therefore failed despite the successful application flow. Main remains at its
-previous qualified ancestor, and subsequent read-table and write changes need
+therefore failed despite the successful application flow. Existing main remains
+unchanged, and subsequent read-table and write changes need
 their own exact-source application and performance evidence.
+
+## Verified table-handle application flow at b5250fe8
+
+The [table-handle candidate's hosted run](https://github.com/glopyglerky/t3code-ls/actions/runs/43602183576)
+passed native/source/component checks, production adapters and the original
+Linux browser/restart flow for clean source
+`b5250fe811e64ef06dd6b79963191ee48a91fe8f`, tree
+`85230b3187cd32bbeafb88b32d14b91f58363b27`. Its scope matches the controlled
+flow described above: no paid provider turn, installed user state or additional
+platform acceptance is implied.
+
+The [application artifact](https://github.com/glopyglerky/t3code-ls/actions/runs/43602183576/artifacts/14117400950)
+has verified ZIP SHA256
+`721cb125ab463e2c130635dbf09688e7c23ce391207a9526c4bd6047975c606e`.
+It belongs to job `132471888947`, run attempt 1. The
+[hosted comparison](../performance/measurements/2026-11-14-hosted-table-handle.md)
+regressed in all eleven speed rows, so final qualification rejected the failed
+performance job. That rejection also verifies the improved failure diagnostic:
+the receipt names the failed required gate instead of attempting an empty
+artifact download. Main did not advance.
+
+Subsequent write changes and the [5fe2f7e4 source advance](default-5fe2f7e4.md)
+require their own exact-source gates. This historical application evidence
+remains tied to b5250fe8 and upstream 913d7fc4.
+
+## Verified write-pruning application flow at d661dbb2
+
+The [write-pruning candidate's hosted run](https://github.com/glopyglerky/t3code-ls/actions/runs/43603651670)
+also passed native/source/component checks, production adapters and the full
+controlled Linux application flow for clean source
+`d661dbb2bf693b88c8969fcda9a0f5b98e3a2cca`, tree
+`549bff502c033739693b562a854437c0292a5019`. Its application build and
+`client/native/proof.json` pass for the same setup, project creation, controlled
+ACP approval, completed turn, reload and fresh-client durable restart scope.
+
+The [application artifact](https://github.com/glopyglerky/t3code-ls/actions/runs/43603651670/artifacts/14117637443)
+has independently verified ZIP SHA256
+`65924edff9a2407e42f22519eefaa902d96f99ec853a9b77ceb0ee6622c9b913`.
+It belongs to job `132477074663`, run attempt 1. This establishes that exact
+Linux application flow, without extending it to other clients, platforms,
+native Lust or real provider turns.
+
+The [hosted performance report](../performance/measurements/2026-11-14-hosted-write-pruning.md)
+retains all eleven failing rows, including the much longer observed visit
+tail. Its host differs from the local diagnostic, so those observations do
+not establish that write pruning caused the tail. Performance and final
+qualification failed; main remained unchanged. The subsequent 5fe2f7e4/count
+candidate removes the unproven table-handle and write-pruning experiments
+while preserving their measurements and useful general regression tests.
 
 ## Qualification
 

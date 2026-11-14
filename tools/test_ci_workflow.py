@@ -66,8 +66,11 @@ class WorkflowArtifactWiring(unittest.TestCase):
         self.assertIn("proof_run_attempt: ${{ steps.proof.outputs.proof_run_attempt }}", self.hybrid)
 
     def test_performance_installs_the_same_frozen_production_graph_as_the_application(self):
+        plan = self.hybrid.split("\n  plan:", 1)[1].split("\n  native:", 1)[0]
         application = self.hybrid.split("\n  application:", 1)[1].split("\n  performance:", 1)[0]
         performance = self.hybrid.split("\n  performance:", 1)[1].split("\n  qualification:", 1)[0]
+        self.assertIn("tools/performance-compiler.test.mjs", plan)
+        self.assertNotIn("pnpm install", plan)
         for job in (application, performance):
             self.assertIn("node-version: 26.12.1", job)
             self.assertIn("npm install --global pnpm@12.14.0 --ignore-scripts --no-audit --no-fund", job)
@@ -91,6 +94,21 @@ class WorkflowArtifactWiring(unittest.TestCase):
         self.assertIn("- name: Require every planned gate and its evidence to pass\n        if: always()", qualification)
         self.assertIn("name: hybrid-performance-proof-${{ needs.performance.outputs.proof_run_attempt }}", qualification)
         self.assertIn("- name: Retain raw samples, failures and comparison decisions\n        if: always()", self.hybrid)
+
+    def test_full_normal_hooks_are_required_before_application_and_retained_after_failure(self):
+        application = self.hybrid.split("\n  application:", 1)[1].split("\n  performance:", 1)[0]
+        self.assertIn("fetch-depth: 2", application)
+        self.assertIn('test "$(git rev-parse HEAD)" = "$GITHUB_SHA"', application)
+        self.assertIn('git checkout --detach "$GITHUB_SHA"', application)
+        invocation = 'python3 tools/ci_commit_hooks.py --output "$RUNNER_TEMP/commit-hook-proof/proof.json"'
+        self.assertIn(invocation, application)
+        self.assertLess(application.index("pnpm install --frozen-lockfile"), application.index(invocation))
+        self.assertLess(application.index(invocation), application.index("node tools/check-hybrid.mjs --verify-binaries"))
+        self.assertIn("${{ runner.temp }}/commit-hook-proof/", application)
+        self.assertIn("- name: Retain application evidence\n        if: always()", application)
+        hook_step = application.split("- name: Run the normal candidate hooks", 1)[1].split("- uses:", 1)[0]
+        self.assertNotIn("continue-on-error", hook_step)
+        self.assertNotIn("if:", hook_step)
 
 
 if __name__ == "__main__":

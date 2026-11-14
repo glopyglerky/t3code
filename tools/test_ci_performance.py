@@ -63,6 +63,7 @@ def report(plan, run_id="101"):
         "policy_digest": plan["policy_digest"],
         "upstream_commit": plan["upstream_commit"], "upstream_tree": plan["upstream_tree"],
         "ci_run_id": run_id, "ci_run_attempt": "1", "native_build_run_attempt": "1",
+        "compiler_provenance": "verified-ci-manifest",
         "compiler_route": "bluefe-rustc-via-lustr", "build_profile": "release",
         "toolchain_lock_sha256": "d" * 64, "native_manifest_sha256": "e" * 64,
         "baseline": {"commit": plan["upstream_commit"], "tree": plan["upstream_tree"],
@@ -115,11 +116,19 @@ class PerformanceEvidence(unittest.TestCase):
             ("source_commit", "f" * 40), ("source_tree", "f" * 40), ("policy_digest", "a" * 64),
             ("upstream_commit", "a" * 40), ("upstream_tree", "a" * 40), ("ci_run_id", "100"), ("ci_run_attempt", "2"),
             ("source_tree_dirty", True), ("build_profile", "debug"), ("compiler_route", "native-lust"),
+            ("compiler_provenance", None), ("compiler_provenance", "unverified"),
+            ("compiler_provenance", "manifest-reported"),
             ("source_tree_dirty_after", True), ("qualifies", False),
             ("mode", "diagnostic"), ("status", "inconclusive"), ("status", "regressed"),
         ]:
             with self.subTest(field=field, replacement=replacement), self.assertRaises(ValueError):
                 self.validate({**report(self.plan), field: replacement})
+
+    def test_missing_compiler_verification_does_not_inherit_the_expected_route(self):
+        value = report(self.plan)
+        del value["compiler_provenance"]
+        with self.assertRaisesRegex(ValueError, "unverified compilation route/profile"):
+            self.validate(value)
 
     def test_one_bad_or_missing_case_is_not_hidden_by_the_passed_summary(self):
         mutations = [

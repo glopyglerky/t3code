@@ -16,6 +16,7 @@ import * as NativeEventRows from "../apps/server/src/persistence/NativeEventRows
 import * as OrchestrationEventStore from "../apps/server/src/persistence/OrchestrationEventStore.ts";
 import { createFixture } from "./database-fixture.mjs";
 import { exportSqliteState } from "./export-sqlite-state.mjs";
+import { upstreamSource } from "./upstream-source.mjs";
 import { jsonPayloads, makeEvent, fixedTime } from "./redb-event-sink-fixtures.mjs";
 import {
   createMigratedSqlite,
@@ -34,6 +35,25 @@ NodeAssert.ok(
   "Pass an absolute native database executable",
 );
 await NodeFSP.access(executable, NodeFSP.constants.X_OK);
+// These retained parsers are shared by the production find adapter and oracle.
+// Verify their immutable source identity instead of copying their algorithms.
+const normalizationSources = await Promise.all(
+  [
+    "packages/shared/src/threadFindText.ts",
+    "packages/shared/src/markdownLinks.ts",
+    "packages/shared/src/markdownPipeline.ts",
+    "packages/shared/src/codexFileCitations.ts",
+    "packages/shared/src/codexMarkdownDirectives.ts",
+  ].map(async (path) => {
+    const sha256 = hash(upstreamSource(path));
+    NodeAssert.equal(
+      hash(await NodeFSP.readFile(new URL(`../${path}`, import.meta.url))),
+      sha256,
+      `${path} is the unchanged pinned shared parser`,
+    );
+    return { path, sha256 };
+  }),
+);
 const findOracle = await loadUpstreamModule("apps/server/src/orchestration-v2/ThreadFind.ts");
 const oracle = await loadUpstreamModule("apps/server/src/orchestration-v2/ProjectionStore.ts", {
   "./ThreadFind.ts": findOracle.url,
@@ -175,6 +195,49 @@ const queries = [
   { query: "needle-hidden" },
   { query: "not-in-the-thread" },
 ];
+const normalizationCases = [
+  {
+    id: "bare-parentheses",
+    text: "[a](/fixture/workspace/app/(route-a)/page.tsx) and [b](/fixture/workspace/app/(route-b)/page.tsx)",
+    matches: [["app/(route-a)", 1]],
+  },
+  {
+    id: "escaped-parentheses",
+    text: String.raw`[a](/fixture/workspace/app/\(escaped-a\)/page.tsx) and [b](/fixture/workspace/app/\(escaped-b\)/page.tsx)`,
+    matches: [["app/(escaped-a)", 1]],
+  },
+  {
+    id: "entity-path",
+    type: "user_message",
+    text: "[a](/fixture/workspace/first&amp;branch/page.tsx) and [b](/fixture/workspace/second&amp;branch/page.tsx)",
+    matches: [
+      ["first&branch", 1],
+      ["first&amp;branch", 0],
+    ],
+  },
+  {
+    id: "angle-parenthesis",
+    text: "[a](</fixture/workspace/angle&branch)/page.tsx>) and [b](</fixture/workspace/other&branch)/page.tsx>)",
+    matches: [["angle&branch)", 1]],
+  },
+  {
+    id: "windows-plan",
+    type: "proposed_plan",
+    text: String.raw`[a](C:\repo\.first\x&amp;y\page.tsx) and [b](C:\repo\.second\x&amp;y\page.tsx)`,
+    matches: [
+      ["x&y", 2],
+      ["x&amp;y", 0],
+    ],
+  },
+  {
+    id: "citation-entity",
+    text: ':codex-file-citation{path="/fixture/workspace/literal&amp;copy;.txt" line_range_start="7"}',
+    matches: [
+      ["literal&copy;.txt", 1],
+      ["literal©.txt", 0],
+    ],
+  },
+];
 
 async function withServices(kind, filename, use) {
   if (kind === "native")
@@ -232,11 +295,6 @@ const exercise = Effect.fn("checkRedbThreadFind.exercise")(function* ({
       output.push(normalized(frames));
     }
   }
-  const before = yield* find.searchThread({ threadId: grandchild, query: "needle" });
-  const mutation = {
-    ...item("item:find:000", 1, "needle changed needle needle"),
-    id: "event:find:changed",
-  };
   const commit = (next) =>
     transaction(
       Effect.gen(function* () {
@@ -244,6 +302,21 @@ const exercise = Effect.fn("checkRedbThreadFind.exercise")(function* ({
         yield* apply(next);
       }),
     );
+  for (const [index, test] of normalizationCases.entries()) {
+    const entryId = `item:normalization:${test.id}`;
+    yield* commit(item(entryId, 200 + index, test.text, test.type ?? "assistant_message"));
+    for (const [query, count] of test.matches) {
+      const result = yield* find.searchThread({ threadId: main, query });
+      NodeAssert.equal(result.totalMatches, count, `${test.id}: displayed ${query}`);
+      if (count > 0) NodeAssert.equal(result.match?.entryId, entryId, test.id);
+      output.push(normalized(result));
+    }
+  }
+  const before = yield* find.searchThread({ threadId: grandchild, query: "needle" });
+  const mutation = {
+    ...item("item:find:000", 1, "needle changed needle needle"),
+    id: "event:find:changed",
+  };
   yield* commit(mutation);
   const after = yield* find.searchThread({ threadId: grandchild, query: "needle" });
   NodeAssert.ok(
@@ -315,6 +388,8 @@ try {
     "Three real thread timelines, including nested inherited forks, use unchanged upstream visibility and find navigation",
     "140 imported message/plan items cross the 128-row payload batch and preserve bounded first-hit/completion frames",
     "Fourteen query/navigation forms preserve Markdown rendering, Unicode, counts, anchors, offsets and wraparound",
+    "Six real write/read cases preserve displayed parenthesis paths, escaped paths, entity decoding, Windows plan paths and literal ampersands in Codex citations, with explicit nonempty and excluded-text counts",
+    "The shared find/Markdown/citation parser bytes match the immutable upstream sources exactly",
     "Parent-only events invalidate descendant scan caches; failed root writes leave no visible find state",
   );
   await withServices("native", source, ({ find }) =>
@@ -335,13 +410,15 @@ try {
     proofPath,
     checks,
     sourceHash,
-    oracles: [oracle.source, findOracle.source],
+    oracles: [oracle.source, findOracle.source, ...normalizationSources],
     sourcePaths: [
       "apps/server/src/orchestration-v2/ThreadFind.ts",
       "apps/server/src/orchestration-v2/ThreadFindRows.ts",
       "apps/server/src/orchestration-v2/NativeThreadFind.ts",
       "apps/server/src/persistence/redb_thread_find.rs",
       "apps/server/src/orchestration-v2/NativeProjectionRecordRows.ts",
+      "apps/server/src/persistence/NativeProjectionCommitStore.ts",
+      ...normalizationSources.map(({ path }) => path),
       "tools/check-redb-thread-find.mjs",
     ],
   });

@@ -132,7 +132,9 @@ class SelectionTests(unittest.TestCase):
 
     def test_measurement_contract_and_runner_changes_force_every_gate(self):
         for path in ("tools/link-performance-runtime.mjs", "tools/performance-contract.json", "tools/performance-statistics.mjs",
-                     "tools/performance-worker.mjs", "tools/ci_performance.py", "tools/ci_promotion.py"):
+                     "tools/performance-worker.mjs", "tools/performance-compiler.mjs",
+                     "tools/ci_performance.py", "tools/ci_promotion.py",
+                     "tools/ci_commit_hooks.py", "tools/test_ci_commit_hooks.py"):
             with self.subTest(path=path):
                 result = self.select([path])
                 self.assertTrue(all(result["gates"].values()))
@@ -582,6 +584,37 @@ class SelectionTests(unittest.TestCase):
         graph = {"core": {"storage"}, "storage": {"app"}, "app": {"storage"}, "tools": set()}
         self.assertEqual(ci_plan.closure({"core"}, graph), {"core", "storage", "app"})
         self.assertEqual(ci_plan.closure({"tools"}, graph), {"tools"})
+
+
+class RepositoryMappingTests(unittest.TestCase):
+    def test_count_helpers_and_migration_source_select_persistence_acceptance(self):
+        root = Path(__file__).resolve().parents[1]
+        mapping = json.loads((root / "port-map.json").read_text())
+        manifest = json.loads((root / "tools/acceptance-checks.json").read_text())
+        persistence = next(port for port in mapping["ports"] if port["id"] == "redb-persistence")
+        helpers = ["tools/redb-projection-count-fixture.mjs",
+                   "tools/check-redb-count-writer-compat.mjs"]
+        migration = "apps/server/src/persistence/Migrations/085_TurnItemCounts.ts"
+        for helper in helpers:
+            self.assertIn(helper, persistence["adapter_paths"])
+        self.assertIn(migration, {source["path"] for source in persistence["upstream_sources"]})
+        for path in [*helpers, migration]:
+            with self.subTest(path=path):
+                result = ci_plan.select_checks([path], mapping, mapping, NAMES, REVERSE, {migration},
+                                               component_manifest=manifest)
+                self.assertEqual(result["mode"], "affected-fork")
+                self.assertIn("redb-persistence", result["affected_ports"])
+                self.assertTrue({"tools/check-redb-projection-shells.mjs",
+                                 "tools/check-omdb-startup.mjs",
+                                 "tools/check-omdb-migration-head.mjs"}.issubset(result["component_tests"]))
+                self.assertTrue(result["source_guards"])
+                self.assertTrue(result["gates"]["native"])
+                self.assertTrue(result["gates"]["application"])
+                self.assertTrue(result["gates"]["performance"])
+        # The preserved old executable is supplied explicitly for its separate
+        # compatibility proof. CI must not claim a skipped old-binary test.
+        self.assertNotIn(helpers[1], persistence["acceptance_tests"])
+        self.assertNotIn(helpers[1], manifest)
 
 
 class GitFixtureTests(unittest.TestCase):

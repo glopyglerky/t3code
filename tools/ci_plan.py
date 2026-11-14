@@ -37,6 +37,7 @@ POLICY_FILES = {
     "tools/install-toolchain.mjs", "tools/install-server-tests.mjs", "tools/link-performance-runtime.mjs",
     "tools/fetch-migration-sources.mjs", "tools/nightly.py",
     "tools/ci_receipt.py", "tools/ci_performance.py", "tools/ci_promotion.py", "tools/test-rust.py",
+    "tools/ci_commit_hooks.py", "tools/test_ci_commit_hooks.py",
     "tools/acceptance-checks.json", "tools/check-acceptance.mjs",
 }
 REPORTING_TOOLS = {"tools/plan-porting.py", "tools/sync-readme.py", "tools/verify-upstream.py"}

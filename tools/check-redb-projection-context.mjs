@@ -2,6 +2,7 @@
 import * as NodeAssert from "node:assert/strict";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as ProjectionStore from "../apps/server/src/orchestration-v2/ProjectionStore.ts";
@@ -28,7 +29,12 @@ NodeAssert.ok(
   "Pass an absolute native database executable",
 );
 await NodeFSP.access(executable, NodeFSP.constants.X_OK);
-const oracle = await loadUpstreamModule("apps/server/src/orchestration-v2/ProjectionStore.ts");
+const continuationOracle = await loadUpstreamModule(
+  "apps/server/src/orchestration-v2/manualContinuation.ts",
+);
+const oracle = await loadUpstreamModule("apps/server/src/orchestration-v2/ProjectionStore.ts", {
+  "./manualContinuation.ts": continuationOracle.url,
+});
 const fixture = await createFixture();
 const checks = [];
 const captureTarget = { runId: "run:main", scopeId: "scope:main" };
@@ -96,9 +102,14 @@ const userMessage = (id, text, extra = {}) =>
     streaming: false,
     ...extra,
   });
-const failed = (body) =>
+const failed = (body, expected) =>
   Effect.exit(body).pipe(
-    Effect.tap((exit) => Effect.sync(() => NodeAssert.ok(Exit.isFailure(exit)))),
+    Effect.tap((exit) =>
+      Effect.sync(() => {
+        NodeAssert.ok(Exit.isFailure(exit));
+        NodeAssert.equal(Cause.squash(exit.cause), expected);
+      }),
+    ),
   );
 
 async function withServices(kind, filename, use, databaseFixture = fixture) {
@@ -277,6 +288,143 @@ const seed = Effect.fn("checkRedbProjectionContext.seed")(function* (store) {
   );
 });
 
+const continuationContexts = Effect.fn("checkRedbProjectionContext.continuationContexts")(
+  function* ({ store, apply }) {
+    const owner = "thread:continuation";
+    const providerThreadId = "provider:continuation";
+    const providerSessionId = "session:continuation";
+    const sourceText = "Preserve this unsent steering prompt 🦊 & its attachment";
+    const sourceAttachment = file("continuation_source");
+    const event = (type, payload) => makeEvent(type, payload, { threadId: owner });
+    const run = (suffix, ordinal, prior) => ({
+      ...jsonPayloads.run,
+      id: `run:continuation:${suffix}`,
+      threadId: owner,
+      ordinal,
+      providerThreadId,
+      userMessageId: `message:continuation:${suffix}`,
+      rootNodeId: `node:continuation:${suffix}`,
+      activeAttemptId: null,
+      status: suffix === "resume" ? "preparing" : "interrupted",
+      completedAt: suffix === "resume" ? null : fixedTime,
+      ...(prior === undefined ? {} : { manualContinuationOfRunId: prior }),
+    });
+    const ancestor = run("ancestor", 1);
+    const source = run("source", 2, ancestor.id);
+    const resumed = run("resume", 3, source.id);
+    yield* apply(threadEvent(owner));
+    yield* apply(
+      event("provider-session.attached", {
+        ...jsonPayloads.providerSession,
+        id: providerSessionId,
+      }),
+    );
+    yield* apply(
+      event("provider-thread.updated", {
+        ...jsonPayloads.providerThread,
+        id: providerThreadId,
+        providerSessionId,
+        appThreadId: owner,
+        ownerNodeId: null,
+        nativeThreadRef: { driver: "codex", nativeId: "continuation", strength: "strong" },
+        lastRunOrdinal: 3,
+      }),
+    );
+    for (const current of [ancestor, source, resumed]) {
+      yield* apply(event("run.created", current));
+      yield* apply(
+        event("node.updated", {
+          ...jsonPayloads.node,
+          id: current.rootNodeId,
+          threadId: owner,
+          runId: current.id,
+          rootNodeId: current.rootNodeId,
+          providerThreadId,
+          providerTurnId: null,
+          checkpointScopeId: null,
+        }),
+      );
+      yield* apply(
+        event("message.updated", {
+          ...jsonPayloads.message,
+          id: current.userMessageId,
+          threadId: owner,
+          runId: current.id,
+          nodeId: current.rootNodeId,
+          role: "user",
+          text:
+            current === source
+              ? sourceText
+              : current === ancestor
+                ? "An older ancestor prompt must not replace the restarted source"
+                : "",
+          attachments: current === source ? [sourceAttachment] : [],
+          streaming: false,
+        }),
+      );
+    }
+    const output = [];
+    for (const test of [
+      { ordinal: 1, accepted: true, includeSource: false },
+      { ordinal: 2, accepted: false, includeSource: true },
+      { ordinal: 2, accepted: true, includeSource: false },
+      { ordinal: 3, accepted: false, includeSource: true },
+    ]) {
+      const attemptId = `attempt:continuation:${test.ordinal}`;
+      const providerTurnId = test.accepted ? `turn:continuation:${test.ordinal}` : null;
+      yield* apply(
+        event("run-attempt.updated", {
+          ...jsonPayloads.attempt,
+          id: attemptId,
+          runId: source.id,
+          rootNodeId: source.rootNodeId,
+          providerThreadId,
+          providerTurnId,
+          attemptOrdinal: test.ordinal,
+          reason: test.ordinal === 1 ? "initial" : "steering_restart",
+          status: "interrupted",
+          completedAt: fixedTime,
+        }),
+      );
+      if (test.accepted)
+        yield* apply(
+          event("provider-turn.updated", {
+            ...jsonPayloads.providerTurn,
+            id: providerTurnId,
+            providerThreadId,
+            nodeId: source.rootNodeId,
+            runAttemptId: attemptId,
+            ordinal: test.ordinal,
+            nativeTurnRef: {
+              driver: "codex",
+              nativeId: `continuation:${test.ordinal}`,
+              strength: "strong",
+            },
+            status: "interrupted",
+            completedAt: fixedTime,
+          }),
+        );
+      yield* apply(event("run.updated", { ...source, activeAttemptId: attemptId }));
+      const context = yield* store.getTurnStartContext(owner, resumed.id);
+      NodeAssert.deepEqual(
+        context.messages.map((message) => message.id),
+        test.includeSource
+          ? [resumed.userMessageId, source.userMessageId]
+          : [resumed.userMessageId],
+      );
+      const prompt = context.messages.find((message) => message.id === source.userMessageId);
+      NodeAssert.equal(prompt?.text, test.includeSource ? sourceText : undefined);
+      NodeAssert.deepEqual(
+        prompt?.attachments,
+        test.includeSource ? [sourceAttachment] : undefined,
+      );
+      NodeAssert.ok(!context.messages.some((message) => message.id === ancestor.userMessageId));
+      output.push(context);
+    }
+    return output;
+  },
+);
+
 const exercise = Effect.fn("checkRedbProjectionContext.exercise")(function* ({
   store,
   apply,
@@ -382,6 +530,7 @@ const exercise = Effect.fn("checkRedbProjectionContext.exercise")(function* ({
         return yield* Effect.fail("missing-checkpoint fixture rollback");
       }),
     ),
+    "missing-checkpoint fixture rollback",
   );
   NodeAssert.ok(result.missingCapture.preservedCheckpointOrdinals.includes(901));
   NodeAssert.ok(!result.missingCapture.preservedCheckpointOrdinals.includes(902));
@@ -423,6 +572,7 @@ const exercise = Effect.fn("checkRedbProjectionContext.exercise")(function* ({
         return yield* Effect.fail("live-fork attachment fixture rollback");
       }),
     ),
+    "live-fork attachment fixture rollback",
   );
   NodeAssert.ok(!result.liveForkAttachments.includes("runless_shared"));
   NodeAssert.ok(!result.liveForkAttachments.includes(ownHtml));
@@ -575,6 +725,8 @@ const exercise = Effect.fn("checkRedbProjectionContext.exercise")(function* ({
   result.compactFile = yield* store.getTurnStartContext("thread:compact", "missing");
   NodeAssert.equal(result.compactFile.hasConversation, true);
 
+  result.manualContinuation = yield* continuationContexts({ store, apply });
+
   yield* transaction(
     Effect.gen(function* () {
       yield* failed(
@@ -597,6 +749,7 @@ const exercise = Effect.fn("checkRedbProjectionContext.exercise")(function* ({
             return yield* Effect.fail("rollback fixture checkpoint");
           }),
         ),
+        "rollback fixture checkpoint",
       );
       NodeAssert.ok(
         !(yield* store.getCheckpointCaptureContext(
@@ -664,6 +817,8 @@ try {
     "Nested writer rollback restores checkpoint rows and derived native indexes",
     "Missing checkpoints preserve run anchors and remain valid rollback targets",
     "Live run forks protect inherited message, render and answer files; side chats do not retain them",
+    "Turn-start contexts preserve the unsent source prompt after a later steering restart, stop resending after acceptance, and retain a subsequent restart without substituting its ancestor",
+    "Deliberate rollback fixtures require their exact sentinel, so an assertion defect cannot count as successful rollback",
   );
   const resumedRollback = await withServices("upstream", upstream, resumeRollback);
   NodeAssert.deepEqual(
@@ -846,9 +1001,10 @@ try {
     proofPath,
     checks,
     sourceHash,
-    oracles: [oracle.source],
+    oracles: [oracle.source, continuationOracle.source],
     sourcePaths: [
       "apps/server/src/orchestration-v2/ProjectionStore.ts",
+      "apps/server/src/orchestration-v2/manualContinuation.ts",
       "apps/server/src/orchestration-v2/ProjectionContextRows.ts",
       "apps/server/src/orchestration-v2/SqliteProjectionContextRows.ts",
       "apps/server/src/orchestration-v2/NativeProjectionContextRows.ts",

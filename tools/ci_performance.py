@@ -286,7 +286,8 @@ def validate_report(report: object, raw: bytes, plan: dict, run_id: str,
     require(report.get("source_tree_dirty") is False and report.get("source_tree_dirty_after") is False,
             "source must remain clean throughout measurement")
     require(report.get("qualifies") is True, "the comparison did not qualify")
-    require(report.get("compiler_route") == "bluefe-rustc-via-lustr"
+    require(report.get("compiler_provenance") == "verified-ci-manifest"
+            and report.get("compiler_route") == "bluefe-rustc-via-lustr"
             and report.get("build_profile") == "release", "unverified compilation route/profile")
     validate_baseline(report)
     configuration = report.get("configuration")
