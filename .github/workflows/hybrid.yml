@@ -29,12 +29,14 @@ jobs:
       native: ${{ steps.plan.outputs.native }}
       adapters: ${{ steps.plan.outputs.adapters }}
       application: ${{ steps.plan.outputs.application }}
+      performance: ${{ steps.plan.outputs.performance }}
       stage_native: ${{ steps.plan.outputs.stage_native }}
       source_guards: ${{ steps.plan.outputs.source_guards }}
       rust_packages: ${{ steps.plan.outputs.rust_packages }}
       adapter_ports: ${{ steps.plan.outputs.adapter_ports }}
       component_tests: ${{ steps.plan.outputs.component_tests }}
       mode: ${{ steps.plan.outputs.mode }}
+      plan_artifact: ${{ steps.plan.outputs.artifact_name }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -55,7 +57,9 @@ jobs:
             tools/fetch-migration-sources.test.mjs \
             tools/hybrid-checks.test.mjs \
             tools/check-acceptance.test.mjs \
-            tools/omdb-source.test.mjs
+            tools/omdb-source.test.mjs \
+            tools/performance-statistics.test.mjs \
+            tools/performance-memory.test.mjs
       - name: Plan work against the trusted upstream default branch
         run: python3 tools/plan-porting.py --repo-root "$GITHUB_WORKSPACE" --fetch-default --output "$RUNNER_TEMP/porting-plan.json" --summary "$GITHUB_STEP_SUMMARY"
       - name: Select checks from verified qualification history
@@ -67,10 +71,11 @@ jobs:
           arguments=()
           if [[ "$CI_FORCE_FULL" == true ]]; then arguments+=(--full); fi
           python3 tools/ci_plan.py --output "$RUNNER_TEMP/ci-plan.json" --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY" "${arguments[@]}"
+          echo "artifact_name=ci-plan-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
       - name: Retain qualification and porting plans
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: ci-plan
+          name: ${{ steps.plan.outputs.artifact_name }}
           path: |
             ${{ runner.temp }}/ci-plan.json
             ${{ runner.temp }}/porting-plan.json
@@ -109,7 +114,7 @@ jobs:
           cache-dependency-path: tools/server-test-runtime/package-lock.json
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: hybrid-native-binaries
+          name: ${{ needs.native.outputs.native_artifact }}
           path: bin
       - name: Verify exact-run native executables
         run: node tools/check-hybrid.mjs --verify-binaries
@@ -130,7 +135,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: hybrid-production-adapter-proof
+          name: hybrid-production-adapter-proof-${{ github.run_attempt }}
           path: ${{ runner.temp }}/hybrid-proof/*.json
           if-no-files-found: warn
           retention-days: 14
@@ -168,7 +173,7 @@ jobs:
         run: pnpm install --frozen-lockfile
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: hybrid-native-binaries
+          name: ${{ needs.native.outputs.native_artifact }}
           path: bin
       - name: Verify exact-run native executables
         run: node tools/check-hybrid.mjs --verify-binaries
@@ -196,16 +201,90 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: hybrid-application-proof
+          name: hybrid-application-proof-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/hybrid-proof/*.json
             ${{ runner.temp }}/hybrid-proof/client/
           if-no-files-found: warn
           retention-days: 14
 
+  performance:
+    name: Paired stock and native performance and reliability
+    needs: [plan, native]
+    if: needs.plan.outputs.performance == 'true'
+    runs-on: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(vars.CI_RUNNER_ROUTES || '{}')['ubuntu-24.04'] || 'ubuntu-24.04' }}
+    timeout-minutes: 45
+    outputs:
+      proof_sha256: ${{ steps.proof.outputs.proof_sha256 }}
+      proof_run_attempt: ${{ steps.proof.outputs.proof_run_attempt }}
+    env:
+      T3CODE_DEV_SEED: "0"
+      VP_REMOTE_CACHE: "off"
+      VP_REMOTE_CACHE_URL: ""
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 26.12.1
+          cache: npm
+          cache-dependency-path: tools/server-test-runtime/package-lock.json
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ${{ needs.native.outputs.native_artifact }}
+          path: bin
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ${{ needs.plan.outputs.plan_artifact }}
+          path: ${{ runner.temp }}/performance-plan
+      - name: Verify the exact-run release helpers
+        run: node tools/check-hybrid.mjs --verify-binaries
+      - name: Fetch the immutable stock comparison
+        run: |
+          upstream_commit="$(node -p 'JSON.parse(require("node:fs").readFileSync("upstream.lock.json", "utf8")).upstream.commit')"
+          [[ "$upstream_commit" =~ ^[0-9a-f]{40}$ ]]
+          git fetch --no-tags --depth=1 https://github.com/pingdotgg/t3code.git "$upstream_commit"
+      - name: Install the locked comparison runtime
+        run: |
+          echo "T3_CODE_LS_TEST_RUNTIME=$RUNNER_TEMP/performance-test-runtime" >> "$GITHUB_ENV"
+          T3_CODE_LS_TEST_RUNTIME="$RUNNER_TEMP/performance-test-runtime" node tools/install-server-tests.mjs
+      - name: Compare correctness, durability and every fixed workload
+        run: |
+          node tools/performance-persistence.mjs \
+            --database "$GITHUB_WORKSPACE/bin/t3-code-ls-db" \
+            --manifest "$GITHUB_WORKSPACE/bin/manifest.json" \
+            --plan "$RUNNER_TEMP/performance-plan/ci-plan.json" \
+            --output "$RUNNER_TEMP/performance-proof-$GITHUB_RUN_ATTEMPT" \
+            --mode qualify
+      - name: Bind the performance report to this job
+        id: proof
+        run: |
+          python3 - <<'PYCODE'
+          import hashlib, os
+          from pathlib import Path
+          report = Path(os.environ["RUNNER_TEMP"]) / ("performance-proof-" + os.environ["GITHUB_RUN_ATTEMPT"]) / "performance.json"
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write("proof_sha256=" + hashlib.sha256(report.read_bytes()).hexdigest() + "\n")
+              output.write("proof_run_attempt=" + os.environ["GITHUB_RUN_ATTEMPT"] + "\n")
+          PYCODE
+      - name: Publish every measured speedup and slowdown
+        if: always()
+        run: |
+          report="$RUNNER_TEMP/performance-proof-$GITHUB_RUN_ATTEMPT/performance.md"
+          if [[ -f "$report" ]]; then cat "$report" >> "$GITHUB_STEP_SUMMARY"; fi
+      - name: Retain raw samples, failures and comparison decisions
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: hybrid-performance-proof-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/performance-proof-${{ github.run_attempt }}/
+          if-no-files-found: warn
+          retention-days: 30
+
   qualification:
     name: Record verified qualification
-    needs: [plan, native, adapters, application]
+    needs: [plan, native, adapters, application, performance]
     if: always()
     runs-on: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(vars.CI_RUNNER_ROUTES || '{}')['ubuntu-24.04'] || 'ubuntu-24.04' }}
     timeout-minutes: 5
@@ -213,20 +292,35 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          fetch-depth: 0
+          filter: blob:none
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: ci-plan
+          name: ${{ needs.plan.outputs.plan_artifact }}
           path: ${{ runner.temp }}/qualification-plan
-      - name: Require every planned gate to pass
+      - name: Download the successful performance job's exact evidence
+        if: needs.plan.outputs.performance == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: hybrid-performance-proof-${{ needs.performance.outputs.proof_run_attempt }}
+          path: ${{ runner.temp }}/qualification-performance
+      - name: Require every planned gate and its evidence to pass
         env:
           CI_NEEDS: ${{ toJSON(needs) }}
           CI_HEAD: ${{ github.sha }}
           CI_RUN_ID: ${{ github.run_id }}
-        run: python3 tools/ci_receipt.py --plan "$RUNNER_TEMP/qualification-plan/ci-plan.json" --output "$RUNNER_TEMP/ci-qualification.json"
+          CI_RUN_ATTEMPT: ${{ github.run_attempt }}
+          CI_PERFORMANCE: ${{ needs.plan.outputs.performance }}
+        run: |
+          arguments=()
+          if [[ "$CI_PERFORMANCE" == true ]]; then
+            arguments+=(--performance "$RUNNER_TEMP/qualification-performance/performance.json")
+          fi
+          python3 tools/ci_receipt.py --plan "$RUNNER_TEMP/qualification-plan/ci-plan.json" --output "$RUNNER_TEMP/ci-qualification.json" "${arguments[@]}"
       - name: Retain the reusable source qualification receipt
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: ci-qualification
+          name: ci-qualification-${{ github.run_attempt }}
           path: ${{ runner.temp }}/ci-qualification.json
           if-no-files-found: error
           retention-days: 30

@@ -1729,7 +1729,7 @@
         "tools/check-redb-cli.mjs"
       ],
       "retired_paths": [],
-      "notes": "The selected production server and CLI use the complete omdb application boundary through one transaction owner. Native upgrades from the exact schema80 and schema88 histories to89 preserve activated data and import lineage. Schema80 backfills citation-aware message search, turn item counts and custom project titles; schema89 adds indexed worktree and family shell selection before payload decoding. Typed native APIs cover atomic event guards, outbox claims, compaction filters, fork visibility, shell and recovery state, attachment retention, scheduler compare-and-set, KeepAwake active-run existence and legacy subagent identifier retention. The active-run query stops at the first indexed match. Queue-only run filters use the existing global queued-run index and recheck thread ownership, avoiding completed history. Explicit run-ID filters read compact keys directly; includeLatestRun preserves full-thread candidates and original filtering/order semantics. Bootstrap and CLI preserve upgrade ownership and never reopen SQLite after native activation. SQLite remains the migration source, immutable behavior comparison and unqualified-platform implementation. Fresh exact-commit platform receipts remain required. The retained native project API and standalone plan-and-project executable share the core project projection reducer and remain independently compared with immutable ProjectStore behavior; the selected application graph uses shared ProjectStore semantics over native project rows. Schema 91 retains atomic schema-89 upgrades and adds persistent Connect device trust and denied requests. Conditional subagent writes and partial thread visits use the same transaction owner. Native active-thread listing, inherited deleted-source shells, continuation-message reads and scheduled scratch-folder protection track the integrated source.",
+      "notes": "The selected production server and CLI use the complete omdb application boundary through one transaction owner. Native upgrades from the exact schema80, schema88 and schema89 histories to91 preserve activated data and import lineage. Schema80 backfills citation-aware message search, turn item counts and custom project titles; schema89 adds indexed worktree and family shell selection before payload decoding. Typed native APIs cover atomic event guards, outbox claims, compaction filters, fork visibility, shell and recovery state, attachment retention, scheduler compare-and-set, KeepAwake active-run existence and legacy subagent identifier retention. The active-run query stops at the first indexed match. Queue-only run filters use the existing global queued-run index and recheck thread ownership, avoiding completed history. Explicit run-ID filters read compact keys directly; includeLatestRun preserves full-thread candidates and original filtering/order semantics. Bootstrap and CLI preserve upgrade ownership and never reopen SQLite after native activation. SQLite remains the migration source, immutable behavior comparison and unqualified-platform implementation. Fresh exact-commit platform receipts remain required. The retained native project API and standalone plan-and-project executable share the core project projection reducer and remain independently compared with immutable ProjectStore behavior; the selected application graph uses shared ProjectStore semantics over native project rows. Schema 91 retains atomic schema-89 upgrades and adds persistent Connect device trust and denied requests. Conditional subagent writes and partial thread visits use the same transaction owner. Native active-thread listing, inherited deleted-source shells, continuation-message reads and scheduled scratch-folder protection track the integrated source.",
       "rust_crates": ["crates/core", "crates/storage"]
     },
     {
@@ -1741,12 +1741,22 @@
         {
           "path": "apps/server/src/ws.ts",
           "blob": "16a8d856ab7e9dc05828dbb92b4c53ab82be02f4"
+        },
+        {
+          "path": "packages/client-runtime/src/connection/supervisor.ts",
+          "blob": "b01f73880ab7dd2e8e2ebab4c6018469529d9918"
+        },
+        {
+          "path": "packages/client-runtime/src/connection/wakeups.ts",
+          "blob": "746160681ee9dc9ea3899b7ce6bb6570e3e2cd3b"
         }
       ],
       "rust_paths": [
         "crates/transport/src/bridge.rs",
         "crates/transport/src/identity.rs",
-        "crates/transport/src/admission_file.rs"
+        "crates/transport/src/admission_file.rs",
+        "crates/core/src/connection.rs",
+        "crates/core/examples/connection_matrix.rs"
       ],
       "adapter_paths": [],
       "platform_routes": [
@@ -1764,7 +1774,7 @@
         "tools/check-connection.mjs"
       ],
       "retired_paths": [],
-      "notes": "Authenticated byte forwarding is a candidate transport. It does not replace Connect account, pairing, session, browser, push or mobile reconnect services.",
+      "notes": "Authenticated byte forwarding is a candidate transport. It does not replace Connect account, pairing, session, browser, push or mobile reconnect services. Connection retry and approval counters plus focus wakeups are compared directly with the pinned supervisor and wakeups sources; this component remains a candidate outside the production browser transport.",
       "rust_crates": ["crates/core", "crates/transport"]
     },
     {

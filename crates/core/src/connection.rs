@@ -10,6 +10,8 @@
 pub const RETRY_BASE_DELAY_MS: u64 = 1_000;
 pub const RETRY_MAX_DELAY_MS: u64 = 300_000;
 pub const SESSION_LOSS_RETRY_DELAY_MS: u64 = 250;
+pub const APPROVAL_PENDING_RETRY_DELAY_MS: u64 = 4_000;
+pub const APPROVAL_PENDING_FAST_RETRIES: u32 = 150;
 pub const BACKOFF_RESET_AFTER_MS: u64 = 30_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -17,13 +19,20 @@ pub enum Wakeup {
     ApplicationActive,
     ApplicationActiveProbe,
     ApplicationActiveLong,
+    ApplicationFocused,
     CredentialsChanged,
     NetworkChanged,
 }
 
 impl Wakeup {
     pub fn resets_retry_backoff(self) -> bool {
-        self != Self::CredentialsChanged
+        matches!(
+            self,
+            Self::ApplicationActive
+                | Self::ApplicationActiveProbe
+                | Self::ApplicationActiveLong
+                | Self::NetworkChanged
+        )
     }
 
     pub fn should_resubscribe(self) -> bool {
@@ -32,11 +41,23 @@ impl Wakeup {
             Self::ApplicationActive | Self::ApplicationActiveProbe | Self::ApplicationActiveLong
         )
     }
+
+    pub fn should_relist_account(self) -> bool {
+        matches!(
+            self,
+            Self::ApplicationActive | Self::ApplicationActiveLong | Self::ApplicationFocused
+        )
+    }
+
+    pub fn reaches_connection_supervisor(self) -> bool {
+        self != Self::ApplicationFocused
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AttemptEnd {
     TransientFailure,
+    ApprovalPendingFailure,
     BlockedFailure,
     Interrupted { reset_retry: bool },
 }
@@ -56,21 +77,35 @@ pub enum RetryDecision {
     AwaitSignal,
 }
 
-/// A bounded retry counter. Counts and attempt numbers saturate at u32::MAX;
+/// Bounded retry counters. Counts and attempt numbers saturate at u32::MAX;
 /// the delay is already capped from failure 8 onward. A reset still restores
 /// the full upstream initial-session behavior after saturation.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RetryPolicy {
     failure_count: u32,
+    backoff_failures: u32,
+    approval_waits: u32,
 }
 
 impl RetryPolicy {
     pub fn new() -> Self {
-        Self { failure_count: 0 }
+        Self {
+            failure_count: 0,
+            backoff_failures: 0,
+            approval_waits: 0,
+        }
     }
 
     pub fn failure_count(&self) -> u32 {
         self.failure_count
+    }
+
+    pub fn backoff_failures(&self) -> u32 {
+        self.backoff_failures
+    }
+
+    pub fn approval_waits(&self) -> u32 {
+        self.approval_waits
     }
 
     pub fn next_attempt(&self) -> u32 {
@@ -80,6 +115,8 @@ impl RetryPolicy {
     /// Explicit retry and disconnect both clear the upstream retry ladder.
     pub fn reset(&mut self) {
         self.failure_count = 0;
+        self.backoff_failures = 0;
+        self.approval_waits = 0;
     }
 
     /// Returns whether the caller should discard its current retry deadline.
@@ -98,6 +135,8 @@ impl RetryPolicy {
     /// Blocked failures wait for a signal without climbing the retry ladder.
     /// A failed liveness probe retries immediately. A short-lived session still
     /// counts as a failure so repeated disconnects cannot spin at 125-250ms.
+    /// Pending device approval polls at four seconds for the first 150 waits;
+    /// those waits count as attempts without raising a later outage's backoff.
     pub fn after_attempt(&mut self, outcome: AttemptOutcome, random: f64) -> RetryDecision {
         if outcome.established && outcome.stable {
             self.reset();
@@ -116,12 +155,27 @@ impl RetryPolicy {
             return RetryDecision::RetryNow;
         }
         let first_loss = outcome.established && self.failure_count == 0;
-        let previous_failures = self.failure_count;
         self.failure_count = self.failure_count.saturating_add(1);
-        RetryDecision::RetryAfter(if first_loss {
+        let approval_pending = outcome.end == AttemptEnd::ApprovalPendingFailure;
+        if approval_pending {
+            self.approval_waits = self.approval_waits.saturating_add(1);
+        }
+        let awaiting_approval =
+            approval_pending && self.approval_waits <= APPROVAL_PENDING_FAST_RETRIES;
+        if !awaiting_approval {
+            self.backoff_failures = self.backoff_failures.saturating_add(1);
+        }
+        RetryDecision::RetryAfter(if awaiting_approval {
+            APPROVAL_PENDING_RETRY_DELAY_MS
+        } else if first_loss {
             session_loss_retry_delay_ms(random)
         } else {
-            retry_delay_ms(previous_failures, random)
+            let delay = retry_delay_ms(self.backoff_failures.saturating_sub(1), random);
+            if approval_pending {
+                delay.max(APPROVAL_PENDING_RETRY_DELAY_MS)
+            } else {
+                delay
+            }
         })
     }
 }
@@ -184,6 +238,8 @@ mod tests {
     fn exhausted_counter_preserves_capped_delays_and_can_reset() {
         let mut retry = RetryPolicy {
             failure_count: u32::MAX,
+            backoff_failures: u32::MAX,
+            approval_waits: u32::MAX,
         };
         assert_eq!(retry.next_attempt(), u32::MAX);
         assert_eq!(
@@ -196,6 +252,63 @@ mod tests {
             RetryDecision::RetryAfter(125)
         );
         assert_eq!(retry.failure_count(), 1);
+        assert_eq!(retry.backoff_failures(), 1);
+        assert_eq!(retry.approval_waits(), 0);
+    }
+
+    #[test]
+    fn approval_waits_preserve_the_later_outage_ladder() {
+        let mut retry = RetryPolicy::new();
+        let approval = AttemptOutcome {
+            end: AttemptEnd::ApprovalPendingFailure,
+            ..failure(false, false)
+        };
+        for _ in 0..APPROVAL_PENDING_FAST_RETRIES {
+            assert_eq!(
+                retry.after_attempt(approval, 0.0),
+                RetryDecision::RetryAfter(4_000)
+            );
+        }
+        assert_eq!(retry.failure_count(), 150);
+        assert_eq!(retry.backoff_failures(), 0);
+        assert_eq!(retry.approval_waits(), 150);
+        assert_eq!(
+            retry.after_attempt(failure(false, false), 0.0),
+            RetryDecision::RetryAfter(1_000)
+        );
+        assert_eq!(retry.next_attempt(), 152);
+        for delay in [4_000, 4_000, 8_000, 16_000] {
+            assert_eq!(
+                retry.after_attempt(approval, 0.0),
+                RetryDecision::RetryAfter(delay)
+            );
+        }
+        assert_eq!(retry.approval_waits(), 154);
+        assert_eq!(retry.backoff_failures(), 5);
+    }
+
+    #[test]
+    fn retry_reset_restarts_the_approval_budget() {
+        let mut retry = RetryPolicy {
+            failure_count: 170,
+            backoff_failures: 20,
+            approval_waits: 160,
+        };
+        retry.reset();
+        assert_eq!(retry, RetryPolicy::new());
+        assert_eq!(
+            retry.after_attempt(
+                AttemptOutcome {
+                    end: AttemptEnd::ApprovalPendingFailure,
+                    ..failure(true, false)
+                },
+                1.0
+            ),
+            RetryDecision::RetryAfter(4_000)
+        );
+        assert_eq!(retry.failure_count(), 1);
+        assert_eq!(retry.backoff_failures(), 0);
+        assert_eq!(retry.approval_waits(), 1);
     }
 
     #[test]
@@ -280,28 +393,21 @@ mod tests {
 
     #[test]
     fn wakeups_match_resume_and_network_reset_semantics() {
-        for reason in [
-            Wakeup::ApplicationActive,
-            Wakeup::ApplicationActiveProbe,
-            Wakeup::ApplicationActiveLong,
-            Wakeup::NetworkChanged,
-            Wakeup::CredentialsChanged,
+        for (reason, resets, resubscribes, relists, reaches_supervisor) in [
+            (Wakeup::ApplicationActive, true, true, true, true),
+            (Wakeup::ApplicationActiveProbe, true, true, false, true),
+            (Wakeup::ApplicationActiveLong, true, true, true, true),
+            (Wakeup::ApplicationFocused, false, false, true, false),
+            (Wakeup::NetworkChanged, true, false, false, true),
+            (Wakeup::CredentialsChanged, false, false, false, true),
         ] {
             let mut retry = RetryPolicy::new();
             retry.after_attempt(failure(false, false), 0.0);
-            assert_eq!(retry.wakeup(reason), reason != Wakeup::CredentialsChanged);
-            assert_eq!(
-                retry.failure_count(),
-                if reason == Wakeup::CredentialsChanged {
-                    1
-                } else {
-                    0
-                }
-            );
-            assert_eq!(
-                reason.should_resubscribe(),
-                reason != Wakeup::CredentialsChanged && reason != Wakeup::NetworkChanged
-            );
+            assert_eq!(retry.wakeup(reason), resets);
+            assert_eq!(retry.failure_count(), u32::from(!resets));
+            assert_eq!(reason.should_resubscribe(), resubscribes);
+            assert_eq!(reason.should_relist_account(), relists);
+            assert_eq!(reason.reaches_connection_supervisor(), reaches_supervisor);
         }
     }
 }

@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "suite": "persistence-api",
+  "pairs": 8,
+  "warmups": 3,
+  "samples": 12,
+  "seed": 1949524847,
+  "bootstrap_resamples": 10000,
+  "confidence": 0.95,
+  "comparison_ratio": 1,
+  "fixture": {
+    "threads": 256,
+    "write_threads": 1,
+    "messages": 3000,
+    "history_items": 1500,
+    "payload_bytes": 1024
+  },
+  "scenarios": [
+    { "id": "service-open-and-first-operations", "phase": "cold", "metric": "elapsed" },
+    { "id": "sidebar-shell", "phase": "warm", "metric": "median" },
+    { "id": "sidebar-shell.p95", "phase": "warm", "metric": "p95" },
+    { "id": "history-window", "phase": "warm", "metric": "median" },
+    { "id": "history-window.p95", "phase": "warm", "metric": "p95" },
+    { "id": "message-search", "phase": "warm", "metric": "median" },
+    { "id": "message-search.p95", "phase": "warm", "metric": "p95" },
+    { "id": "accent-search", "phase": "warm", "metric": "median" },
+    { "id": "accent-search.p95", "phase": "warm", "metric": "p95" },
+    { "id": "visit-commit", "phase": "warm", "metric": "median" },
+    { "id": "visit-commit.p95", "phase": "warm", "metric": "p95" }
+  ]
+}

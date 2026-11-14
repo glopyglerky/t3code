@@ -32,15 +32,15 @@ Use isolated development state and controlled replay-provider fixtures. Do not p
 
 ## Source organization
 
-| Path | Responsibility |
-| --- | --- |
-| `apps/server` | Existing WebSocket/HTTP contracts, server services, provider orchestration and native adapters |
-| `apps/web`, `apps/desktop`, `apps/mobile`, `apps/marketing` | Original application clients and site |
-| `packages` | Shared contracts, client state, provider and source-control packages |
-| `native`, `infra` | Platform helpers and Connect infrastructure |
-| `Cargo.toml`, `Cargo.lock` | Root Rust workspace beside the temporary pnpm workspace |
-| `crates/core`, `crates/storage`, `crates/transport`, `crates/app` | Preserved Rust work, with domain ownership and migration status in the port map |
-| `tools`, `docs/porting` | Build, differential tests and migration accounting |
+| Path                                                              | Responsibility                                                                                 |
+| ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `apps/server`                                                     | Existing WebSocket/HTTP contracts, server services, provider orchestration and native adapters |
+| `apps/web`, `apps/desktop`, `apps/mobile`, `apps/marketing`       | Original application clients and site                                                          |
+| `packages`                                                        | Shared contracts, client state, provider and source-control packages                           |
+| `native`, `infra`                                                 | Platform helpers and Connect infrastructure                                                    |
+| `Cargo.toml`, `Cargo.lock`                                        | Root Rust workspace beside the temporary pnpm workspace                                        |
+| `crates/core`, `crates/storage`, `crates/transport`, `crates/app` | Preserved Rust work, with domain ownership and migration status in the port map                |
+| `tools`, `docs/porting`                                           | Build, differential tests and migration accounting                                             |
 
 Source recovery, Rust source moves and behavior substitutions are separate changes. Unported implementation remains at its upstream location. No second vendored T3 application or `legacy/` tree is required.
 
@@ -60,7 +60,9 @@ A candidate has component evidence. An integrated port has a real application co
 
 [upstream.lock.json](upstream.lock.json) records the immutable integrated upstream revision and keeps detection separate from qualification. The source may come from the trusted default branch or a published nightly; a default-branch snapshot does not claim a nightly release identity. The recovered source is based on `d29a94f`, overlaid on `0be60f8` while retaining all later Rust work. Newer upstream revisions are separate integration work. A changed lockfile or a successful component suite is not proof of full application parity.
 
-[Fork CI](.github/workflows/hybrid.yml) selects affected Rust packages, adapters and client integration from a verified qualified ancestor. Upstream's default branch is trusted; its pristine test suites and original-only client flow are not repeated. Exact-source qualification receipts avoid duplicate builds when a tested commit reaches `main`. Each run also generates an immutable upstream comparison and prioritized porting queue. [CI and porting](docs/ci-and-porting.md) explains selection, evidence reuse and local commands.
+[Fork CI](.github/workflows/hybrid.yml) selects affected Rust packages, adapters and client integration from a verified qualified ancestor. Every production boundary change also requires paired speed and reliability comparisons between the pinned stock services and the selected native services. The same fixed workload runs through both complete service paths, including native IPC and normal commit durability. Every measured gain, loss, inconclusive result and deliberate divergence must be recorded with its reason. A faster aggregate cannot excuse a slower required workload.
+
+Upstream's default branch is trusted; its unrelated pristine test suites and original-only client flow are not repeated. The paired comparisons and immutable behavior oracles are explicit exceptions. Green exact-source qualification under the current policy must precede a fresh-head, non-forced `main` update. Receipts permit reuse only while the evidence still covers the candidate. This workflow does not itself enable GitHub branch protection. Each run also generates an immutable upstream comparison and prioritized porting queue. [CI and porting](docs/ci-and-porting.md) describes the gates, measurement limits, evidence reuse and main promotion command.
 
 [Recovery and acceptance](docs/porting/recovery.md) records the exact tested scope and remaining platform checks. Ordinary application CI downloads a pinned compiler artifact; compiler bootstrap belongs in the compiler repositories.
 

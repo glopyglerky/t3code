@@ -23,6 +23,8 @@ const constantNames = [
   "RETRY_BASE_DELAY_MS",
   "RETRY_MAX_DELAY_MS",
   "SESSION_LOSS_RETRY_DELAY_MS",
+  "APPROVAL_PENDING_RETRY_DELAY_MS",
+  "APPROVAL_PENDING_FAST_RETRIES",
   "BACKOFF_RESET_AFTER_MS",
 ];
 const constants = constantNames
@@ -33,7 +35,7 @@ const constants = constantNames
   })
   .join("\n");
 
-// Execute the actual pinned retry functions and post-attempt decision
+// Execute the actual pinned state initialization/reset, retry functions and post-attempt decision
 // block. Only the Effect boundary is supplied here: deterministic Random.next,
 // the intent ref, a state sink, and an inactive wakeup. The decision branches,
 // ordering, arithmetic, and resets remain the upstream source, unchanged.
@@ -48,6 +50,7 @@ const decisionBlock = section(
   "      if (outcome.established) {",
   "      pendingRetry = Option.map",
 );
+const retryState = section(supervisor, "    let failureCount = 0;", "\n    for (;;) {");
 const wakeupFunctions = section(
   wakeups,
   "function isApplicationActiveWakeup(",
@@ -58,30 +61,32 @@ ${constants}
 ${retryFunction}
 ${connectingFunction}
 ${wakeupFunctions}
-function evaluate(failureCount, outcome, failedProbe, random) {
-  let generation = 0;
-  const nextGeneration = 1;
-  let latestFailure = null;
-  let replacing = false;
-  const attempt = failureCount + 1;
-  let state = null;
-  const resetRetryLadder = () => { failureCount = 0; };
-  const value = (result) => ({ *[Symbol.iterator]() { return result; } });
-  const Random = { next: value(random) };
-  const Ref = { get: (result) => value(result) };
-  const intent = { desired: true, network: "online" };
-  const setState = (next) => { state = next; return value(undefined); };
-  const waitForSignal = value(false);
-  function* run() {
-    for (let iteration = 0; ; iteration++) {
-      if (iteration > 0) return { action: state?.phase === "blocked" ? "signal" : "now", delayMs: 0, failureCount };
+function makeRetry() {
+  const Option = { none: () => null };
+${retryState}
+  const snapshot = () => ({ failureCount, backoffFailures, approvalWaits });
+  function evaluate(outcome, failedProbe, random) {
+    const nextGeneration = generation + 1;
+    const attempt = failureCount + 1;
+    let state = null;
+    const value = (result) => ({ *[Symbol.iterator]() { return result; } });
+    const Random = { next: value(random) };
+    const Ref = { get: (result) => value(result) };
+    const intent = { desired: true, network: "online" };
+    const setState = (next) => { state = next; return value(undefined); };
+    const waitForSignal = value(false);
+    function* run() {
+      for (let iteration = 0; ; iteration++) {
+        if (iteration > 0) return { action: state?.phase === "blocked" ? "signal" : "now", delayMs: 0, ...snapshot() };
 ${decisionBlock}
-      return { action: "after", delayMs, failureCount };
+        return { action: "after", delayMs, ...snapshot() };
+      }
     }
+    const result = run().next();
+    if (!result.done) throw new Error("Unexpected Effect suspension in retry decision block");
+    return result.value;
   }
-  const result = run().next();
-  if (!result.done) throw new Error("Unexpected Effect suspension in retry decision block");
-  return result.value;
+  return { evaluate, reset: resetRetryLadder, snapshot };
 }
 `;
 const javascript = NodeModule.stripTypeScriptTypes(original, { mode: "strip" }).replaceAll(
@@ -89,11 +94,11 @@ const javascript = NodeModule.stripTypeScriptTypes(original, { mode: "strip" }).
   "function",
 );
 const upstream = new Function(
-  `${javascript}\nreturn { evaluate, retryDelayMs, resetsRetryBackoff, shouldResubscribeAfterWakeup, SESSION_LOSS_RETRY_DELAY_MS, BACKOFF_RESET_AFTER_MS };`,
+  `${javascript}\nreturn { makeRetry, retryDelayMs, resetsRetryBackoff, shouldResubscribeAfterWakeup, shouldRelistAccountAfterWakeup, reachesConnectionSupervisor, BACKOFF_RESET_AFTER_MS };`,
 )();
 
 function outcome(end, established, stable) {
-  return end < 2
+  return end < 2 || end === 4
     ? {
         _tag: "Failure",
         established,
@@ -102,18 +107,28 @@ function outcome(end, established, stable) {
           attemptSpan: null,
           error: {
             _tag: end === 1 ? "ConnectionBlockedError" : "ConnectionTransientError",
-            reason: end === 1 ? "authentication" : "network",
+            reason: end === 1 ? "authentication" : end === 4 ? "approval-pending" : "network",
             message: "fixture failure",
           },
         },
       }
     : { _tag: "Interrupted", established, stable, resetRetry: end === 3 };
 }
+function seeded(failures, approvalWaits = 0) {
+  const retry = upstream.makeRetry();
+  for (let index = 0; index < failures; index++) {
+    retry.evaluate(outcome(0, false, false), false, 0);
+  }
+  for (let index = 0; index < approvalWaits; index++) {
+    retry.evaluate(outcome(4, false, false), false, 0);
+  }
+  return retry;
+}
 const expected = [`stable\t${upstream.BACKOFF_RESET_AFTER_MS}`];
 let decisions = 0;
 function addDecision(result) {
   expected.push(
-    `${result.action}\t${result.delayMs}\t${result.failureCount}\t${result.failureCount + 1}`,
+    `${result.action}\t${result.delayMs}\t${result.failureCount}\t${result.failureCount + 1}\t${result.backoffFailures}\t${result.approvalWaits}`,
   );
   decisions++;
 }
@@ -123,18 +138,34 @@ for (let failures = 0; failures <= 24; failures++) {
   }
 }
 for (let sample = 0; sample <= 2_000; sample++) {
-  const result = upstream.evaluate(0, outcome(0, true, false), false, sample / 2_000);
+  const result = seeded(0).evaluate(outcome(0, true, false), false, sample / 2_000);
   expected.push(`loss\t${result.delayMs}`);
 }
-for (const failures of [0, 1, 2, 7, 8, 25]) {
+// Include both sides of the approval budget and histories where earlier network
+// failures must survive approval polling without being multiplied by it.
+const histories = [
+  [0, 0],
+  [1, 0],
+  [2, 0],
+  [7, 0],
+  [8, 0],
+  [25, 0],
+  [0, 1],
+  [0, 149],
+  [0, 150],
+  [0, 151],
+  [8, 149],
+  [8, 150],
+  [8, 151],
+];
+for (const [failures, approvalWaits] of histories) {
   for (const established of [false, true]) {
     for (const stable of [false, true]) {
       for (const probeFailed of [false, true]) {
-        for (let end = 0; end < 4; end++) {
+        for (let end = 0; end < 5; end++) {
           for (let sample = 0; sample <= 16; sample++) {
             addDecision(
-              upstream.evaluate(
-                failures,
+              seeded(failures, approvalWaits).evaluate(
                 outcome(end, established, stable),
                 probeFailed,
                 sample / 16,
@@ -146,32 +177,53 @@ for (const failures of [0, 1, 2, 7, 8, 25]) {
     }
   }
 }
-for (const failures of [0, 1, 2, 7, 8, 25]) {
+let wakeupCases = 0;
+for (const [failures, approvalWaits] of histories) {
   for (const reason of [
     "application-active",
     "application-active-probe",
     "application-active-long",
+    "application-focused",
     "credentials-changed",
     "network-changed",
   ]) {
     const reset = upstream.resetsRetryBackoff(reason);
+    const retry = seeded(failures, approvalWaits);
+    if (reset) retry.reset();
+    const snapshot = retry.snapshot();
     expected.push(
-      `wakeup\t${reset}\t${upstream.shouldResubscribeAfterWakeup(reason)}\t${reset ? 0 : failures}`,
+      `wakeup\t${reset}\t${upstream.shouldResubscribeAfterWakeup(reason)}\t${upstream.shouldRelistAccountAfterWakeup(reason)}\t${upstream.reachesConnectionSupervisor(reason)}\t${snapshot.failureCount}\t${snapshot.backoffFailures}\t${snapshot.approvalWaits}`,
     );
+    wakeupCases++;
   }
 }
-let failures = 0;
-for (let index = 0; index < 96; index++) {
-  const result = upstream.evaluate(
-    failures,
-    outcome(index % 11 === 0 ? 1 : 0, index % 3 === 0, index % 17 === 0),
-    index % 19 === 0,
+const retry = seeded(0);
+for (let index = 0; index < 360; index++) {
+  const end =
+    index < 160
+      ? 4
+      : index % 11 === 0
+        ? 1
+        : index % 5 === 0
+          ? 2
+          : index % 17 === 0
+            ? 3
+            : index % 3 === 0
+              ? 4
+              : 0;
+  const result = retry.evaluate(
+    outcome(end, index >= 160 && index % 3 === 0, index >= 160 && index % 53 === 0),
+    index >= 160 && index % 19 === 0,
     (index % 13) / 13,
   );
   addDecision(result);
-  failures = result.failureCount;
-  if (index % 23 === 0 && upstream.resetsRetryBackoff("network-changed")) failures = 0;
-  if (index % 29 === 0 && upstream.resetsRetryBackoff("credentials-changed")) failures = 0;
+  for (const [divisor, reason] of [
+    [23, "network-changed"],
+    [29, "credentials-changed"],
+    [31, "application-focused"],
+  ]) {
+    if (index >= 160 && index % divisor === 0 && upstream.resetsRetryBackoff(reason)) retry.reset();
+  }
 }
 const executable = process.argv[2];
 const result = executable
@@ -207,5 +259,5 @@ for (let row = 0; row < expected.length; row++) {
   );
 }
 console.log(
-  `${25 * 2_001} exponential delay cases, ${2_001} session-loss delays, ${decisions} retry transitions, and 30 wakeup cases match the pinned upstream TypeScript.`,
+  `${25 * 2_001} exponential delay cases, ${2_001} session-loss delays, ${decisions} retry transitions, and ${wakeupCases} wakeup cases match the pinned upstream TypeScript.`,
 );

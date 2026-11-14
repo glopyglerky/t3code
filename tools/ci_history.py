@@ -18,13 +18,15 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 import zipfile
 import zlib
 
+from ci_performance import valid_summary
+
 
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 WORKFLOW = ".github/workflows/hybrid.yml"
 WORKFLOW_NAME = "Rust port qualification"
-GATES = ("native", "adapters", "application")
+GATES = ("native", "adapters", "application", "performance")
 MAX_BYTES = 1024 * 1024
 MAX_CANDIDATES = 12
 TIME_BUDGET = 30
@@ -134,9 +136,25 @@ def valid_receipt(receipt: object, commit: str, tree: str, policy_digest: str) -
     gates = plan.get("gates")
     if not isinstance(gates, dict) or set(gates) != set(GATES) or set(results) != set(GATES):
         return False
-    return all(type(gates[gate]) is bool and
+    if not all(type(gates[gate]) is bool and
                results[gate] in (("success",) if gates[gate] else ("success", "skipped"))
-               for gate in GATES)
+               for gate in GATES):
+        return False
+    evidence = receipt.get("performance_evidence")
+    if evidence is not None and (not isinstance(evidence, dict) or
+            not valid_summary(evidence, evidence.get("source_commit"), evidence.get("source_tree"), policy_digest)):
+        return False
+    if evidence is not None and (evidence["upstream_commit"] != plan.get("upstream_commit")
+                                 or evidence["upstream_tree"] != plan.get("upstream_tree")):
+        return False
+    if gates["performance"] and (evidence is None or evidence["source_commit"] != commit
+            or evidence["source_tree"] != tree or str(receipt.get("run_id")) != evidence["ci_run_id"]
+            or type(receipt.get("run_attempt")) is not int
+            or type(receipt.get("performance_run_attempt")) is not int
+            or not 0 < receipt["performance_run_attempt"] <= receipt["run_attempt"]
+            or str(receipt["performance_run_attempt"]) != evidence["ci_run_attempt"]):
+        return False
+    return True
 
 
 def eligible_run(run: object, repository: str, current_run_id: str) -> bool:
@@ -149,6 +167,7 @@ def eligible_run(run: object, repository: str, current_run_id: str) -> bool:
     workflow, separator, reference = path.partition("@")
     return (
         type(identifier) is int and identifier > 0 and str(identifier) != str(current_run_id)
+        and type(run.get("run_attempt")) is int and run["run_attempt"] > 0
         and workflow == WORKFLOW and (not separator or bool(reference))
         and run.get("name") == WORKFLOW_NAME
         and run.get("event") in ("push", "workflow_dispatch")
@@ -197,12 +216,13 @@ def find_qualification(root: Path, repository: str, head: str, policy_digest: st
                 tree = _git(root, "rev-parse", f"{commit}^{{tree}}", timeout=min(10, remaining))
                 if not SHA.fullmatch(tree):
                     continue
-                response = client.json(f"/actions/runs/{run['id']}/artifacts?name=ci-qualification&per_page=10")
+                artifact_name = f"ci-qualification-{run['run_attempt']}"
+                response = client.json(f"/actions/runs/{run['id']}/artifacts?name={artifact_name}&per_page=10")
                 artifacts = response.get("artifacts") if isinstance(response, dict) else None
                 if not isinstance(artifacts, list):
                     continue
                 matching = [artifact for artifact in artifacts if isinstance(artifact, dict)
-                            and artifact.get("name") == "ci-qualification"
+                            and artifact.get("name") == artifact_name
                             and artifact.get("expired") is False
                             and type(artifact.get("id")) is int and artifact["id"] > 0
                             and type(artifact.get("size_in_bytes")) is int
@@ -210,7 +230,9 @@ def find_qualification(root: Path, repository: str, head: str, policy_digest: st
                 if len(matching) != 1:
                     continue
                 receipt = read_receipt(client.artifact(matching[0]["id"]))
-                if valid_receipt(receipt, commit, tree, policy_digest):
+                if (valid_receipt(receipt, commit, tree, policy_digest)
+                        and receipt.get("run_id") == run["id"]
+                        and receipt.get("run_attempt") == run["run_attempt"]):
                     return {"commit": commit, "run_id": run["id"], "reused": commit == head,
                             "receipt": receipt}
             except HTTPError as error:

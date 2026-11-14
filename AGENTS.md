@@ -45,7 +45,8 @@ Keep generated output outside canonical source and clean owned disposable output
 
 Use the generated CI plan to run affected Rust packages and reverse consumers,
 `t3code-ls-tools check-source`, `check-upstream-readme` and affected production
-adapters. Run the native client flow when our production execution boundary changes.
+adapters. Run the native client flow and pinned stock/native performance and
+reliability comparisons when our production execution boundary changes.
 Compiler, global dependency and CI-policy changes require full fork qualification.
 Select changes from a verified qualified ancestor, never an unqualified previous
 push. Reuse an identical commit only with a successful same-policy qualification
@@ -56,6 +57,14 @@ and controlled provider fixtures. Do not recreate in-checkout reference caches.
 Upstream `pingdotgg/t3code`'s default branch is trusted as working. Do not rerun
 its pristine test suites or separately qualify its original client execution.
 Use its immutable source as the behavior oracle for Rust differential tests.
+The required paired performance/reliability workloads are an explicit exception:
+execute the same fixed inputs through immutable stock services and our selected
+production services, including their normal durability settings. Preserve raw
+samples, every failed or inconclusive attempt and exact source/compiler identity.
+Document every measured speedup, slowdown, inconclusive result and deliberate
+behavior or performance divergence with its reason. Never hide a slow workload
+in an aggregate, weaken a threshold to obtain a pass, or claim broader speed or
+reliability than the measurements establish.
 Our translations, adapters, fork modifications and integration still need their
 affected checks. A trusted upstream revision does not qualify our Rust replacement.
 
@@ -72,8 +81,11 @@ upstream README body is wrapped in `upstream-README.md`; its wrapper is fork pro
 Preserve licenses, provenance, fixtures, assets and Git history.
 
 Keep repository identity 1352693431, fork relationship, license and separate
-archived-thread/mobile-backup branches. Publish main only through fresh-head,
-non-forced fast-forward updates when authorized. No PR is implied. External
+archived-thread/mobile-backup branches. Publish main only after green exact-source
+qualification under the current policy, through an authorized fresh-head,
+non-forced fast-forward update. Revalidate inherited performance evidence against
+every intervening runtime, oracle and policy change. Do not claim repository
+branch protection is enabled without checking the actual settings. No PR is implied. External
 GitHub submissions require verified model/harness attribution under the user's
 session rule. Never modify installed T3 state, services or user data for tests.
 
@@ -97,8 +109,10 @@ preserve its body and append the footer. Never reopen or modify closed submissio
 or add speculative attribution comments. Carry this rule into worker handoffs.
 
 ```md
----
+***
+
 **AI attribution**
+
 - Models: <verified exact models and roles>
 - Harness: <verified actual harness chain>
 ```

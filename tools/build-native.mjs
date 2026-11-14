@@ -17,6 +17,25 @@ import {
 import { flagsForSysroot } from "./install-toolchain.mjs";
 
 const root = NodePath.resolve(NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)), "..");
+function sourceIdentity() {
+  const git = (...args) =>
+    NodeChildProcess.execFileSync("git", ["--no-replace-objects", ...args], {
+      cwd: root,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+  try {
+    return {
+      source_commit: git("rev-parse", "HEAD"),
+      source_tree: git("rev-parse", "HEAD^{tree}"),
+      source_tree_dirty: git("status", "--porcelain", "--untracked-files=normal").length !== 0,
+    };
+  } catch {
+    // Source archives can build helpers, but cannot issue exact-commit CI evidence.
+    return { source_commit: null, source_tree: null, source_tree_dirty: true };
+  }
+}
+
 const destination = NodePath.resolve(root, process.argv[2] ?? "bin");
 const targetKey = process.env.T3_CODE_LS_NATIVE_TARGET ?? `${NodeOS.platform()}-${NodeOS.arch()}`;
 const rustTarget = nativeTargets[targetKey];
@@ -136,6 +155,20 @@ if (process.env.T3_CODE_LS_NATIVE_DIR) {
   }
   NodeFS.writeFileSync(
     NodePath.resolve(destination, "manifest.json"),
-    JSON.stringify({ target: targetKey, rustTarget, files }, null, 2) + "\n",
+    JSON.stringify(
+      {
+        target: targetKey,
+        rustTarget,
+        files,
+        ...sourceIdentity(),
+        compiler_route: "bluefe-rustc-via-lustr",
+        build_profile: "release",
+        toolchain_lock_sha256: nativeHash(NodePath.join(root, "toolchain.lock.json")),
+        ci_run_id: process.env.GITHUB_RUN_ID ?? null,
+        ci_run_attempt: process.env.GITHUB_RUN_ATTEMPT ?? null,
+      },
+      null,
+      2,
+    ) + "\n",
   );
 }

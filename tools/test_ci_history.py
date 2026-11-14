@@ -12,18 +12,27 @@ from urllib.error import HTTPError, URLError
 import zipfile
 
 import ci_history
+import ci_performance
+from test_ci_performance import encoded_report
+import hashlib
 
 
 REPO = "glopyglerky/t3code-ls"
 POLICY = "a" * 64
 
 
-def receipt(commit="b" * 40, tree="c" * 40, gates=None):
+def receipt(commit="b" * 40, tree="c" * 40, gates=None, identifier=10, attempt=1):
     gates = gates or {name: True for name in ci_history.GATES}
+    plan = {"head": commit, "source_tree": tree, "policy_digest": POLICY,
+            "upstream_commit": "d" * 40, "upstream_tree": "e" * 40}
+    measured, raw = encoded_report(plan, str(identifier))
+    evidence = ci_performance.validate_report(measured, raw, plan, str(identifier), hashlib.sha256(raw).hexdigest())
     return {
         "schema_version": 1, "source_commit": commit, "source_tree": tree,
+        "run_id": identifier, "run_attempt": attempt, "performance_run_attempt": 1,
+        "performance_evidence": evidence if gates["performance"] else None,
         "policy_digest": POLICY, "status": "passed",
-        "plan": {"head": commit, "gates": gates},
+        "plan": {**plan, "gates": gates},
         "gate_results": {name: "success" if required else "skipped"
                          for name, required in gates.items()},
     }
@@ -31,7 +40,7 @@ def receipt(commit="b" * 40, tree="c" * 40, gates=None):
 
 def run(commit, identifier=10, **updates):
     value = {
-        "id": identifier, "path": ci_history.WORKFLOW, "name": ci_history.WORKFLOW_NAME,
+        "id": identifier, "run_attempt": 1, "path": ci_history.WORKFLOW, "name": ci_history.WORKFLOW_NAME,
         "event": "push", "status": "completed", "conclusion": "success",
         "head_sha": commit, "head_repository": {"full_name": REPO},
     }
@@ -62,12 +71,15 @@ class ReceiptValidation(unittest.TestCase):
             lambda value: value["gate_results"].update(native="skipped"),
             lambda value: value["gate_results"].update(application="failure"),
             lambda value: value["gate_results"].update(extra="success"),
+            lambda value: value.update(performance_evidence=[]),
+            lambda value: value.update(run_attempt=0),
+            lambda value: value.update(performance_run_attempt=2),
         ]
         for mutate in mutations:
             value = copy.deepcopy(original)
             mutate(value)
             self.assertFalse(ci_history.valid_receipt(value, "b" * 40, "c" * 40, POLICY))
-        optional = receipt(gates={"native": True, "adapters": False, "application": False})
+        optional = receipt(gates={"native": True, "adapters": False, "application": False, "performance": False})
         self.assertTrue(ci_history.valid_receipt(optional, "b" * 40, "c" * 40, POLICY))
         optional["gate_results"]["application"] = "cancelled"
         self.assertFalse(ci_history.valid_receipt(optional, "b" * 40, "c" * 40, POLICY))
@@ -80,6 +92,7 @@ class ReceiptValidation(unittest.TestCase):
             {"path": ".github/workflows/other.yml"}, {"event": "pull_request"},
             {"status": "in_progress"}, {"conclusion": "failure"},
             {"head_sha": "main"}, {"head_repository": {"full_name": "someone/fork"}},
+            {"run_attempt": None}, {"run_attempt": True}, {"run_attempt": 0},
         ]:
             self.assertFalse(ci_history.eligible_run({**original, **update}, REPO, "99"))
 
@@ -169,7 +182,8 @@ class QualifiedHistory(unittest.TestCase):
             if path == "/actions/workflows/hybrid.yml/runs?status=success&per_page=50":
                 return {"workflow_runs": runs}
             identifier = int(path.split("/")[3])
-            entry = {"id": identifier, "name": "ci-qualification", "expired": False,
+            attempt = receipts.get(identifier, {}).get("run_attempt", 1)
+            entry = {"id": identifier, "name": f"ci-qualification-{attempt}", "expired": False,
                      "size_in_bytes": 1024, **overrides.get(identifier, {})}
             return {"artifacts": [entry] if identifier in receipts else []}
 
@@ -177,8 +191,8 @@ class QualifiedHistory(unittest.TestCase):
         client.artifact.side_effect = lambda identifier: archive(receipts[identifier])
         return client
 
-    def record(self, commit):
-        return receipt(commit, self.git("rev-parse", f"{commit}^{{tree}}"))
+    def record(self, commit, identifier=10, attempt=1):
+        return receipt(commit, self.git("rev-parse", f"{commit}^{{tree}}"), identifier=identifier, attempt=attempt)
 
     def find(self, client):
         with patch("ci_history.GitHub", return_value=client):
@@ -194,7 +208,7 @@ class QualifiedHistory(unittest.TestCase):
 
     def test_exact_commit_reuse_wins_over_a_more_recent_ancestor_run(self):
         client = self.client([run(self.base, 12), run(self.head, 10)],
-                             {12: self.record(self.base), 10: self.record(self.head)})
+                             {12: self.record(self.base, 12), 10: self.record(self.head)})
         result = self.find(client)
         self.assertEqual(result["commit"], self.head)
         self.assertTrue(result["reused"])
@@ -209,6 +223,19 @@ class QualifiedHistory(unittest.TestCase):
             self.client([run(self.base)], {10: wrong}),
         ]:
             self.assertIsNone(self.find(client))
+
+    def test_rerun_history_uses_the_current_receipt_and_retains_its_successful_measurement_attempt(self):
+        current = self.record(self.head, attempt=2)
+        runs = [run(self.head, run_attempt=2)]
+        client = self.client(runs, {10: current})
+        result = self.find(client)
+        self.assertEqual(result["receipt"]["run_attempt"], 2)
+        self.assertEqual(result["receipt"]["performance_evidence"]["ci_run_attempt"], "1")
+        client.json.assert_any_call("/actions/runs/10/artifacts?name=ci-qualification-2&per_page=10")
+        self.assertIsNone(self.find(self.client(runs, {10: current}, {10: {"name": "ci-qualification-1"}})))
+        self.assertIsNone(self.find(self.client(runs, {10: self.record(self.head)})))
+        wrong_run = {**current, "run_id": 11}
+        self.assertIsNone(self.find(self.client(runs, {10: wrong_run})))
 
     def test_unrelated_success_and_missing_git_objects_cannot_be_baselines(self):
         self.git("switch", "--quiet", "--orphan", "unrelated")

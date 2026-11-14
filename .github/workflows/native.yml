@@ -2,13 +2,17 @@ name: Rust components with packaged Lustr and BlueFe
 
 on:
   workflow_call:
+    outputs:
+      native_artifact:
+        description: Exact successful native job's release bundle artifact
+        value: ${{ jobs.qualify.outputs.native_artifact }}
     inputs:
       packages:
         type: string
         default: '["t3-code-ls-app","t3-code-ls-core","t3-code-ls-storage","t3-code-ls-transport","t3code-ls-tools"]'
       component_tests:
         type: string
-        default: '[]'
+        default: "[]"
       source_guards:
         type: boolean
         default: true
@@ -24,7 +28,7 @@ on:
       component_tests:
         description: JSON array of mapped component acceptance scripts
         type: string
-        default: '[]'
+        default: "[]"
       source_guards:
         description: Validate migration accounting
         type: boolean
@@ -41,6 +45,8 @@ jobs:
   qualify:
     runs-on: ${{ ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(vars.CI_RUNNER_ROUTES || '{}')['ubuntu-24.04'] || 'ubuntu-24.04' }}
     timeout-minutes: 30
+    outputs:
+      native_artifact: ${{ steps.scope.outputs.native_artifact }}
     env:
       CARGO_BUILD_JOBS: "2"
       CARGO_INCREMENTAL: "0"
@@ -61,6 +67,7 @@ jobs:
         run: |
           echo "CARGO_TARGET_DIR=$RUNNER_TEMP/t3code-ls-cargo" >> "$GITHUB_ENV"
           echo "CARGO_HOME=$RUNNER_TEMP/t3code-ls-cargo-home" >> "$GITHUB_ENV"
+          echo "native_artifact=hybrid-native-binaries-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
           python3 - <<'PY'
           import hashlib, json, os
           packages = json.loads(os.environ["CI_RUST_PACKAGES"])
@@ -119,7 +126,7 @@ jobs:
         if: always() && inputs.component_tests != '[]'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: component-acceptance-proof
+          name: component-acceptance-proof-${{ github.run_attempt }}
           path: ${{ runner.temp }}/component-proof/
           if-no-files-found: warn
           retention-days: 14
@@ -130,7 +137,7 @@ jobs:
         if: inputs.stage_native
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: hybrid-native-binaries
+          name: ${{ steps.scope.outputs.native_artifact }}
           path: bin/
           if-no-files-found: error
           retention-days: 14
@@ -138,7 +145,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: packaged-toolchain-proof
+          name: packaged-toolchain-proof-${{ github.run_attempt }}
           path: |
             toolchain.lock.json
             lust-toolchain.json

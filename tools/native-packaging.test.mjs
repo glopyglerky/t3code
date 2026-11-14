@@ -54,7 +54,7 @@ NodeTest.test(
 NodeTest.test(
   "build helper stages the selected Cargo target and preserves encoded flags; archives reject mismatched or damaged components",
   async () => {
-    const { nativeComponents, nativeFile, stageNativeArtifacts } =
+    const { nativeComponents, nativeFile, nativeHash, stageNativeArtifacts } =
       await import("./native-artifacts.mjs");
     const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-native-stage-"));
     try {
@@ -89,6 +89,8 @@ NodeFS.writeFileSync(p.join(dir, 'packages.json'), JSON.stringify(packages));
         CARGO_BUILD_TARGET: "x86_64-unknown-linux-gnu",
         CARGO_TARGET_DIR: target,
         CARGO_ENCODED_RUSTFLAGS: "-C\x1fdebuginfo=0",
+        GITHUB_RUN_ID: "101",
+        GITHUB_RUN_ATTEMPT: "3",
       };
       delete env.T3_CODE_LS_NATIVE_DIR;
       const run = NodeChildProcess.spawnSync(
@@ -98,11 +100,35 @@ NodeFS.writeFileSync(p.join(dir, 'packages.json'), JSON.stringify(packages));
       );
       NodeAssert.equal(run.status, 0, run.stderr);
       NodeAssert.deepEqual(
-        JSON.parse(NodeFS.readFileSync(NodePath.join(target, "x86_64-unknown-linux-gnu/release/packages.json"))),
+        JSON.parse(
+          NodeFS.readFileSync(
+            NodePath.join(target, "x86_64-unknown-linux-gnu/release/packages.json"),
+          ),
+        ),
         ["t3-code-ls-core", "t3-code-ls-storage"],
       );
       const manifest = JSON.parse(NodeFS.readFileSync(NodePath.join(output, "manifest.json")));
       NodeAssert.ok(Object.hasOwn(manifest.files, "t3-code-ls-db"));
+      const checkout = NodeURL.fileURLToPath(new URL("..", import.meta.url));
+      const git = (...args) =>
+        NodeChildProcess.execFileSync("git", args, {
+          cwd: checkout,
+          encoding: "utf8",
+        }).trim();
+      NodeAssert.equal(manifest.source_commit, git("rev-parse", "HEAD"));
+      NodeAssert.equal(manifest.source_tree, git("rev-parse", "HEAD^{tree}"));
+      NodeAssert.equal(
+        manifest.source_tree_dirty,
+        git("status", "--porcelain", "--untracked-files=normal").length !== 0,
+      );
+      NodeAssert.equal(manifest.compiler_route, "bluefe-rustc-via-lustr");
+      NodeAssert.equal(manifest.build_profile, "release");
+      NodeAssert.equal(
+        manifest.toolchain_lock_sha256,
+        nativeHash(NodePath.join(checkout, "toolchain.lock.json")),
+      );
+      NodeAssert.equal(manifest.ci_run_id, "101");
+      NodeAssert.equal(manifest.ci_run_attempt, "3");
       NodeAssert.equal(
         JSON.parse(
           NodeFS.readFileSync(NodePath.join(target, "x86_64-unknown-linux-gnu/release/flags.json")),

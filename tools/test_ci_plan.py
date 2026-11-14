@@ -113,7 +113,7 @@ class SelectionTests(unittest.TestCase):
 
     def assert_light(self, result):
         self.assertEqual(result["mode"], "affected-fork")
-        self.assertEqual(result["gates"], {"native": False, "adapters": False, "application": False})
+        self.assertEqual(result["gates"], {"native": False, "adapters": False, "application": False, "performance": False})
         self.assertEqual(result["rust_packages"], [])
         self.assertEqual(result["component_tests"], [])
         self.assertFalse(result["stage_native"])
@@ -121,7 +121,7 @@ class SelectionTests(unittest.TestCase):
 
     def assert_source_guards_only(self, result):
         self.assertEqual(result["mode"], "affected-fork")
-        self.assertEqual(result["gates"], {"native": True, "adapters": False, "application": False})
+        self.assertEqual(result["gates"], {"native": True, "adapters": False, "application": False, "performance": False})
         self.assertEqual(result["rust_packages"], ["t3code-ls-tools"])
         self.assertEqual(result["adapter_ports"], [])
         self.assertEqual(result["affected_ports"], [])
@@ -129,6 +129,14 @@ class SelectionTests(unittest.TestCase):
         self.assertTrue(result["source_guards"])
         self.assertFalse(result["stage_native"])
         self.assertFalse(result["upstream_tests"])
+
+    def test_measurement_contract_and_runner_changes_force_every_gate(self):
+        for path in ("tools/performance-contract.json", "tools/performance-statistics.mjs",
+                     "tools/performance-worker.mjs", "tools/ci_performance.py", "tools/ci_promotion.py"):
+            with self.subTest(path=path):
+                result = self.select([path])
+                self.assertTrue(all(result["gates"].values()))
+                self.assertTrue(ci_plan.is_policy(path))
 
     def test_documentation_and_standalone_reporting_changes_skip_compilers_and_application(self):
         self.assert_light(self.select(["docs/porting/strategy.md", "README.md"]))
@@ -138,17 +146,18 @@ class SelectionTests(unittest.TestCase):
         result = self.select(["tools/src/migration.rs"])
         self.assertEqual(result["mode"], "affected-fork")
         self.assertEqual(result["rust_packages"], ["t3code-ls-tools"])
-        self.assertEqual(result["gates"], {"native": True, "adapters": False, "application": False})
+        self.assertEqual(result["gates"], {"native": True, "adapters": False, "application": False, "performance": False})
         self.assertTrue(result["source_guards"])
         self.assertFalse(result["stage_native"])
 
-    def test_storage_candidate_tests_reverse_consumer_without_production_application(self):
+    def test_production_storage_changes_require_application_and_performance(self):
         result = self.select(["crates/storage/src/lib.rs"])
         self.assertEqual(result["mode"], "affected-fork")
-        self.assertEqual(set(result["rust_packages"]), {"t3-code-ls-storage", "t3-code-ls-app", "t3code-ls-tools"})
+        self.assertEqual(set(result["rust_packages"]), {"t3-code-ls-core", "t3-code-ls-storage", "t3-code-ls-app", "t3code-ls-tools"})
         self.assertEqual(result["adapter_ports"], [])
-        self.assertFalse(result["gates"]["application"])
-        self.assertFalse(result["stage_native"])
+        self.assertTrue(result["gates"]["application"])
+        self.assertTrue(result["gates"]["performance"])
+        self.assertTrue(result["stage_native"])
 
     def test_transport_candidate_does_not_build_unrelated_storage_or_application(self):
         result = self.select(["crates/transport/src/bridge.rs"])
@@ -201,7 +210,7 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(set(result["rust_packages"]), {
             "t3-code-ls-core", "t3-code-ls-transport", "t3code-ls-tools",
         })
-        self.assertEqual(result["gates"], {"native": True, "adapters": False, "application": False})
+        self.assertEqual(result["gates"], {"native": True, "adapters": False, "application": False, "performance": False})
         self.assertFalse(result["stage_native"])
 
     def test_unknown_mapped_acceptance_tests_cannot_silently_pass_any_plan(self):
@@ -236,8 +245,9 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(set(result["rust_packages"]), {
             "t3-code-ls-core", "t3-code-ls-storage", "t3-code-ls-app", "t3code-ls-tools",
         })
-        self.assertFalse(result["stage_native"])
-        self.assertFalse(result["gates"]["application"])
+        self.assertTrue(result["stage_native"])
+        self.assertTrue(result["gates"]["application"])
+        self.assertTrue(result["gates"]["performance"])
         tests_only = self.select(["crates/storage/tests/store.rs"], mapping=mapping, old=mapping,
                                  manifest=manifest)
         self.assertEqual(tests_only["component_tests"], [])
@@ -447,7 +457,7 @@ class SelectionTests(unittest.TestCase):
                 self.assertEqual(result["rust_packages"], ["t3code-ls-tools"])
                 self.assertTrue(result["source_guards"])
                 self.assertFalse(result["stage_native"])
-                self.assertEqual(result["gates"], {"native": True, "adapters": False, "application": False})
+                self.assertEqual(result["gates"], {"native": True, "adapters": False, "application": False, "performance": False})
 
     def test_adapter_typecheck_configuration_is_not_swallowed_by_tools_cargo_member(self):
         result = self.select(["tools/project-tsconfig.json"])
@@ -529,8 +539,9 @@ class SelectionTests(unittest.TestCase):
             "redb-persistence", "iroh-transport", "native-api-component",
         })
         self.assertEqual(result["adapter_ports"], [])
-        self.assertFalse(result["gates"]["application"])
-        self.assertFalse(result["stage_native"])
+        self.assertTrue(result["gates"]["application"])
+        self.assertTrue(result["gates"]["performance"])
+        self.assertTrue(result["stage_native"])
 
     def test_reverse_dependency_owned_by_production_is_qualified_without_other_shared_crate_ports(self):
         mapping = copy.deepcopy(MAPPING)
@@ -595,7 +606,7 @@ class GitFixtureTests(unittest.TestCase):
         self.write("port-map.json", json.dumps(MAPPING))
         self.write("tools/acceptance-checks.json", json.dumps(COMPONENT_MANIFEST))
         self.upstream = self.commit("upstream fixture")
-        self.write("upstream.lock.json", json.dumps({"upstream": {"commit": self.upstream}}))
+        self.write("upstream.lock.json", json.dumps({"upstream": {"commit": self.upstream, "root_tree": self.run_git("rev-parse", f"{self.upstream}^{{tree}}")}}))
         self.base = self.commit("qualified fork fixture")
 
     def tearDown(self):
@@ -619,6 +630,20 @@ class GitFixtureTests(unittest.TestCase):
     def qualification(self):
         # Production callers receive this only from ci_history's verified receipt lookup.
         return {"commit": self.base, "run_id": 123, "reused": False}
+
+    def test_documented_measurement_references_cannot_hide_runtime_or_policy_changes(self):
+        baseline = ci_plan.make_plan(self.root, self.base, self.qualification())
+        evidence = {"source_commit": self.base, "source_tree": baseline["source_tree"],
+                    "policy_digest": baseline["policy_digest"], "ci_run_id": "123",
+                    "upstream_commit": baseline["upstream_commit"], "upstream_tree": baseline["upstream_tree"]}
+        self.write("docs/performance/measured.md", "Complete results for the measured commit\n")
+        documented = self.commit("publish measured outcomes")
+        self.assertTrue(ci_plan.performance_reference_covers(self.root, documented, evidence))
+        self.write("crates/core/src/project_commands.rs", "pub fn changed() {}\n")
+        changed = self.commit("runtime change after measurements")
+        self.assertFalse(ci_plan.performance_reference_covers(self.root, changed, evidence))
+        self.assertFalse(ci_plan.performance_reference_covers(self.root, documented,
+                         {**evidence, "source_tree": "f" * 40}))
 
     def test_cargo_graph_reads_target_build_dev_and_workspace_path_dependencies(self):
         names, reverse = ci_plan.cargo_graph(self.root, self.base)
@@ -705,7 +730,7 @@ class GitFixtureTests(unittest.TestCase):
                 self.assertEqual(result["mode"], "full-fork")
                 self.assertTrue(all(result["gates"].values()))
 
-    def test_true_upstream_source_advance_and_addition_skip_unrelated_integration_checks(self):
+    def test_stock_oracle_advance_requires_fresh_performance_and_full_qualification(self):
         existing = "apps/web/src/TrustedUpstreamView.tsx"
         added = "apps/web/src/NewUpstreamView.tsx"
         mapping = provenance_mapping(self.upstream)
@@ -717,7 +742,7 @@ class GitFixtureTests(unittest.TestCase):
         upstream = self.commit("trusted upstream advances")
         self.run_git("checkout", "--detach", self.base)
         self.run_git("checkout", upstream, "--", existing, added)
-        self.write("upstream.lock.json", json.dumps({"upstream": {"commit": upstream}}))
+        self.write("upstream.lock.json", json.dumps({"upstream": {"commit": upstream, "root_tree": self.run_git("rev-parse", f"{upstream}^{{tree}}")}}))
         mapping["integrated_upstream_commit"] = upstream
         mapping["source_history"].append(upstream)
         for entry in mapping["ports"]:
@@ -727,11 +752,9 @@ class GitFixtureTests(unittest.TestCase):
         result = ci_plan.make_plan(self.root, head, self.qualification())
         self.assertEqual(set(result["changed_paths"]), {existing, added, "upstream.lock.json", "port-map.json"})
         self.assertEqual(set(result["trusted_upstream_paths"]), {existing, added})
-        self.assertEqual(result["mode"], "affected-fork")
-        self.assertEqual(result["rust_packages"], ["t3code-ls-tools"])
-        self.assertTrue(result["source_guards"])
-        self.assertFalse(result["gates"]["adapters"])
-        self.assertFalse(result["gates"]["application"])
+        self.assertEqual(result["mode"], "full-fork")
+        self.assertTrue(all(result["gates"].values()))
+        self.assertIn("The immutable stock comparison changed", result["reasons"])
 
     def test_restoring_a_fork_deleted_upstream_path_is_not_a_trusted_addition(self):
         path = "apps/web/src/TrustedUpstreamView.tsx"
@@ -744,9 +767,9 @@ class GitFixtureTests(unittest.TestCase):
         self.assertEqual(result["mode"], "full-fork")
 
     def test_unavailable_qualified_base_upstream_objects_require_full_qualification(self):
-        self.write("upstream.lock.json", json.dumps({"upstream": {"commit": "a" * 40}}))
+        self.write("upstream.lock.json", json.dumps({"upstream": {"commit": "a" * 40, "root_tree": "b" * 40}}))
         self.base = self.commit("qualification with unavailable old upstream source")
-        self.write("upstream.lock.json", json.dumps({"upstream": {"commit": self.upstream}}))
+        self.write("upstream.lock.json", json.dumps({"upstream": {"commit": self.upstream, "root_tree": self.run_git("rev-parse", f"{self.upstream}^{{tree}}")}}))
         head = self.commit("restore an available upstream pin")
         result = ci_plan.make_plan(self.root, head, self.qualification())
         self.assertEqual(result["trusted_upstream_paths"], [])

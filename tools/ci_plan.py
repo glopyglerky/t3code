@@ -12,6 +12,7 @@ import sys
 import tomllib
 
 import nightly
+from ci_history import GATES
 
 
 PRODUCTION_PORTS = {
@@ -19,6 +20,7 @@ PRODUCTION_PORTS = {
     "provider-recovery", "provider-maintenance", "codex-structured-generation",
     "codex-process-runtime",
 }
+APPLICATION_PORTS = PRODUCTION_PORTS | {"redb-persistence"}
 HYBRID_ACCEPTANCE_TESTS = {
     "tools/check-policy-adapter.mjs": "command-and-dispatch-policy",
     "tools/check-dispatch.mjs": "command-and-dispatch-policy",
@@ -34,7 +36,7 @@ POLICY_FILES = {
     "tools/check-hybrid.mjs", "tools/build-native.mjs", "tools/native-artifacts.mjs",
     "tools/install-toolchain.mjs", "tools/install-server-tests.mjs",
     "tools/fetch-migration-sources.mjs", "tools/nightly.py",
-    "tools/ci_receipt.py", "tools/test-rust.py",
+    "tools/ci_receipt.py", "tools/ci_performance.py", "tools/ci_promotion.py", "tools/test-rust.py",
     "tools/acceptance-checks.json", "tools/check-acceptance.mjs",
 }
 REPORTING_TOOLS = {"tools/plan-porting.py", "tools/sync-readme.py", "tools/verify-upstream.py"}
@@ -57,7 +59,8 @@ def read_json(root: Path, revision: str, path: str) -> dict:
 
 
 def is_policy(path: str) -> bool:
-    return path in POLICY_FILES or path.startswith(".github/workflows/")
+    return (path in POLICY_FILES or path.startswith(".github/workflows/")
+            or path.startswith("tools/performance-"))
 
 
 def policy_digest(tree: dict) -> str:
@@ -263,7 +266,7 @@ def select_checks(changed: list[str], mapping: dict, old_mapping: dict, names: d
                     owners = {port["id"] for port in ports if member in port.get("rust_crates", [])}
                     affected.update(owners)
                     runtime_owners.update(owners)
-        application |= bool(runtime_owners & PRODUCTION_PORTS)
+        application |= bool(runtime_owners & APPLICATION_PORTS)
         runtime_affected.update(runtime_owners)
         if path.startswith("packages/contracts/"):
             affected.update(port["id"] for port in ports)
@@ -321,7 +324,7 @@ def select_checks(changed: list[str], mapping: dict, old_mapping: dict, names: d
                             if dependent_members.intersection(port.get("rust_crates", []))}
         affected.update(dependent_owners)
         runtime_affected.update(dependent_owners)
-        application |= bool(dependent_owners & PRODUCTION_PORTS)
+        application |= bool(dependent_owners & APPLICATION_PORTS)
     adapters = sorted(affected & PRODUCTION_PORTS)
     scheduled_tests = {path for path, port in HYBRID_ACCEPTANCE_TESTS.items() if port in adapters}
     selected_tests = acceptance_tests if full_reason else (
@@ -344,7 +347,8 @@ def select_checks(changed: list[str], mapping: dict, old_mapping: dict, names: d
         packages.add(names["crates/storage"])
     return {
         "mode": "full-fork" if full_reason else "affected-fork",
-        "gates": {"native": bool(packages), "adapters": bool(adapters), "application": application},
+        "gates": {"native": bool(packages), "adapters": bool(adapters),
+                  "application": application, "performance": application},
         "rust_packages": sorted(packages), "adapter_ports": adapters,
         "component_tests": component_tests,
         "affected_ports": sorted(affected), "source_guards": guards,
@@ -380,6 +384,9 @@ def make_plan(root: Path, head: str, qualification: dict | None, force_full: boo
         upstream = nightly.read_tree(root, lock["upstream"]["commit"])
         if base:
             old_lock = read_json(root, base, "upstream.lock.json")
+            if ((lock["upstream"]["commit"], lock["upstream"]["root_tree"])
+                    != (old_lock["upstream"]["commit"], old_lock["upstream"]["root_tree"])):
+                full_reason = full_reason or "The immutable stock comparison changed"
             old_upstream = nightly.read_tree(root, old_lock["upstream"]["commit"])
             # Trust only mechanical upstream changes. Replacing fork wiring with
             # an upstream blob still changes our integration and needs its gates.
@@ -392,16 +399,39 @@ def make_plan(root: Path, head: str, qualification: dict | None, force_full: boo
     result = select_checks(changed, mapping, old_mapping, names, reverse, trusted, full_reason,
                            component_manifest)
     if qualification and qualification.get("reused") and not force_full:
-        result.update(mode="reused", gates={key: False for key in ("native", "adapters", "application")},
+        result.update(mode="reused", gates={key: False for key in GATES},
                       rust_packages=[], adapter_ports=[], stage_native=False, source_guards=False,
                       component_tests=[],
                       reasons=["This exact source and CI policy already passed qualification"])
     return {
         "schema_version": 1, "head": head, "source_tree": source_tree, "policy_digest": digest,
+        "upstream_commit": nightly.require_sha(lock["upstream"]["commit"]),
+        "upstream_tree": nightly.require_sha(lock["upstream"]["root_tree"]),
+        "performance_reference": (qualification.get("receipt", {}).get("performance_evidence")
+                                  if qualification and not result["gates"]["performance"] else None),
         "base": base, "base_run_id": qualification.get("run_id") if qualification else None,
         "reused_run_id": qualification.get("run_id") if result["mode"] == "reused" else None,
         "changed_paths": changed, **result,
     }
+
+
+
+def performance_reference_covers(root: Path, head: str, evidence: dict) -> bool:
+    """Re-evaluate all changes since measurement, including docs-only receipt chains."""
+    measured = evidence.get("source_commit")
+    try:
+        nightly.require_sha(measured)
+        if git(root, "rev-parse", f"{measured}^{{tree}}").decode().strip() != evidence.get("source_tree"):
+            return False
+        comparison = make_plan(root, head, {
+            "commit": measured, "run_id": int(evidence["ci_run_id"]), "reused": measured == head,
+        })
+        return (comparison["policy_digest"] == evidence.get("policy_digest")
+                and comparison["upstream_commit"] == evidence.get("upstream_commit")
+                and comparison["upstream_tree"] == evidence.get("upstream_tree")
+                and not comparison["gates"]["performance"])
+    except (ValueError, KeyError, TypeError, OSError, nightly.TrackingError, subprocess.SubprocessError):
+        return False
 
 
 def write_plan(plan: dict, output: Path, github_output: Path | None = None, summary: Path | None = None):
@@ -422,7 +452,8 @@ def write_plan(plan: dict, output: Path, github_output: Path | None = None, summ
                  f"Rust packages: {', '.join(plan['rust_packages']) or 'none'}.",
                  f"Production ports: {', '.join(plan['adapter_ports']) or 'none'}.",
                  f"Component acceptance tests: {', '.join(plan['component_tests']) or 'none'}.",
-                 f"Native client flow: {plan['gates']['application']}."]
+                 f"Native client flow: {plan['gates']['application']}.",
+                 f"Paired stock/native performance and reliability: {plan['gates']['performance']}."]
         if plan.get("reused_run_id"):
             lines.append(f"Reused exact-source qualification run: {plan['reused_run_id']}.")
         lines += ["", *[f"- {reason}" for reason in plan["reasons"][:20]], ""]

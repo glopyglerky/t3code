@@ -85,6 +85,24 @@ mobile Markdown archive; `port-map.json` records both source transitions.
 Previously retired upstream release workflows remain absent. Licenses, original
 sources and both Git histories remain recoverable.
 
+## First hosted qualification failure and connection repair
+
+The first candidate's [hosted qualification run](https://github.com/glopyglerky/t3code-ls/actions/runs/43592588234)
+failed the connection differential check. Its immutable-source harness omitted
+upstream's new `backoffFailures` state. Reviewing the source revealed a matching
+Rust gap: approval waits, connection attempts and failure backoff now have
+separate counters, and focus wakeups have distinct handling. The Rust connection
+reducer, source extraction and matrix were repaired together. The focused gate
+then passed 61,304 source-derived cases covering delays, connection loss,
+transitions and wakeups. The transport remains a candidate; this repair does
+not route the production browser through Iroh.
+
+The failed run is retained as evidence. Its Rust and source guards passed, while
+application jobs were skipped after the failed dependency. It therefore never
+qualified a main update. The subsequent policy adds required paired performance
+and reliability measurements against immutable stock source, as described in
+[the CI and measurement policy](../ci-and-porting.md).
+
 ## Qualification
 
 Source integration is complete; exact-candidate qualification is recorded by the

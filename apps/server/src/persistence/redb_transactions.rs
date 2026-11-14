@@ -257,9 +257,18 @@ struct Savepoint {
     failed: bool,
 }
 
+/// Successful checks belong to one immutable read snapshot. Writers keep
+/// validating their staged overlay, including changes restored by savepoints.
+#[derive(Default)]
+pub(crate) struct ReadSnapshotValidation {
+    pub(crate) projection_indexes: bool,
+    pub(crate) projection_reads: bool,
+}
+
 pub(crate) struct Session {
     pub(crate) transaction: Transaction,
     pub(crate) catalog: ApplicationCatalog,
+    pub(crate) read_snapshot_validation: Option<ReadSnapshotValidation>,
     touched: Instant,
     savepoints: Vec<Savepoint>,
     savepoint_bytes: usize,
@@ -374,6 +383,8 @@ impl ApplicationTransactions {
             Session {
                 transaction,
                 catalog: decode_catalog(&bytes)?,
+                read_snapshot_validation: matches!(mode, ApplicationTransactionMode::Read)
+                    .then(ReadSnapshotValidation::default),
                 touched: Instant::now(),
                 savepoints: Vec::new(),
                 savepoint_bytes: 0,

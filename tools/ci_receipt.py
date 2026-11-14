@@ -13,12 +13,13 @@ import sys
 import tempfile
 
 from ci_history import DIGEST, GATES, MAX_BYTES, SHA, valid_receipt
+from ci_performance import MAX_REPORT_BYTES, validate_report, valid_summary
 
 
 MODES = {"full-fork", "affected-fork", "reused"}
 SELECTOR = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*\Z")
 PLAN_FIELDS = ("head", "gates", "mode", "base", "base_run_id", "reused_run_id",
-               "rust_packages", "adapter_ports", "component_tests")
+               "rust_packages", "adapter_ports", "component_tests", "upstream_commit", "upstream_tree")
 
 
 class ReceiptError(ValueError):
@@ -44,7 +45,8 @@ def selectors(value: object) -> bool:
             and len(value) == len(set(value)))
 
 
-def make_receipt(plan: object, needs: object, head: str, run_id: str | None = None) -> dict:
+def make_receipt(plan: object, needs: object, head: str, run_id: str | None = None,
+                 performance: tuple[object, bytes] | None = None, run_attempt: str = "1") -> dict:
     """Validate plan/results together, retaining only compact qualification data."""
     require(sha(head), "CI_HEAD must be a full commit SHA")
     require(isinstance(plan, dict), "CI plan must be an object")
@@ -60,7 +62,7 @@ def make_receipt(plan: object, needs: object, head: str, run_id: str | None = No
     gates = plan["gates"]
     require(isinstance(gates, dict) and set(gates) == set(GATES)
             and all(type(value) is bool for value in gates.values()),
-            "CI plan must contain exactly three boolean gates")
+            "CI plan must contain exactly four boolean gates")
     require(selectors(plan["rust_packages"]) and selectors(plan["adapter_ports"]),
             "Invalid package or adapter selection")
     require(gates["native"] == bool(plan["rust_packages"]),
@@ -76,9 +78,13 @@ def make_receipt(plan: object, needs: object, head: str, run_id: str | None = No
     require(not component_tests or gates["native"], "Component tests require the native gate")
     stage_native = plan.get("stage_native")
     require(type(stage_native) is bool
-            and stage_native == (gates["adapters"] or gates["application"]),
+            and stage_native == (gates["adapters"] or gates["application"] or gates["performance"]),
             "Native staging and integration gates disagree")
     require(not stage_native or gates["native"], "Integration gates require native binaries")
+    require(not gates["application"] or gates["performance"],
+            "Application boundary changes require paired performance and reliability evidence")
+    require(sha(plan["upstream_commit"]) and sha(plan["upstream_tree"]),
+            "CI plan must identify the immutable stock comparison")
 
     base, base_id, reused_id = (plan[key] for key in ("base", "base_run_id", "reused_run_id"))
     require((base is None and base_id is None) or (sha(base) and positive_id(base_id)),
@@ -95,7 +101,7 @@ def make_receipt(plan: object, needs: object, head: str, run_id: str | None = No
             require(all(gates.values()), "Full qualification must require every gate")
 
     require(isinstance(needs, dict) and set(needs) == {"plan", *GATES},
-            "CI_NEEDS must contain exactly plan, native, adapters and application")
+            "CI_NEEDS must contain exactly plan and every qualification gate")
     results = {}
     for job, entry in needs.items():
         require(isinstance(entry, dict), f"Missing result for {job}")
@@ -115,7 +121,30 @@ def make_receipt(plan: object, needs: object, head: str, run_id: str | None = No
         require(bool(re.fullmatch(r"[1-9][0-9]*", run_id)), "CI_RUN_ID must be a positive run ID")
         identifier = int(run_id)
         require(base_id != identifier, "A qualification run cannot reference itself as its base")
+        require(isinstance(run_attempt, str) and bool(re.fullmatch(r"[1-9][0-9]*", run_attempt)),
+                "CI_RUN_ATTEMPT must be a positive attempt ID")
         output["run_id"] = identifier
+        output["run_attempt"] = int(run_attempt)
+    if gates["performance"]:
+        require(performance is not None and run_id is not None,
+                "The required performance artifact and current run ID are missing")
+        outputs = needs["performance"].get("outputs", {})
+        require(isinstance(outputs, dict), "Missing performance job outputs")
+        measured_attempt = outputs.get("proof_run_attempt")
+        require(isinstance(measured_attempt, str) and bool(re.fullmatch(r"[1-9][0-9]*", measured_attempt))
+                and int(measured_attempt) <= int(run_attempt),
+                "Missing or future performance job attempt")
+        output["performance_run_attempt"] = int(measured_attempt)
+        output["performance_evidence"] = validate_report(
+            performance[0], performance[1], plan, run_id, outputs.get("proof_sha256"), measured_attempt)
+    elif plan.get("performance_reference") is not None:
+        evidence = plan["performance_reference"]
+        require(mode in ("reused", "affected-fork") and base is not None and isinstance(evidence, dict)
+                and valid_summary(evidence, evidence.get("source_commit"), evidence.get("source_tree"), plan["policy_digest"])
+                and evidence["upstream_commit"] == plan["upstream_commit"]
+                and evidence["upstream_tree"] == plan["upstream_tree"],
+                "Prior performance evidence must match the verified source policy and immutable stock revision")
+        output["performance_evidence"] = evidence
     require(valid_receipt(output, head, plan["source_tree"], plan["policy_digest"]),
             "Generated qualification receipt is invalid")
     return output
@@ -155,12 +184,25 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--plan", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--performance", type=Path)
     args = parser.parse_args(argv)
     try:
         plan = json.loads(args.plan.read_bytes())
         needs = json.loads(os.environ.get("CI_NEEDS", ""))
-        receipt = make_receipt(plan, needs, os.environ.get("CI_HEAD", ""), os.environ.get("CI_RUN_ID"))
+        performance = None
+        if args.performance:
+            with args.performance.open("rb") as source:
+                raw = source.read(MAX_REPORT_BYTES + 1)
+            require(len(raw) <= MAX_REPORT_BYTES, "Performance report exceeds its size bound")
+            performance = (json.loads(raw), raw)
+        receipt = make_receipt(plan, needs, os.environ.get("CI_HEAD", ""),
+                               os.environ.get("CI_RUN_ID"), performance, os.environ.get("CI_RUN_ATTEMPT", "1"))
         verify_checkout(receipt["source_commit"], receipt["source_tree"])
+        evidence = receipt.get("performance_evidence")
+        if evidence is not None and evidence["source_commit"] != receipt["source_commit"]:
+            from ci_plan import performance_reference_covers
+            require(performance_reference_covers(Path.cwd(), receipt["source_commit"], evidence),
+                    "Runtime, oracle or measurement changes make prior performance evidence stale")
         write_receipt(args.output, receipt)
     except (ValueError, OSError, subprocess.SubprocessError) as error:
         print(f"Qualification receipt rejected: {error}", file=sys.stderr)

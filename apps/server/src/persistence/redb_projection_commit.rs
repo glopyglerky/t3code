@@ -904,6 +904,14 @@ struct SearchDirty {
 }
 
 async fn ready(session: &mut Session) -> Result<()> {
+    session.transaction.ensure_active()?;
+    if session
+        .read_snapshot_validation
+        .as_ref()
+        .is_some_and(|validation| validation.projection_indexes)
+    {
+        return Ok(());
+    }
     let state: Preparation = decode(
         &session
             .transaction
@@ -917,19 +925,42 @@ async fn ready(session: &mut Session) -> Result<()> {
     if !state.ready || state.table_index != SPECS.len() {
         return Err(invalid("projection indexes are not prepared"));
     }
-    for spec in SPECS {
-        if session
-            .transaction
-            .get(&managed_marker(&session.catalog, spec.name))
-            .await?
-            .as_deref()
-            .map(decode::<String>)
-            .transpose()?
-            .as_deref()
-            != Some(OWNER)
-        {
-            return Err(Error::IncompatibleStore);
+    let markers: Vec<_> = SPECS
+        .iter()
+        .map(|spec| managed_marker(&session.catalog, spec.name))
+        .collect();
+    let validate_owner = |bytes: Option<&[u8]>| -> Result<()> {
+        if bytes.map(decode::<String>).transpose()?.as_deref() != Some(OWNER) {
+            Err(Error::IncompatibleStore)
+        } else {
+            Ok(())
         }
+    };
+    if session.read_snapshot_validation.is_some() {
+        match session.transaction.get_many(&markers).await {
+            Ok(values) => {
+                for value in values {
+                    validate_owner(value.as_deref())?;
+                }
+            }
+            Err(Error::ResourceLimit(crate::ResourceLimit::ReadBytes)) => {
+                // Valid owner markers are tiny. Preserve ordered corruption rejection
+                // if malformed marker bytes exceed the bounded batch allocation.
+                for marker in markers {
+                    validate_owner(session.transaction.get(&marker).await?.as_deref())?;
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    } else {
+        // Writers must observe and validate each marker in order: a later
+        // observation-budget failure must not mask an earlier corrupt owner.
+        for marker in markers {
+            validate_owner(session.transaction.get(&marker).await?.as_deref())?;
+        }
+    }
+    if let Some(validation) = &mut session.read_snapshot_validation {
+        validation.projection_indexes = true;
     }
     Ok(())
 }
