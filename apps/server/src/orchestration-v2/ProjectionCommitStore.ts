@@ -71,6 +71,10 @@ export interface ProjectionCommitStoreShape {
     providerThreadId: ProviderThreadId,
     expectedJson: string,
   ) => Effect.Effect<boolean, ProjectionCommitStoreError>;
+  readonly subagentUnchanged: (
+    subagentId: string,
+    expectedJson: string,
+  ) => Effect.Effect<boolean, ProjectionCommitStoreError>;
   readonly turnItemUnchanged: (
     turnItemId: OrchestrationV2TurnItem["id"],
     expectedJson: string,

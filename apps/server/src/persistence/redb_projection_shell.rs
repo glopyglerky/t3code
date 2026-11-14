@@ -16,6 +16,7 @@ pub struct ShellOptions {
     worktree_path: Option<String>,
     thread_ids: Option<Vec<String>>,
     listed_only: Option<bool>,
+    include_deleted: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -65,6 +66,7 @@ pub enum ProjectionShellQuery {
     ActiveSubagents {},
     CountThreads {},
     ActiveIndex {},
+    ActiveThreads { project_id: Option<String> },
     GuestShare {
         share_id: String,
     },
@@ -291,7 +293,7 @@ async fn filtered_threads(
     let mut rows = Vec::new();
     for row in candidates {
         let id = text(&row.row, "thread_id")?;
-        if nullable(&row.row, "deleted_at")?.is_some()
+        if (options.include_deleted != Some(true) && nullable(&row.row, "deleted_at")?.is_some())
             || thread_id.is_some_and(|selected| selected != id)
             || options
                 .project_id
@@ -321,7 +323,7 @@ async fn filtered_threads(
     }
     rows.retain(|row| {
         let lineage = row.p("lineage");
-        row.col("deleted_at").is_none()
+        (options.include_deleted == Some(true) || row.col("deleted_at").is_none())
             && options
                 .project_id
                 .as_deref()
@@ -858,6 +860,23 @@ async fn query(session: &mut Session, input: ProjectionShellQuery) -> Result<Val
             let deleted=read_index::count_equal(session,THREADS,"_deleted",&int_cell(1)).await?;
             Ok(json!([{"count":all.checked_sub(deleted).ok_or(Error::IncompatibleStore)?}]))
         },
+        ProjectionShellQuery::ActiveThreads { project_id } => {
+            let mut rows = shell_threads(session, None, &ShellOptions { location: Some("active".into()), project_id, ..Default::default() }).await?;
+            rows.sort_by_key(|row| row.order);
+            let mut result = Vec::new();
+            for row in rows {
+                let lineage = row.p("lineage");
+                let side = lineage.get("sideChat").map(|value| value.as_bool().map(|value| json!(u8::from(value))).unwrap_or_else(|| value.clone())).unwrap_or(Value::Null);
+                result.push(json!({
+                    "thread_id": row.col("thread_id"), "project_id": row.col("project_id"),
+                    "title": row.col("title"), "updated_at": row.col("updated_at"),
+                    "relationship_to_parent": lineage.get("relationshipToParent"), "parent_thread_id": lineage.get("parentThreadId"),
+                    "root_thread_id": lineage.get("rootThreadId"), "side_chat": side,
+                    "settled_override": row.p("settledOverride"), "settled_at": row.p("settledAt"), "snoozed_until": row.p("snoozedUntil")
+                }));
+            }
+            Ok(json!(result))
+        }
         ProjectionShellQuery::ActiveIndex{}=>{let remote = selected(session,SUBAGENTS,None).await?.into_iter().filter(|row|row.col("origin")==Some("app_owned")&&row.col("child_thread_id").is_none()&&row.flag("nativeOpenRemoteDelegatedTask")).filter_map(|row|row.col("thread_id").map(str::to_owned)).collect::<BTreeSet<_>>();let mut result=Vec::new();for row in shell_threads(session,None,&ShellOptions{location:Some("active".into()),..Default::default()}).await?{let data=ThreadData::load(session,&row.id(THREADS)?).await?;let lineage=row.p("lineage");let side=lineage.get("sideChat").map(|value|if let Some(value)=value.as_bool(){json!(u8::from(value))}else{value.clone()}).unwrap_or(Value::Null);result.push(json!({"thread_id":row.col("thread_id"),"project_id":row.col("project_id"),"relationship_to_parent":lineage.get("relationshipToParent"),"parent_thread_id":lineage.get("parentThreadId"),"root_thread_id":lineage.get("rootThreadId"),"side_chat":side,"settled_override":row.p("settledOverride"),"settled_at":row.p("settledAt"),"pinned_at":row.p("pinnedAt"),"snoozed_until":row.p("snoozedUntil"),"may_be_live":u8::from(data.live(&row)),"has_remote_tasks":u8::from(row.col("thread_id").is_some_and(|id|remote.contains(id)))}));}Ok(json!(result))}
         ProjectionShellQuery::GuestShare{share_id}=>{let rows=selected(session,THREADS,None).await?;Ok(json!(rows.into_iter().find(|row|row.pstr("nativeGuestShareId")==Some(share_id.as_str())).map(|row|json!({"thread_id":row.col("thread_id")})).into_iter().collect::<Vec<_>>()))}
         ProjectionShellQuery::OlderSettled{before,project_ids,limit}=>{let mut rows=threads(session,None,&ShellOptions{location:Some("active".into()),listed_only:Some(true),..Default::default()}).await?;rows.retain(|row|row.pstr("settledOverride")==Some("settled")&&row.pstr("settledAt").is_some_and(|time|time<before.settled_at.as_str()||(time==before.settled_at&&before.thread_id.as_deref().is_some_and(|id|row.col("thread_id").is_some_and(|thread|thread>id))))&&project_ids.as_ref().is_none_or(|ids|row.col("project_id").is_some_and(|project|ids.iter().any(|id|id==project))));rows.sort_by(|a,b|b.pstr("settledAt").cmp(&a.pstr("settledAt")).then_with(||a.col("thread_id").cmp(&b.col("thread_id"))));if limit==0{let mut counts=BTreeMap::<String,u64>::new();for row in rows{*counts.entry(text(&row.row,"project_id")?).or_default()+=1;}Ok(json!({"pageRows":[],"countRows":counts.into_iter().map(|(project,count)|json!({"project_id":project,"count":count})).collect::<Vec<_>>()}))}else{Ok(json!({"pageRows":rows.into_iter().take(if limit<0{usize::MAX}else{limit as usize}).map(|row|json!({"thread_id":row.col("thread_id")})).collect::<Vec<_>>(),"countRows":[]}))}}

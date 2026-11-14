@@ -9,6 +9,22 @@ import { PersistenceDecodeError, type PersistenceErrorCorrelation } from "./Erro
 import { RedbClient } from "./RedbClient.ts";
 
 const Written = Schema.Struct({ written: Schema.Literal(true) });
+const encodeCreateAuthSessionInput = Schema.encodeEffect(Sessions.CreateAuthSessionInput);
+const encodeCreateReplacingActiveAuthSessionInput = Schema.encodeEffect(
+  Sessions.CreateReplacingActiveAuthSessionInput,
+);
+const encodeGetAuthSessionByIdInput = Schema.encodeEffect(Sessions.GetAuthSessionByIdInput);
+const encodeListActiveAuthSessionsInput = Schema.encodeEffect(Sessions.ListActiveAuthSessionsInput);
+const encodeRevokeAuthSessionInput = Schema.encodeEffect(Sessions.RevokeAuthSessionInput);
+const encodeRevokeOtherAuthSessionsInput = Schema.encodeEffect(
+  Sessions.RevokeOtherAuthSessionsInput,
+);
+const encodeSetAuthSessionLastConnectedAtInput = Schema.encodeEffect(
+  Sessions.SetAuthSessionLastConnectedAtInput,
+);
+const encodeRevokeAuthSessionsByProofKeyInput = Schema.encodeEffect(
+  Sessions.RevokeAuthSessionsByProofKeyInput,
+);
 const requestPhases = {
   create: "encodeRequest",
   createIfAbsent: "encodeRequest",
@@ -18,6 +34,8 @@ const requestPhases = {
   revoke: "decodeRows",
   revokeAllExcept: "decodeRows",
   setLastConnectedAt: "encodeRequest",
+  getProofKeyThumbprint: "decodeRows",
+  revokeByProofKey: "decodeRows",
 } as const;
 
 export const make = Effect.gen(function* () {
@@ -49,7 +67,7 @@ export const make = Effect.gen(function* () {
   };
 
   const create = (method: "create" | "createIfAbsent", input: Sessions.CreateAuthSessionInput) =>
-    Schema.encodeEffect(Sessions.CreateAuthSessionInput)(input).pipe(
+    encodeCreateAuthSessionInput(input).pipe(
       Effect.mapError((cause) =>
         PersistenceDecodeError.fromSchemaError(
           `AuthSessionRepository.${method}:encodeRequest`,
@@ -79,7 +97,7 @@ export const make = Effect.gen(function* () {
       create("createIfAbsent", input),
     ),
     createReplacingActive: Effect.fn("AuthSessionRepository.createReplacingActive")((input) =>
-      Schema.encodeEffect(Sessions.CreateReplacingActiveAuthSessionInput)(input).pipe(
+      encodeCreateReplacingActiveAuthSessionInput(input).pipe(
         Effect.mapError((cause) =>
           PersistenceDecodeError.fromSchemaError(
             "AuthSessionRepository.createReplacingActive:encodeRequest",
@@ -105,7 +123,7 @@ export const make = Effect.gen(function* () {
       ),
     ),
     getById: Effect.fn("AuthSessionRepository.getById")((input) =>
-      Schema.encodeEffect(Sessions.GetAuthSessionByIdInput)(input).pipe(
+      encodeGetAuthSessionByIdInput(input).pipe(
         Effect.mapError((cause) =>
           PersistenceDecodeError.fromSchemaError("AuthSessionRepository.getById:decodeRow", cause, {
             sessionId: input.sessionId,
@@ -137,7 +155,7 @@ export const make = Effect.gen(function* () {
       ),
     ),
     listActive: Effect.fn("AuthSessionRepository.listActive")((input) =>
-      Schema.encodeEffect(Sessions.ListActiveAuthSessionsInput)(input).pipe(
+      encodeListActiveAuthSessionsInput(input).pipe(
         Effect.mapError((cause) =>
           PersistenceDecodeError.fromSchemaError(
             "AuthSessionRepository.listActive:decodeRows",
@@ -173,7 +191,7 @@ export const make = Effect.gen(function* () {
       ),
     ),
     revoke: Effect.fn("AuthSessionRepository.revoke")((input) =>
-      Schema.encodeEffect(Sessions.RevokeAuthSessionInput)(input).pipe(
+      encodeRevokeAuthSessionInput(input).pipe(
         Effect.mapError((cause) =>
           PersistenceDecodeError.fromSchemaError("AuthSessionRepository.revoke:decodeRows", cause, {
             sessionId: input.sessionId,
@@ -195,7 +213,7 @@ export const make = Effect.gen(function* () {
       ),
     ),
     revokeAllExcept: Effect.fn("AuthSessionRepository.revokeAllExcept")((input) =>
-      Schema.encodeEffect(Sessions.RevokeOtherAuthSessionsInput)(input).pipe(
+      encodeRevokeOtherAuthSessionsInput(input).pipe(
         Effect.mapError((cause) =>
           PersistenceDecodeError.fromSchemaError(
             "AuthSessionRepository.revokeAllExcept:decodeRows",
@@ -219,7 +237,7 @@ export const make = Effect.gen(function* () {
       ),
     ),
     setLastConnectedAt: Effect.fn("AuthSessionRepository.setLastConnectedAt")((input) =>
-      Schema.encodeEffect(Sessions.SetAuthSessionLastConnectedAtInput)(input).pipe(
+      encodeSetAuthSessionLastConnectedAtInput(input).pipe(
         Effect.mapError((cause) =>
           PersistenceDecodeError.fromSchemaError(
             "AuthSessionRepository.setLastConnectedAt:encodeRequest",
@@ -241,6 +259,49 @@ export const make = Effect.gen(function* () {
           ),
         ),
         Effect.asVoid,
+      ),
+    ),
+    getProofKeyThumbprint: Effect.fn("AuthSessionRepository.getProofKeyThumbprint")((input) =>
+      encodeGetAuthSessionByIdInput(input).pipe(
+        Effect.mapError((cause) =>
+          PersistenceDecodeError.fromSchemaError(
+            "AuthSessionRepository.getProofKeyThumbprint:decodeRows",
+            cause,
+            { sessionId: input.sessionId },
+          ),
+        ),
+        Effect.flatMap(({ sessionId }) =>
+          request(
+            true,
+            { kind: "session_get_proof_key", session_id: sessionId },
+            Schema.NullOr(Schema.String),
+            "getProofKeyThumbprint",
+            { sessionId },
+          ),
+        ),
+        Effect.map(Option.fromNullishOr),
+      ),
+    ),
+    revokeByProofKey: Effect.fn("AuthSessionRepository.revokeByProofKey")((input) =>
+      encodeRevokeAuthSessionsByProofKeyInput(input).pipe(
+        Effect.mapError((cause) =>
+          PersistenceDecodeError.fromSchemaError(
+            "AuthSessionRepository.revokeByProofKey:decodeRows",
+            cause,
+          ),
+        ),
+        Effect.flatMap(({ proofKeyThumbprint, revokedAt }) =>
+          request(
+            false,
+            {
+              kind: "session_revoke_by_proof_key",
+              proof_key_thumbprint: proofKeyThumbprint,
+              revoked_at: revokedAt,
+            },
+            Schema.Array(AuthSessionId),
+            "revokeByProofKey",
+          ),
+        ),
       ),
     ),
   });

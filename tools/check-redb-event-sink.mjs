@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-import * as Assert from "node:assert/strict";
-import * as FS from "node:fs/promises";
-import * as Path from "node:path";
+import * as NodeAssert from "node:assert/strict";
+import * as NodeFSP from "node:fs/promises";
+import * as NodePath from "node:path";
 import * as Contracts from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -29,14 +29,12 @@ import * as ProjectStore from "../apps/server/src/orchestration-v2/ProjectStore.
 import * as ProjectionStore from "../apps/server/src/orchestration-v2/ProjectionStore.ts";
 import * as ProviderCommitBatch from "../apps/server/src/orchestration-v2/ProviderCommitBatch.ts";
 import * as TurnItemPositionStore from "../apps/server/src/orchestration-v2/TurnItemPositionStore.ts";
-import * as PersistenceTransactions from "../apps/server/src/persistence/PersistenceTransactions.ts";
 import { replayAndBufferProjectedLiveEvents } from "../apps/server/src/orchestration-v2/LiveStreamBudget.ts";
 import { projectStoredEventForWire } from "../apps/server/src/orchestration-v2/WireProjection.ts";
 import { makeRunOutcomeRecorder } from "../apps/server/src/orchestration-v2/RunMetrics.ts";
 import { createFixture } from "./database-fixture.mjs";
 import { exportSqliteState } from "./export-sqlite-state.mjs";
 import { at } from "./check-outbox-runtime.mjs";
-import { upstreamSource } from "./upstream-source.mjs";
 import { checkProjectionCodecs } from "./redb-projection-codec-cases.mjs";
 import {
   createMigratedSqlite,
@@ -60,8 +58,11 @@ import {
 } from "./redb-event-sink-fixtures.mjs";
 
 const [executable, proofPath] = process.argv.slice(2);
-Assert.ok(executable && Path.isAbsolute(executable), "Pass an absolute native database executable");
-await FS.access(executable, FS.constants.X_OK);
+NodeAssert.ok(
+  executable && NodePath.isAbsolute(executable),
+  "Pass an absolute native database executable",
+);
+await NodeFSP.access(executable, NodeFSP.constants.X_OK);
 const projectionOracle = await loadUpstreamModule(
   "apps/server/src/orchestration-v2/ProjectionStore.ts",
 );
@@ -181,7 +182,7 @@ const expectFailure = (effect) =>
   effect.pipe(
     Effect.exit,
     Effect.tap((exit) =>
-      Effect.sync(() => Assert.ok(Exit.isFailure(exit), "Expected a failed operation")),
+      Effect.sync(() => NodeAssert.ok(Exit.isFailure(exit), "Expected a failed operation")),
     ),
   );
 
@@ -196,13 +197,17 @@ function faultTransport(database, faults) {
             faults.frames.push(structuredClone(input));
             if (input.operation === "application_begin" && faults.busyBegins > 0) {
               faults.busyBegins -= 1;
-              return yield* new NativeDatabase.NativeDatabaseRejected({ kind: "writer_busy" });
+              return yield* new NativeDatabase.NativeDatabaseRejected({
+                kind: "writer_busy",
+              });
             }
             const result = yield* session.request(input, response);
             if (input.operation === faults.drop) {
               faults.drop = undefined;
               yield* session.discard;
-              return yield* new NativeDatabase.NativeDatabaseOutcomeUnknown({ stage: "response" });
+              return yield* new NativeDatabase.NativeDatabaseOutcomeUnknown({
+                stage: "response",
+              });
             }
             return result;
           }),
@@ -212,102 +217,101 @@ function faultTransport(database, faults) {
 }
 
 async function withServices(kind, filename, use, target = fixture, faults) {
-  const run = (client, sql) =>
-    Effect.gen(function* () {
-      const stores =
-        kind === "redb"
-          ? undefined
-          : Layer.mergeAll(
-              CommandReceiptStore.layer,
-              EffectOutbox.layer,
-              EventStore.layer,
-              kind === "upstream" ? projectionOracle.module.layer : ProjectionStore.layer,
-              ProjectStore.layer,
-              TurnItemPositionStore.layer,
-            );
-      const serviceLayer =
-        kind === "redb"
-          ? NativeEventSink.layer
-          : (kind === "upstream" ? oracle.module.layerFromStores : EventSink.layerFromStores).pipe(
-              Layer.provideMerge(stores),
-            );
-      const services = yield* Layer.build(serviceLayer);
-      const sink = Context.get(
-        services,
-        kind === "upstream" ? oracle.module.EventSinkV2 : EventSink.EventSinkV2,
-      );
-      const events = Context.get(services, EventStore.EventStoreV2);
-      const outbox = Context.get(services, EffectOutbox.EffectOutboxV2);
-      const receipts = Context.get(services, CommandReceiptStore.CommandReceiptStoreV2);
-      const projects = Context.get(services, ProjectStore.ProjectStoreV2);
-      const positions = Context.get(services, TurnItemPositionStore.TurnItemPositionStoreV2);
-      const transaction = (body) =>
-        client ? client.withTransaction(body) : sql.withTransaction(body);
-      const inTransaction = client
-        ? client.isInTransaction
-        : Effect.serviceOption(sql.transactionService).pipe(Effect.map(Option.isSome));
-      const snapshot = Effect.gen(function* () {
-        const result = {};
-        for (const table of tables) {
-          if (sql) result[table] = ordered(yield* sql.unsafe(`SELECT * FROM ${table}`));
-          else {
-            const rows = [];
-            let after = null;
-            do {
-              const page = yield* client.scan(table, { after, limit: 256 });
-              for (const { row } of page.rows)
-                rows.push(
-                  Object.fromEntries(
-                    Object.entries(row).map(([key, cell]) => [
-                      key,
-                      cell.type === "null"
-                        ? null
-                        : cell.type === "integer"
-                          ? Number(cell.value)
-                          : cell.value,
-                    ]),
-                  ),
-                );
-              after = page.next;
-            } while (after !== null);
-            result[table] = ordered(rows);
-          }
+  const run = Effect.fn("checkRedbEventSink.run")(function* (client, sql) {
+    const stores =
+      kind === "redb"
+        ? undefined
+        : Layer.mergeAll(
+            CommandReceiptStore.layer,
+            EffectOutbox.layer,
+            EventStore.layer,
+            kind === "upstream" ? projectionOracle.module.layer : ProjectionStore.layer,
+            ProjectStore.layer,
+            TurnItemPositionStore.layer,
+          );
+    const serviceLayer =
+      kind === "redb"
+        ? NativeEventSink.layer
+        : (kind === "upstream" ? oracle.module.layerFromStores : EventSink.layerFromStores).pipe(
+            Layer.provideMerge(stores),
+          );
+    const services = yield* Layer.build(serviceLayer);
+    const sink = Context.get(
+      services,
+      kind === "upstream" ? oracle.module.EventSinkV2 : EventSink.EventSinkV2,
+    );
+    const events = Context.get(services, EventStore.EventStoreV2);
+    const outbox = Context.get(services, EffectOutbox.EffectOutboxV2);
+    const receipts = Context.get(services, CommandReceiptStore.CommandReceiptStoreV2);
+    const projects = Context.get(services, ProjectStore.ProjectStoreV2);
+    const positions = Context.get(services, TurnItemPositionStore.TurnItemPositionStoreV2);
+    const transaction = (body) =>
+      client ? client.withTransaction(body) : sql.withTransaction(body);
+    const inTransaction = client
+      ? client.isInTransaction
+      : Effect.serviceOption(sql.transactionService).pipe(Effect.map(Option.isSome));
+    const snapshot = Effect.gen(function* () {
+      const result = {};
+      for (const table of tables) {
+        if (sql) result[table] = ordered(yield* sql.unsafe(`SELECT * FROM ${table}`));
+        else {
+          const rows = [];
+          let after = null;
+          do {
+            const page = yield* client.scan(table, { after, limit: 256 });
+            for (const { row } of page.rows)
+              rows.push(
+                Object.fromEntries(
+                  Object.entries(row).map(([key, cell]) => [
+                    key,
+                    cell.type === "null"
+                      ? null
+                      : cell.type === "integer"
+                        ? Number(cell.value)
+                        : cell.value,
+                  ]),
+                ),
+              );
+            after = page.next;
+          } while (after !== null);
+          result[table] = ordered(rows);
         }
-        return result;
-      });
-      const publications = [];
-      const originalPublish = events.publishCommitted;
-      events.publishCommitted = (records) =>
-        Effect.gen(function* () {
-          Assert.equal(yield* inTransaction, false, "Publication must follow the root commit");
-          for (const record of records) {
-            const id = record.event?.id ?? record.eventId;
-            const durable = client
-              ? (yield* client.get("orchestration_events", [
-                  { type: "integer", value: String(record.sequence) },
-                ]))?.event_id.value
-              : (yield* sql`SELECT event_id FROM orchestration_events WHERE sequence = ${record.sequence}`)[0]
-                  ?.event_id;
-            Assert.equal(durable, id, "Published event must already be durable");
-            publications.push({ sequence: record.sequence, id });
-          }
-          yield* originalPublish(records);
-        });
-      return yield* use({
-        sink,
-        events,
-        outbox,
-        receipts,
-        projects,
-        positions,
-        transaction,
-        client,
-        sql,
-        snapshot,
-        publications,
-        inTransaction,
-      }).pipe(Effect.timeout("30 seconds"));
+      }
+      return result;
     });
+    const publications = [];
+    const originalPublish = events.publishCommitted;
+    events.publishCommitted = (records) =>
+      Effect.gen(function* () {
+        NodeAssert.equal(yield* inTransaction, false, "Publication must follow the root commit");
+        for (const record of records) {
+          const id = record.event?.id ?? record.eventId;
+          const durable = client
+            ? (yield* client.get("orchestration_events", [
+                { type: "integer", value: String(record.sequence) },
+              ]))?.event_id.value
+            : (yield* sql`SELECT event_id FROM orchestration_events WHERE sequence = ${record.sequence}`)[0]
+                ?.event_id;
+          NodeAssert.equal(durable, id, "Published event must already be durable");
+          publications.push({ sequence: record.sequence, id });
+        }
+        yield* originalPublish(records);
+      });
+    return yield* use({
+      sink,
+      events,
+      outbox,
+      receipts,
+      projects,
+      positions,
+      transaction,
+      client,
+      sql,
+      snapshot,
+      publications,
+      inTransaction,
+    }).pipe(Effect.timeout("30 seconds"));
+  });
   return kind === "redb"
     ? withNative(
         executable,
@@ -318,546 +322,694 @@ async function withServices(kind, filename, use, target = fixture, faults) {
     : withSqlite(filename, (sql) => at(fixedTime, run(undefined, sql)));
 }
 
-function exercise({ sink, events, outbox, receipts, projects, snapshot, publications }) {
-  return Effect.gen(function* () {
-    const result = {};
-    result.project = yield* sink.commitProjectCommand(projectCommand("project:create"));
-    Assert.equal(result.project.committed, true);
-    result.created = yield* sink.commitCommand(
-      command("create", sampleEvents, [pending("initial-effect")]),
-    );
-    Assert.equal(result.created.committed, true);
-    Assert.equal(result.created.storedEvents.length, sampleEvents.length);
-    result.replay = yield* sink.commitCommand(
-      command("create", [detached("must-not-replay")], [pending("must-not-replay")]),
-    );
-    Assert.equal(result.replay.committed, false);
-    Assert.deepEqual(result.replay.storedEvents, result.created.storedEvents);
-    Assert.ok(Option.isNone(yield* outbox.get("must-not-replay")));
-    result.projectReplay = yield* sink.commitProjectCommand(
-      projectCommand("project:create", "ignored-project"),
-    );
-    Assert.equal(result.projectReplay.committed, false);
-    yield* expectFailure(
-      sink.commitProjectCommand({ ...projectCommand("collision"), commandId: "command:create" }),
-    );
-    yield* expectFailure(
-      sink.commitCommand({
-        ...command("collision", [detached("must-not-collide")]),
-        commandId: "command:project:create",
-      }),
-    );
-    result.rejected = yield* sink.commitRejectedCommand({
-      commandId: "command:rejected",
-      threadId: "thread:main",
-      commandType: "fixture.rejected",
-      rejectedAt: fixedDateTime,
-      error: "controlled rejection",
-    });
-    result.rejectedAgain = yield* sink.commitRejectedCommand({
-      commandId: "command:rejected",
-      threadId: "thread:other",
-      commandType: "changed",
-      rejectedAt: fixedDateTime,
-      error: "changed",
-    });
-    Assert.deepEqual(result.rejectedAgain, result.rejected);
-    result.projectRejected = yield* sink.commitRejectedProjectCommand({
-      commandId: "command:project-rejected",
-      projectId: "project:main",
-      commandType: "project.rejected",
-      rejectedAt: fixedDateTime,
-      error: "controlled rejection",
-    });
-    result.projectRejectedAgain = yield* sink.commitRejectedProjectCommand({
-      commandId: "command:project-rejected",
-      projectId: "ignored-project",
-      commandType: "changed",
-      rejectedAt: fixedDateTime,
-      error: "changed",
-    });
-    Assert.deepEqual(result.projectRejectedAgain, result.projectRejected);
+const exercise = Effect.fn("checkRedbEventSink.exercise")(function* ({
+  sink,
+  events,
+  outbox,
+  receipts,
+  projects,
+  snapshot,
+  publications,
+}) {
+  const result = {};
+  result.project = yield* sink.commitProjectCommand(projectCommand("project:create"));
+  NodeAssert.equal(result.project.committed, true);
+  result.created = yield* sink.commitCommand(
+    command("create", sampleEvents, [pending("initial-effect")]),
+  );
+  NodeAssert.equal(result.created.committed, true);
+  NodeAssert.equal(result.created.storedEvents.length, sampleEvents.length);
+  result.replay = yield* sink.commitCommand(
+    command("create", [detached("must-not-replay")], [pending("must-not-replay")]),
+  );
+  NodeAssert.equal(result.replay.committed, false);
+  NodeAssert.deepEqual(result.replay.storedEvents, result.created.storedEvents);
+  NodeAssert.ok(Option.isNone(yield* outbox.get("must-not-replay")));
+  result.projectReplay = yield* sink.commitProjectCommand(
+    projectCommand("project:create", "ignored-project"),
+  );
+  NodeAssert.equal(result.projectReplay.committed, false);
+  yield* expectFailure(
+    sink.commitProjectCommand({
+      ...projectCommand("collision"),
+      commandId: "command:create",
+    }),
+  );
+  yield* expectFailure(
+    sink.commitCommand({
+      ...command("collision", [detached("must-not-collide")]),
+      commandId: "command:project:create",
+    }),
+  );
+  result.rejected = yield* sink.commitRejectedCommand({
+    commandId: "command:rejected",
+    threadId: "thread:main",
+    commandType: "fixture.rejected",
+    rejectedAt: fixedDateTime,
+    error: "controlled rejection",
+  });
+  result.rejectedAgain = yield* sink.commitRejectedCommand({
+    commandId: "command:rejected",
+    threadId: "thread:other",
+    commandType: "changed",
+    rejectedAt: fixedDateTime,
+    error: "changed",
+  });
+  NodeAssert.deepEqual(result.rejectedAgain, result.rejected);
+  result.projectRejected = yield* sink.commitRejectedProjectCommand({
+    commandId: "command:project-rejected",
+    projectId: "project:main",
+    commandType: "project.rejected",
+    rejectedAt: fixedDateTime,
+    error: "controlled rejection",
+  });
+  result.projectRejectedAgain = yield* sink.commitRejectedProjectCommand({
+    commandId: "command:project-rejected",
+    projectId: "ignored-project",
+    commandType: "changed",
+    rejectedAt: fixedDateTime,
+    error: "changed",
+  });
+  NodeAssert.deepEqual(result.projectRejectedAgain, result.projectRejected);
 
-    const runGuard = {
-      threadId: "thread:main",
-      runId: "run:main",
-      activeAttemptId: "attempt:main",
-      expectedStatus: "running",
-    };
-    result.runStale = yield* sink.writeIfRunCurrent({
-      ...runGuard,
-      activeAttemptId: "attempt:stale",
-      events: [detached("stale-run")],
-    });
-    Assert.equal(result.runStale.committed, false);
-    result.runCurrent = yield* sink.writeIfRunCurrent({
-      ...runGuard,
-      events: [detached("current-run")],
-      effects: [pending("current-effect")],
-    });
-    Assert.equal(result.runCurrent.committed, true);
-    const owner = {
-      providerThreadId: "provider:main",
-      runId: "run:main",
-      activeAttemptId: "attempt:main",
-      expectedLastRunOrdinal: 1,
-    };
-    result.ownerStale = yield* sink.writeIfProviderThreadOwner({
-      ...owner,
-      expectedLastRunOrdinal: 2,
-      events: [detached("stale-owner")],
-    });
-    Assert.equal(result.ownerStale.committed, false);
-    result.ownerCurrent = yield* sink.writeIfProviderThreadOwner({
-      ...owner,
-      events: [detached("current-owner")],
-    });
-    Assert.equal(result.ownerCurrent.committed, true);
-    result.rowStale = yield* sink.writeIfProviderThreadUnchanged({
-      expected: { ...payloads.providerThread, lastRunOrdinal: 2 },
-      events: [detached("stale-row")],
-    });
-    Assert.equal(result.rowStale.committed, false);
-    result.rowCurrent = yield* sink.writeIfProviderThreadUnchanged({
-      expected: payloads.providerThread,
-      events: [detached("current-row")],
-    });
-    Assert.equal(result.rowCurrent.committed, true);
-    const beforeItemGuard = yield* snapshot;
-    const itemGuardPublications = publications.length;
-    result.itemMissing = yield* sink.writeIfTurnItemUnchanged({
-      expected: { ...payloads.turnItem, id: "item:missing" },
-      events: [detached("missing-item")],
-    });
-    result.itemStale = yield* sink.writeIfTurnItemUnchanged({
-      expected: { ...payloads.turnItem, text: "stale reasoning" },
-      events: [detached("stale-item")],
-    });
-    Assert.deepEqual(result.itemMissing, { committed: false, storedEvents: [] });
-    Assert.deepEqual(result.itemStale, { committed: false, storedEvents: [] });
-    Assert.deepEqual(
-      yield* snapshot,
-      beforeItemGuard,
-      "Failed payload guards cannot mutate any persisted row",
-    );
-    Assert.equal(
-      publications.length,
-      itemGuardPublications,
-      "Failed payload guards cannot publish events",
-    );
-    const changedItem = { ...jsonPayloads.turnItem, text: "Updated without changing timestamp" };
-    result.itemCurrent = yield* sink.writeIfTurnItemUnchanged({
-      expected: payloads.turnItem,
-      events: [makeEvent("turn-item.updated", changedItem, { id: "event:item-guard-update" })],
-    });
-    Assert.equal(result.itemCurrent.committed, true);
-    const afterItemGuard = publications.length;
-    result.itemChanged = yield* sink.writeIfTurnItemUnchanged({
-      expected: payloads.turnItem,
-      events: [detached("changed-item")],
-    });
-    Assert.deepEqual(result.itemChanged, { committed: false, storedEvents: [] });
-    Assert.equal(publications.length, afterItemGuard);
-
-    const unlessInterruptRequested = {
-      requestId: "item:interrupt-request",
-      resultId: "item:interrupt-result",
-    };
-    result.interruptAbsent = yield* sink.writeIfRunCurrent({
-      ...runGuard,
-      unlessInterruptRequested,
-      events: [detached("before-interrupt")],
-    });
-    Assert.equal(result.interruptAbsent.committed, true);
-    yield* sink.write({
-      events: [
-        makeEvent(
-          "turn-item.updated",
-          {
-            ...jsonPayloads.turnItem,
-            id: unlessInterruptRequested.requestId,
-            text: "Interrupt requested",
-          },
-          { id: "event:interrupt-request" },
-        ),
-      ],
-    });
-    const beforeInterruptGuard = yield* snapshot;
-    const interruptPublications = publications.length;
-    result.interruptPending = yield* sink.writeIfRunCurrent({
-      ...runGuard,
-      unlessInterruptRequested,
-      events: [detached("pending-interrupt")],
-      effects: [pending("blocked-interrupt-effect")],
-    });
-    Assert.deepEqual(result.interruptPending, { committed: false, storedEvents: [] });
-    Assert.deepEqual(
-      yield* snapshot,
-      beforeInterruptGuard,
-      "A pending interrupt cannot append events or outbox effects",
-    );
-    Assert.equal(
-      publications.length,
-      interruptPublications,
-      "A pending interrupt cannot publish rejected events",
-    );
-    Assert.ok(Option.isNone(yield* outbox.get("blocked-interrupt-effect")));
-    yield* sink.write({
-      events: [
-        makeEvent(
-          "turn-item.updated",
-          {
-            ...jsonPayloads.turnItem,
-            id: unlessInterruptRequested.resultId,
-            text: "Interrupt completed",
-          },
-          { id: "event:interrupt-result" },
-        ),
-      ],
-    });
-    result.interruptCompleted = yield* sink.writeIfRunCurrent({
-      ...runGuard,
-      unlessInterruptRequested,
-      events: [detached("after-interrupt")],
-    });
-    Assert.equal(result.interruptCompleted.committed, true);
-
-    result.nativeOwned = yield* sink.write({
-      unlessNativeThreadOwned: { ...payloads.providerThread, appThreadId: "thread:other" },
-      events: [detached("owned-native")],
-    });
-    Assert.deepEqual(result.nativeOwned, []);
-    result.nativeSameOwner = yield* sink.write({
-      unlessNativeThreadOwned: payloads.providerThread,
-      events: [detached("same-native-owner")],
-    });
-    Assert.equal(result.nativeSameOwner.length, 1);
-
-    result.pullRequest = yield* sink.write({ events: [pullRequestLinkUpdate] });
-    result.position = yield* sink.write({
-      events: [
-        makeEvent(
-          "turn-item.updated",
-          { ...jsonPayloads.turnItem, ordinal: 999999 },
-          { id: "position:repeat" },
-        ),
-      ],
-    });
-    Assert.equal(
-      result.position[0].event.payload.ordinal,
-      result.created.storedEvents.find((record) => record.event.type === "turn-item.updated").event
-        .payload.ordinal,
-    );
-    const beforeConstraint = yield* snapshot;
-    yield* expectFailure(
-      sink.commitCommand(
-        command(
-          "duplicate-run",
-          [
-            makeEvent(
-              "run.created",
-              { ...jsonPayloads.run, id: "run:duplicate" },
-              { id: "duplicate-run:event" },
-            ),
-          ],
-          [pending("duplicate-run:effect")],
-        ),
+  const runGuard = {
+    threadId: "thread:main",
+    runId: "run:main",
+    activeAttemptId: "attempt:main",
+    expectedStatus: "running",
+  };
+  result.runStale = yield* sink.writeIfRunCurrent({
+    ...runGuard,
+    activeAttemptId: "attempt:stale",
+    events: [detached("stale-run")],
+  });
+  NodeAssert.equal(result.runStale.committed, false);
+  result.runCurrent = yield* sink.writeIfRunCurrent({
+    ...runGuard,
+    events: [detached("current-run")],
+    effects: [pending("current-effect")],
+  });
+  NodeAssert.equal(result.runCurrent.committed, true);
+  const owner = {
+    providerThreadId: "provider:main",
+    runId: "run:main",
+    activeAttemptId: "attempt:main",
+    expectedLastRunOrdinal: 1,
+  };
+  result.ownerStale = yield* sink.writeIfProviderThreadOwner({
+    ...owner,
+    expectedLastRunOrdinal: 2,
+    events: [detached("stale-owner")],
+  });
+  NodeAssert.equal(result.ownerStale.committed, false);
+  result.ownerCurrent = yield* sink.writeIfProviderThreadOwner({
+    ...owner,
+    events: [detached("current-owner")],
+  });
+  NodeAssert.equal(result.ownerCurrent.committed, true);
+  result.rowStale = yield* sink.writeIfProviderThreadUnchanged({
+    expected: { ...payloads.providerThread, lastRunOrdinal: 2 },
+    events: [detached("stale-row")],
+  });
+  NodeAssert.equal(result.rowStale.committed, false);
+  result.rowCurrent = yield* sink.writeIfProviderThreadUnchanged({
+    expected: payloads.providerThread,
+    events: [detached("current-row")],
+  });
+  NodeAssert.equal(result.rowCurrent.committed, true);
+  const beforeSubagentGuard = yield* snapshot;
+  const subagentGuardPublications = publications.length;
+  result.subagentMissing = yield* sink.writeIfSubagentUnchanged({
+    expected: { ...payloads.subagent, id: "subagent:missing" },
+    events: [detached("missing-subagent")],
+  });
+  result.subagentStale = yield* sink.writeIfSubagentUnchanged({
+    expected: { ...payloads.subagent, progress: "stale progress" },
+    events: [detached("stale-subagent")],
+  });
+  NodeAssert.deepEqual(result.subagentMissing, {
+    committed: false,
+    storedEvents: [],
+  });
+  NodeAssert.deepEqual(result.subagentStale, {
+    committed: false,
+    storedEvents: [],
+  });
+  NodeAssert.deepEqual(yield* snapshot, beforeSubagentGuard);
+  NodeAssert.equal(publications.length, subagentGuardPublications);
+  result.subagentCurrent = yield* sink.writeIfSubagentUnchanged({
+    expected: payloads.subagent,
+    events: [
+      makeEvent(
+        "subagent.updated",
+        {
+          ...jsonPayloads.subagent,
+          progress: "Updated without changing timestamp",
+        },
+        { id: "event:subagent-guard-update" },
       ),
-    );
-    Assert.deepEqual(
-      yield* snapshot,
-      beforeConstraint,
-      "A projection uniqueness failure must undo receipt and event allocation",
-    );
+    ],
+  });
+  NodeAssert.equal(result.subagentCurrent.committed, true);
+  const afterSubagentGuard = publications.length;
+  result.subagentChanged = yield* sink.writeIfSubagentUnchanged({
+    expected: payloads.subagent,
+    events: [detached("changed-subagent")],
+  });
+  NodeAssert.deepEqual(result.subagentChanged, {
+    committed: false,
+    storedEvents: [],
+  });
+  NodeAssert.equal(publications.length, afterSubagentGuard);
 
-    const cohort = { disposition: "open", nextGeneration: 1, delivery: null };
-    yield* sink.write({
-      events: [
-        makeEvent(
-          "run.updated",
-          {
-            ...jsonPayloads.run,
-            delegatedCompletion: cohort,
-            restartCancelledBackgroundWork: [{ kind: "shell", label: "Fixture shell" }],
-          },
-          { id: "sparse:run" },
-        ),
-        makeEvent(
-          "subagent.updated",
-          {
-            ...jsonPayloads.subagent,
-            completionDelivery: { state: "pending", observedByRunId: null },
-          },
-          { id: "sparse:subagent" },
-        ),
-        makeEvent(
-          "provider-turn.updated",
-          { ...jsonPayloads.providerTurn, tokenUsage: { usedTokens: 3, updatedAt: fixedTime } },
-          { id: "sparse:turn" },
-        ),
-      ],
-    });
-    result.sparse = yield* sink.write({
-      events: [
-        makeEvent("run.updated", jsonPayloads.run, { id: "sparse:run:omitted" }),
-        makeEvent("subagent.updated", jsonPayloads.subagent, { id: "sparse:subagent:omitted" }),
-        makeEvent("provider-turn.updated", jsonPayloads.providerTurn, {
-          id: "sparse:turn:omitted",
-        }),
-      ],
-    });
-    result.delegatedOnly = yield* sink.writeWithEffects({
-      updateDelegatedCompletionOnly: true,
-      events: [
-        makeEvent(
-          "run.updated",
-          {
-            ...jsonPayloads.run,
-            status: "failed",
-            delegatedCompletion: { ...cohort, nextGeneration: 2 },
-          },
-          { id: "delegated-only:event" },
-        ),
-      ],
-      effects: [],
-    });
-    Assert.equal(
-      result.delegatedOnly[0].event.payload.status,
-      "running",
-      "Delegated-only merge must retain the stored lifecycle",
-    );
-    Assert.equal(
-      result.delegatedOnly[0].event.payload.restartCancelledBackgroundWork[0].kind,
-      "shell",
-    );
-    result.background = yield* sink.write({
-      events: [
-        makeEvent(
-          "run.background-work-cancelled",
-          {
-            runId: "run:main",
-            restartCancelledBackgroundWork: [
-              { kind: "task", label: "Fixture task", awaited: true },
+  const threadTable = "orchestration_v2_projection_threads";
+  const beforeVisit = (yield* snapshot)[threadTable][0];
+  const visitOpens = { openedAt: Date.parse(fixedTime), score: 2, picks: [] };
+  yield* sink.write({
+    events: [
+      makeEvent(
+        "thread.visit-recorded",
+        {
+          lastVisitedAt: "2026-11-10T13:00:00.000Z",
+          opens: visitOpens,
+        },
+        {
+          id: "event:visit-with-opens",
+          occurredAt: "2026-11-10T13:00:00.000Z",
+        },
+      ),
+    ],
+  });
+  yield* sink.write({
+    events: [
+      makeEvent(
+        "thread.visit-recorded",
+        {
+          lastVisitedAt: "2026-11-10T14:00:00.000Z",
+        },
+        {
+          id: "event:visit-preserves-opens",
+          occurredAt: "2026-11-10T14:00:00.000Z",
+        },
+      ),
+    ],
+  });
+  const afterVisit = (yield* snapshot)[threadTable][0];
+  NodeAssert.equal(afterVisit.updated_at, beforeVisit.updated_at);
+  NodeAssert.equal(
+    JSON.parse(afterVisit.payload_json).updatedAt,
+    JSON.parse(beforeVisit.payload_json).updatedAt,
+  );
+  NodeAssert.equal(JSON.parse(afterVisit.payload_json).lastVisitedAt, "2026-11-10T14:00:00.000Z");
+  NodeAssert.deepEqual(JSON.parse(afterVisit.payload_json).opens, visitOpens);
+  yield* sink.write({
+    events: [
+      makeEvent(
+        "thread.visit-recorded",
+        {
+          lastVisitedAt: null,
+          opens: null,
+        },
+        { id: "event:visit-clears-opens" },
+      ),
+    ],
+  });
+  const clearedVisit = JSON.parse((yield* snapshot)[threadTable][0].payload_json);
+  NodeAssert.equal(clearedVisit.lastVisitedAt, null);
+  NodeAssert.equal(clearedVisit.opens, null);
+
+  const beforeItemGuard = yield* snapshot;
+  const itemGuardPublications = publications.length;
+  result.itemMissing = yield* sink.writeIfTurnItemUnchanged({
+    expected: { ...payloads.turnItem, id: "item:missing" },
+    events: [detached("missing-item")],
+  });
+  result.itemStale = yield* sink.writeIfTurnItemUnchanged({
+    expected: { ...payloads.turnItem, text: "stale reasoning" },
+    events: [detached("stale-item")],
+  });
+  NodeAssert.deepEqual(result.itemMissing, {
+    committed: false,
+    storedEvents: [],
+  });
+  NodeAssert.deepEqual(result.itemStale, { committed: false, storedEvents: [] });
+  NodeAssert.deepEqual(
+    yield* snapshot,
+    beforeItemGuard,
+    "Failed payload guards cannot mutate any persisted row",
+  );
+  NodeAssert.equal(
+    publications.length,
+    itemGuardPublications,
+    "Failed payload guards cannot publish events",
+  );
+  const changedItem = {
+    ...jsonPayloads.turnItem,
+    text: "Updated without changing timestamp",
+  };
+  result.itemCurrent = yield* sink.writeIfTurnItemUnchanged({
+    expected: payloads.turnItem,
+    events: [
+      makeEvent("turn-item.updated", changedItem, {
+        id: "event:item-guard-update",
+      }),
+    ],
+  });
+  NodeAssert.equal(result.itemCurrent.committed, true);
+  const afterItemGuard = publications.length;
+  result.itemChanged = yield* sink.writeIfTurnItemUnchanged({
+    expected: payloads.turnItem,
+    events: [detached("changed-item")],
+  });
+  NodeAssert.deepEqual(result.itemChanged, {
+    committed: false,
+    storedEvents: [],
+  });
+  NodeAssert.equal(publications.length, afterItemGuard);
+
+  const unlessInterruptRequested = {
+    requestId: "item:interrupt-request",
+    resultId: "item:interrupt-result",
+  };
+  result.interruptAbsent = yield* sink.writeIfRunCurrent({
+    ...runGuard,
+    unlessInterruptRequested,
+    events: [detached("before-interrupt")],
+  });
+  NodeAssert.equal(result.interruptAbsent.committed, true);
+  yield* sink.write({
+    events: [
+      makeEvent(
+        "turn-item.updated",
+        {
+          ...jsonPayloads.turnItem,
+          id: unlessInterruptRequested.requestId,
+          text: "Interrupt requested",
+        },
+        { id: "event:interrupt-request" },
+      ),
+    ],
+  });
+  const beforeInterruptGuard = yield* snapshot;
+  const interruptPublications = publications.length;
+  result.interruptPending = yield* sink.writeIfRunCurrent({
+    ...runGuard,
+    unlessInterruptRequested,
+    events: [detached("pending-interrupt")],
+    effects: [pending("blocked-interrupt-effect")],
+  });
+  NodeAssert.deepEqual(result.interruptPending, {
+    committed: false,
+    storedEvents: [],
+  });
+  NodeAssert.deepEqual(
+    yield* snapshot,
+    beforeInterruptGuard,
+    "A pending interrupt cannot append events or outbox effects",
+  );
+  NodeAssert.equal(
+    publications.length,
+    interruptPublications,
+    "A pending interrupt cannot publish rejected events",
+  );
+  NodeAssert.ok(Option.isNone(yield* outbox.get("blocked-interrupt-effect")));
+  yield* sink.write({
+    events: [
+      makeEvent(
+        "turn-item.updated",
+        {
+          ...jsonPayloads.turnItem,
+          id: unlessInterruptRequested.resultId,
+          text: "Interrupt completed",
+        },
+        { id: "event:interrupt-result" },
+      ),
+    ],
+  });
+  result.interruptCompleted = yield* sink.writeIfRunCurrent({
+    ...runGuard,
+    unlessInterruptRequested,
+    events: [detached("after-interrupt")],
+  });
+  NodeAssert.equal(result.interruptCompleted.committed, true);
+
+  result.nativeOwned = yield* sink.write({
+    unlessNativeThreadOwned: {
+      ...payloads.providerThread,
+      appThreadId: "thread:other",
+    },
+    events: [detached("owned-native")],
+  });
+  NodeAssert.deepEqual(result.nativeOwned, []);
+  result.nativeSameOwner = yield* sink.write({
+    unlessNativeThreadOwned: payloads.providerThread,
+    events: [detached("same-native-owner")],
+  });
+  NodeAssert.equal(result.nativeSameOwner.length, 1);
+
+  result.pullRequest = yield* sink.write({ events: [pullRequestLinkUpdate] });
+  result.position = yield* sink.write({
+    events: [
+      makeEvent(
+        "turn-item.updated",
+        { ...jsonPayloads.turnItem, ordinal: 999999 },
+        { id: "position:repeat" },
+      ),
+    ],
+  });
+  NodeAssert.equal(
+    result.position[0].event.payload.ordinal,
+    result.created.storedEvents.find((record) => record.event.type === "turn-item.updated").event
+      .payload.ordinal,
+  );
+  const beforeConstraint = yield* snapshot;
+  yield* expectFailure(
+    sink.commitCommand(
+      command(
+        "duplicate-run",
+        [
+          makeEvent(
+            "run.created",
+            { ...jsonPayloads.run, id: "run:duplicate" },
+            { id: "duplicate-run:event" },
+          ),
+        ],
+        [pending("duplicate-run:effect")],
+      ),
+    ),
+  );
+  NodeAssert.deepEqual(
+    yield* snapshot,
+    beforeConstraint,
+    "A projection uniqueness failure must undo receipt and event allocation",
+  );
+
+  const cohort = { disposition: "open", nextGeneration: 1, delivery: null };
+  yield* sink.write({
+    events: [
+      makeEvent(
+        "run.updated",
+        {
+          ...jsonPayloads.run,
+          delegatedCompletion: cohort,
+          restartCancelledBackgroundWork: [{ kind: "shell", label: "Fixture shell" }],
+        },
+        { id: "sparse:run" },
+      ),
+      makeEvent(
+        "subagent.updated",
+        {
+          ...jsonPayloads.subagent,
+          completionDelivery: { state: "pending", observedByRunId: null },
+        },
+        { id: "sparse:subagent" },
+      ),
+      makeEvent(
+        "provider-turn.updated",
+        {
+          ...jsonPayloads.providerTurn,
+          tokenUsage: { usedTokens: 3, updatedAt: fixedTime },
+        },
+        { id: "sparse:turn" },
+      ),
+    ],
+  });
+  result.sparse = yield* sink.write({
+    events: [
+      makeEvent("run.updated", jsonPayloads.run, {
+        id: "sparse:run:omitted",
+      }),
+      makeEvent("subagent.updated", jsonPayloads.subagent, {
+        id: "sparse:subagent:omitted",
+      }),
+      makeEvent("provider-turn.updated", jsonPayloads.providerTurn, {
+        id: "sparse:turn:omitted",
+      }),
+    ],
+  });
+  result.delegatedOnly = yield* sink.writeWithEffects({
+    updateDelegatedCompletionOnly: true,
+    events: [
+      makeEvent(
+        "run.updated",
+        {
+          ...jsonPayloads.run,
+          status: "failed",
+          delegatedCompletion: { ...cohort, nextGeneration: 2 },
+        },
+        { id: "delegated-only:event" },
+      ),
+    ],
+    effects: [],
+  });
+  NodeAssert.equal(
+    result.delegatedOnly[0].event.payload.status,
+    "running",
+    "Delegated-only merge must retain the stored lifecycle",
+  );
+  NodeAssert.equal(
+    result.delegatedOnly[0].event.payload.restartCancelledBackgroundWork[0].kind,
+    "shell",
+  );
+  result.background = yield* sink.write({
+    events: [
+      makeEvent(
+        "run.background-work-cancelled",
+        {
+          runId: "run:main",
+          restartCancelledBackgroundWork: [{ kind: "task", label: "Fixture task", awaited: true }],
+        },
+        { id: "background:cancelled" },
+      ),
+    ],
+  });
+  yield* sink.write({
+    events: [
+      makeEvent(
+        "runtime-request.updated",
+        {
+          ...jsonPayloads.request,
+          status: "resolved",
+          resolvedAt: fixedTime,
+        },
+        { id: "request:resolved" },
+      ),
+    ],
+  });
+  result.staleCancellation = yield* sink.write({
+    guardPendingUserInputCancellations: true,
+    events: [
+      makeEvent(
+        "runtime-request.updated",
+        {
+          ...jsonPayloads.request,
+          status: "cancelled",
+          resolvedAt: fixedTime,
+        },
+        { id: "request:stale-cancel" },
+      ),
+      makeEvent(
+        "node.updated",
+        { ...jsonPayloads.node, status: "cancelled" },
+        { id: "node:stale-cancel" },
+      ),
+      detached("cancellation:retained"),
+    ],
+  });
+  NodeAssert.deepEqual(
+    result.staleCancellation.map((row) => row.event.id),
+    ["cancellation:retained"],
+  );
+  const beforeRollback = yield* snapshot;
+  const publishedBefore = publications.length;
+  yield* expectFailure(
+    sink.withProviderBatch(
+      Effect.gen(function* () {
+        yield* sink.commitProjectCommand(projectCommand("rollback:project", "project:rolled-back"));
+        yield* sink.commitCommand(
+          command(
+            "rollback:command",
+            [
+              makeEvent(
+                "turn-item.updated",
+                { ...jsonPayloads.turnItem, id: "item:rolled-back" },
+                { id: "rollback:position" },
+              ),
+              detached("rollback:event"),
             ],
-          },
-          { id: "background:cancelled" },
-        ),
-      ],
-    });
-    yield* sink.write({
-      events: [
-        makeEvent(
-          "runtime-request.updated",
-          {
-            ...jsonPayloads.request,
-            status: "resolved",
-            resolvedAt: fixedTime,
-          },
-          { id: "request:resolved" },
-        ),
-      ],
-    });
-    result.staleCancellation = yield* sink.write({
-      guardPendingUserInputCancellations: true,
-      events: [
-        makeEvent(
-          "runtime-request.updated",
-          { ...jsonPayloads.request, status: "cancelled", resolvedAt: fixedTime },
-          { id: "request:stale-cancel" },
-        ),
-        makeEvent(
-          "node.updated",
-          { ...jsonPayloads.node, status: "cancelled" },
-          { id: "node:stale-cancel" },
-        ),
-        detached("cancellation:retained"),
-      ],
-    });
-    Assert.deepEqual(
-      result.staleCancellation.map((row) => row.event.id),
-      ["cancellation:retained"],
-    );
-    const beforeRollback = yield* snapshot;
-    const publishedBefore = publications.length;
-    yield* expectFailure(
-      sink.withProviderBatch(
-        Effect.gen(function* () {
-          yield* sink.commitProjectCommand(
-            projectCommand("rollback:project", "project:rolled-back"),
-          );
-          yield* sink.commitCommand(
-            command(
-              "rollback:command",
-              [
-                makeEvent(
-                  "turn-item.updated",
-                  { ...jsonPayloads.turnItem, id: "item:rolled-back" },
-                  { id: "rollback:position" },
-                ),
-                detached("rollback:event"),
-              ],
-              [pending("rollback:effect")],
-            ),
-          );
-          return yield* Effect.fail("controlled whole-boundary rollback");
-        }),
-      ),
-    );
-    Assert.deepEqual(yield* snapshot, beforeRollback);
-    Assert.equal(publications.length, publishedBefore);
-    Assert.ok(Option.isNone(yield* receipts.getByCommandId("command:rollback:command")));
-    Assert.ok(Option.isNone(yield* projects.get("project:rolled-back")));
-
-    result.batch = yield* sink.withProviderBatch(
-      Effect.gen(function* () {
-        const first = yield* sink.write({ events: [detached("batch:first")] });
-        Assert.equal(publications.length, publishedBefore);
-        const second = yield* sink.withProviderBatch(
-          sink.writeWithEffects({
-            events: [detached("batch:second")],
-            effects: [pending("batch:effect")],
-          }),
+            [pending("rollback:effect")],
+          ),
         );
-        Assert.equal(publications.length, publishedBefore);
-        return [...first, ...second];
+        return yield* Effect.fail("controlled whole-boundary rollback");
       }),
-    );
-    Assert.deepEqual(
-      publications.slice(publishedBefore).map((row) => row.id),
-      ["batch:first", "batch:second"],
-    );
-    const waiting = yield* Effect.forkScoped(outbox.awaitCancellation("initial-effect"));
-    result.cancelled = yield* sink.commitCommand({
-      ...command("cancel", [detached("cancel:event")]),
-      cancelUnsettledEffects: {
-        effectTypes: ["terminal.cleanup"],
-        reason: "controlled cancellation",
-      },
-    });
-    Assert.ok(result.cancelled.cancelledEffectCount >= 1);
-    yield* Fiber.join(waiting);
-    Assert.equal((yield* outbox.get("initial-effect")).value.status, "cancelled");
+    ),
+  );
+  NodeAssert.deepEqual(yield* snapshot, beforeRollback);
+  NodeAssert.equal(publications.length, publishedBefore);
+  NodeAssert.ok(Option.isNone(yield* receipts.getByCommandId("command:rollback:command")));
+  NodeAssert.ok(Option.isNone(yield* projects.get("project:rolled-back")));
 
-    // Subscribe before the write; a real replay/live subscription must see its commit exactly once.
-    const ready = yield* Deferred.make();
-    const originalLatest = events.latestSequence;
-    const afterSequence = yield* sink.latestSequence();
-    events.latestSequence = (input) =>
-      originalLatest(input).pipe(Effect.tap(() => Deferred.succeed(ready, undefined)));
-    const live = yield* Effect.forkScoped(
-      collect(
-        sink
-          .stream({
-            afterSequence,
-            threadId: "thread:main",
-            eventType: "provider-session.detached",
-          })
-          .pipe(Stream.take(1)),
-      ),
-    );
-    yield* Deferred.await(ready);
-    events.latestSequence = originalLatest;
-    result.liveWrite = yield* sink.write({ events: [detached("live:event")] });
-    result.live = yield* Fiber.join(live);
-    Assert.deepEqual(result.live, result.liveWrite);
-    const providerSource = Stream.fromArray(
-      Array.from({ length: 12 }, (_, index) => ({ type: "message.updated", index })),
-    );
-    yield* sink.consumeProviderEvents(
-      providerSource,
-      (raw) => sink.write({ events: [detached(`provider:${raw.index}`)] }).pipe(Effect.asVoid),
-      Effect.succeed(false),
-      Effect.succeed(true),
-    );
-    result.byCommand = yield* collect(sink.readByCommandId({ commandId: "command:create" }));
-    Assert.deepEqual(result.byCommand, result.created.storedEvents);
-    result.replayAll = yield* collect(events.read());
-    result.latest = yield* sink.latestSequence();
-    result.latestThread = yield* sink.latestSequence({ threadId: "thread:main" });
-    result.filtered = yield* collect(
+  result.batch = yield* sink.withProviderBatch(
+    Effect.gen(function* () {
+      const first = yield* sink.write({ events: [detached("batch:first")] });
+      NodeAssert.equal(publications.length, publishedBefore);
+      const second = yield* sink.withProviderBatch(
+        sink.writeWithEffects({
+          events: [detached("batch:second")],
+          effects: [pending("batch:effect")],
+        }),
+      );
+      NodeAssert.equal(publications.length, publishedBefore);
+      return [...first, ...second];
+    }),
+  );
+  NodeAssert.deepEqual(
+    publications.slice(publishedBefore).map((row) => row.id),
+    ["batch:first", "batch:second"],
+  );
+  const waiting = yield* Effect.forkScoped(outbox.awaitCancellation("initial-effect"));
+  result.cancelled = yield* sink.commitCommand({
+    ...command("cancel", [detached("cancel:event")]),
+    cancelUnsettledEffects: {
+      effectTypes: ["terminal.cleanup"],
+      reason: "controlled cancellation",
+    },
+  });
+  NodeAssert.ok(result.cancelled.cancelledEffectCount >= 1);
+  yield* Fiber.join(waiting);
+  NodeAssert.equal((yield* outbox.get("initial-effect")).value.status, "cancelled");
+
+  // Subscribe before the write; a real replay/live subscription must see its commit exactly once.
+  const ready = yield* Deferred.make();
+  const originalLatest = events.latestSequence;
+  const afterSequence = yield* sink.latestSequence();
+  events.latestSequence = (input) =>
+    originalLatest(input).pipe(Effect.tap(() => Deferred.succeed(ready, undefined)));
+  const live = yield* Effect.forkScoped(
+    collect(
       sink
-        .stream({ threadId: "thread:main", eventType: "provider-session.detached", bounded: true })
-        .pipe(
-          Stream.take(
-            result.replayAll.filter((row) => row.event.type === "provider-session.detached").length,
-          ),
+        .stream({
+          afterSequence,
+          threadId: "thread:main",
+          eventType: "provider-session.detached",
+        })
+        .pipe(Stream.take(1)),
+    ),
+  );
+  yield* Deferred.await(ready);
+  events.latestSequence = originalLatest;
+  result.liveWrite = yield* sink.write({ events: [detached("live:event")] });
+  result.live = yield* Fiber.join(live);
+  NodeAssert.deepEqual(result.live, result.liveWrite);
+  const providerSource = Stream.fromArray(
+    Array.from({ length: 12 }, (_, index) => ({
+      type: "message.updated",
+      index,
+    })),
+  );
+  yield* sink.consumeProviderEvents(
+    providerSource,
+    (raw) => sink.write({ events: [detached(`provider:${raw.index}`)] }).pipe(Effect.asVoid),
+    Effect.succeed(false),
+    Effect.succeed(true),
+  );
+  result.byCommand = yield* collect(sink.readByCommandId({ commandId: "command:create" }));
+  NodeAssert.deepEqual(result.byCommand, result.created.storedEvents);
+  result.replayAll = yield* collect(events.read());
+  result.latest = yield* sink.latestSequence();
+  result.latestThread = yield* sink.latestSequence({
+    threadId: "thread:main",
+  });
+  result.filtered = yield* collect(
+    sink
+      .stream({
+        threadId: "thread:main",
+        eventType: "provider-session.detached",
+        bounded: true,
+      })
+      .pipe(
+        Stream.take(
+          result.replayAll.filter((row) => row.event.type === "provider-session.detached").length,
         ),
-    );
-    result.snapshot = yield* snapshot;
-    result.publications = publications;
-    Assert.deepEqual(
-      publications.map((row) => row.sequence),
-      [...publications.map((row) => row.sequence)].sort((a, b) => a - b),
-    );
-    return normalized(result);
-  });
-}
-
-function nativeOwnerCases({ sink, client, snapshot, publications }) {
-  return Effect.gen(function* () {
-    const initial = yield* snapshot;
-    yield* expectFailure(
-      client.withTransaction(
-        Effect.gen(function* () {
-          yield* sink.commitCommand(
-            command(
-              "ambient:rollback",
-              [detached("ambient:rollback")],
-              [pending("ambient:rollback")],
-            ),
-          );
-          Assert.equal(publications.length, 0);
-          return yield* Effect.fail("ambient owner rolled back");
-        }),
       ),
-    );
-    Assert.equal(publications.length, 0);
-    Assert.deepEqual(yield* snapshot, initial);
-    yield* client.withTransaction(
+  );
+  result.snapshot = yield* snapshot;
+  result.publications = publications;
+  NodeAssert.deepEqual(
+    publications.map((row) => row.sequence),
+    publications.map((row) => row.sequence).sort((a, b) => a - b),
+  );
+  return normalized(result);
+});
+
+const nativeOwnerCases = Effect.fn("checkRedbEventSink.nativeOwnerCases")(function* ({
+  sink,
+  client,
+  snapshot,
+  publications,
+}) {
+  const initial = yield* snapshot;
+  yield* expectFailure(
+    client.withTransaction(
       Effect.gen(function* () {
-        yield* sink.write({ events: [detached("ambient:first")] });
-        yield* expectFailure(
-          client.withTransaction(
-            Effect.gen(function* () {
-              yield* sink.writeWithEffects({
-                events: [detached("ambient:discarded")],
-                effects: [pending("ambient:discarded")],
-              });
-              return yield* Effect.fail("nested owner rolled back");
-            }),
+        yield* sink.commitCommand(
+          command(
+            "ambient:rollback",
+            [detached("ambient:rollback")],
+            [pending("ambient:rollback")],
           ),
         );
-        yield* sink.withProviderBatch(sink.write({ events: [detached("ambient:last")] }));
-        Assert.equal(
-          publications.length,
-          0,
-          "No released savepoint may publish before its root owner commits",
-        );
+        NodeAssert.equal(publications.length, 0);
+        return yield* Effect.fail("ambient owner rolled back");
       }),
-    );
-    Assert.deepEqual(
-      publications.map((row) => row.id),
-      ["ambient:first", "ambient:last"],
-    );
-    const prior = publications.length;
-    yield* sink.withProviderBatch(
-      Effect.gen(function* () {
-        yield* expectFailure(
-          client.withTransaction(
-            sink
-              .write({ events: [detached("batch:savepoint:discarded")] })
-              .pipe(Effect.andThen(Effect.fail("snapshot rolled back"))),
-          ),
-        );
-        yield* sink.write({ events: [detached("batch:savepoint:retained")] });
-      }),
-    );
-    Assert.deepEqual(
-      publications.slice(prior).map((row) => row.id),
-      ["batch:savepoint:retained"],
-    );
-  });
-}
+    ),
+  );
+  NodeAssert.equal(publications.length, 0);
+  NodeAssert.deepEqual(yield* snapshot, initial);
+  yield* client.withTransaction(
+    Effect.gen(function* () {
+      yield* sink.write({ events: [detached("ambient:first")] });
+      yield* expectFailure(
+        client.withTransaction(
+          Effect.gen(function* () {
+            yield* sink.writeWithEffects({
+              events: [detached("ambient:discarded")],
+              effects: [pending("ambient:discarded")],
+            });
+            return yield* Effect.fail("nested owner rolled back");
+          }),
+        ),
+      );
+      yield* sink.withProviderBatch(sink.write({ events: [detached("ambient:last")] }));
+      NodeAssert.equal(
+        publications.length,
+        0,
+        "No released savepoint may publish before its root owner commits",
+      );
+    }),
+  );
+  NodeAssert.deepEqual(
+    publications.map((row) => row.id),
+    ["ambient:first", "ambient:last"],
+  );
+  const prior = publications.length;
+  yield* sink.withProviderBatch(
+    Effect.gen(function* () {
+      yield* expectFailure(
+        client.withTransaction(
+          sink
+            .write({ events: [detached("batch:savepoint:discarded")] })
+            .pipe(Effect.andThen(Effect.fail("snapshot rolled back"))),
+        ),
+      );
+      yield* sink.write({ events: [detached("batch:savepoint:retained")] });
+    }),
+  );
+  NodeAssert.deepEqual(
+    publications.slice(prior).map((row) => row.id),
+    ["batch:savepoint:retained"],
+  );
+});
 
 function nativeFaultCases(faults) {
   return ({ sink, client, snapshot, publications, receipts, projects, outbox }) =>
@@ -869,8 +1021,8 @@ function nativeFaultCases(faults) {
           callbackCount += 1;
         }).pipe(Effect.andThen(sink.write({ events: [detached("busy:event")] }))),
       );
-      Assert.equal(callbackCount, 1, "Writer acquisition retry must never rerun normalization");
-      Assert.equal(faults.busyBegins, 0);
+      NodeAssert.equal(callbackCount, 1, "Writer acquisition retry must never rerun normalization");
+      NodeAssert.equal(faults.busyBegins, 0);
       const beforeUnknown = publications.length;
       faults.frames.length = 0;
       faults.drop = "application_commit";
@@ -895,27 +1047,27 @@ function nativeFaultCases(faults) {
           }),
         ),
       );
-      Assert.equal(
+      NodeAssert.equal(
         faults.frames.filter((frame) => frame.operation === "application_commit").length,
         1,
       );
-      Assert.equal(
+      NodeAssert.equal(
         publications.length,
         beforeUnknown,
         "Unknown durability must not publish success",
       );
-      Assert.ok(Option.isSome(yield* receipts.getByCommandId("command:unknown:command")));
-      Assert.ok(Option.isSome(yield* projects.get("project:unknown")));
-      Assert.ok(Option.isSome(yield* outbox.get("unknown:effect")));
+      NodeAssert.ok(Option.isSome(yield* receipts.getByCommandId("command:unknown:command")));
+      NodeAssert.ok(Option.isSome(yield* projects.get("project:unknown")));
+      NodeAssert.ok(Option.isSome(yield* outbox.get("unknown:effect")));
       const replay = yield* sink.commitCommand(
         command("unknown:command", [detached("unknown:must-not-retry")]),
       );
-      Assert.equal(replay.committed, false);
-      Assert.deepEqual(
+      NodeAssert.equal(replay.committed, false);
+      NodeAssert.deepEqual(
         replay.storedEvents.map((row) => row.event.id),
         ["unknown:position", "unknown:event"],
       );
-      Assert.equal(publications.length, beforeUnknown);
+      NodeAssert.equal(publications.length, beforeUnknown);
       for (const operation of [
         "application_projections_apply",
         "application_release",
@@ -944,18 +1096,18 @@ function nativeFaultCases(faults) {
                 ).pipe(Effect.catch(() => Effect.void)),
               );
         yield* expectFailure(body);
-        Assert.equal(
+        NodeAssert.equal(
           faults.drop,
           undefined,
           `The real ${operation} response must have been discarded`,
         );
-        Assert.equal(publications.length, published);
-        Assert.deepEqual(
+        NodeAssert.equal(publications.length, published);
+        NodeAssert.deepEqual(
           yield* snapshot,
           before,
           `Uncertain ${operation} must discard the complete transaction`,
         );
-        Assert.equal(
+        NodeAssert.equal(
           faults.frames.filter((frame) => frame.operation === "application_events_append").length,
           1,
           "An uncertain write must not be replayed through either backend",
@@ -965,14 +1117,14 @@ function nativeFaultCases(faults) {
 }
 
 try {
-  const source = Path.join(fixture.root, "source.sqlite");
-  const retainedPath = Path.join(fixture.root, "retained.sqlite");
-  const upstreamPath = Path.join(fixture.root, "upstream.sqlite");
-  const exported = Path.join(fixture.root, "source.ndjson");
+  const source = NodePath.join(fixture.root, "source.sqlite");
+  const retainedPath = NodePath.join(fixture.root, "retained.sqlite");
+  const upstreamPath = NodePath.join(fixture.root, "upstream.sqlite");
+  const exported = NodePath.join(fixture.root, "source.ndjson");
   await createMigratedSqlite(source);
-  const sourceHash = hash(await FS.readFile(source));
-  await FS.copyFile(source, retainedPath);
-  await FS.copyFile(source, upstreamPath);
+  const sourceHash = hash(await NodeFSP.readFile(source));
+  await NodeFSP.copyFile(source, retainedPath);
+  await NodeFSP.copyFile(source, upstreamPath);
   exportSqliteState({ source, destination: exported });
   nativeRequest(executable, fixture, "initialize", {
     operation: "import_sqlite_application",
@@ -980,13 +1132,13 @@ try {
   });
   const expected = await withServices("upstream", upstreamPath, exercise);
   const retained = await withServices("sqlite", retainedPath, exercise);
-  Assert.deepEqual(
+  NodeAssert.deepEqual(
     retained,
     expected,
     "The shared EventSink algorithm must retain immutable upstream SQLite behavior",
   );
   const actual = await withServices("redb", source, exercise);
-  Assert.deepEqual(
+  NodeAssert.deepEqual(
     actual,
     expected,
     "The real native EventSink must commit the same events, receipts, projections, positions, projects and outbox rows",
@@ -1003,15 +1155,19 @@ try {
   );
   await withServices("redb", source, ({ snapshot, sink }) =>
     Effect.gen(function* () {
-      Assert.deepEqual(yield* snapshot, expected.snapshot);
-      Assert.equal(yield* sink.latestSequence(), expected.latest);
+      NodeAssert.deepEqual(yield* snapshot, expected.snapshot);
+      NodeAssert.equal(yield* sink.latestSequence(), expected.latest);
     }),
   );
   checks.push(
     "Reopening the complete candidate service preserves every committed application row and all managed indexes",
   );
   checks.push(
-    ...(await checkProjectionCodecs({ executable, seedSource: retainedPath, withServices })),
+    ...(await checkProjectionCodecs({
+      executable,
+      seedSource: retainedPath,
+      withServices,
+    })),
   );
   await withServices("redb", source, nativeOwnerCases);
   checks.push(
@@ -1022,7 +1178,7 @@ try {
   checks.push(
     "Known writer-busy responses retry before normalization; lost real commit, apply, savepoint-release and rollback acknowledgements never replay or publish uncertain work",
   );
-  Assert.equal(hash(await FS.readFile(source)), sourceHash);
+  NodeAssert.equal(hash(await NodeFSP.readFile(source)), sourceHash);
   await finishProof({
     executable,
     fixture,

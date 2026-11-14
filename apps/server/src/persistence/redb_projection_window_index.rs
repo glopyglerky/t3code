@@ -349,6 +349,18 @@ fn compact(name: &str, row: &Map<String, Value>, order: RowOrder) -> Result<Meta
                         .is_some_and(|character| tail[character.len_utf8()..].starts_with("task\""))
                 })
             });
+            let send_to_user = lower.find("\"toolname\":\"").is_some_and(|offset| {
+                let suffix = &lower[offset + "\"toolname\":\"".len()..];
+                suffix.match_indices("send").any(|(offset, prefix)| {
+                    let tail = &suffix[offset + prefix.len()..];
+                    tail.chars().next().is_some_and(|first| {
+                        let tail = &tail[first.len_utf8()..];
+                        tail.strip_prefix("to").is_some_and(|tail| {
+                            tail.chars().next().is_some_and(|second| tail[second.len_utf8()..].starts_with("user\""))
+                        })
+                    })
+                })
+            });
             retained.insert(
                 "nativeInlineWorkOutput".into(),
                 json!(
@@ -356,7 +368,9 @@ fn compact(name: &str, row: &Map<String, Value>, order: RowOrder) -> Result<Meta
                         && (lower.contains("htmlrender")
                             || lower.contains("t3mcpapp")
                             || lower.contains("\"viewedimagepath\"")
-                            || delegate)
+                            || delegate
+                            || send_to_user
+                            || lower.contains("sentmessage"))
                 ),
             );
         }

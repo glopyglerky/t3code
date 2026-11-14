@@ -71,6 +71,13 @@ export const make = Effect.gen(function* () {
         Effect.mapError(toAuxiliaryReadError("pendingThreadCleanup")),
       ),
     ),
+    enabledScheduledThreadIds: sql<{ readonly thread_id: string }>`
+      SELECT thread_id FROM scheduled_tasks WHERE enabled = 1 AND thread_id IS NOT NULL
+    `.pipe(
+      NodeSqliteClient.readOnly,
+      Effect.map((rows) => rows.map((row) => row.thread_id)),
+      Effect.mapError(toAuxiliaryReadError("enabledScheduledThreadIds")),
+    ),
     nonStoppedProviderSessions: sql<typeof ProviderSessionRow.Type>`
       SELECT payload_json FROM orchestration_v2_projection_provider_sessions WHERE status != 'stopped'
     `.pipe(

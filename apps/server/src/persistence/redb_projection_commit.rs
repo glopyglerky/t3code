@@ -220,6 +220,7 @@ pub enum ProjectionGuard {
         provider_thread_id: String,
         expected_json: String,
     },
+    SubagentUnchanged { subagent_id: String, expected_json: String },
     TurnItemUnchanged {
         turn_item_id: String,
         expected_json: String,
@@ -1303,6 +1304,7 @@ fn thread_event(event: &str) -> bool {
             | "thread.active-reordered"
             | "thread.tags-updated"
             | "thread.visited"
+            | "thread.visit-recorded"
             | "thread.marked-unread"
             | "thread.metadata-updated"
             | "thread.pull-request-synced"
@@ -1576,6 +1578,7 @@ async fn normalization_context(
     payload: &Map<String, Value>,
 ) -> Result<Option<ProjectionNormalization>> {
     let (name, id, kind) = match event.event_type.as_str() {
+        "thread.visit-recorded" => (THREADS, event.thread_id.as_str(), "thread"),
         "provider-turn.updated" if !payload.contains_key("tokenUsage") => {
             (TURNS, payload_string(payload, "id")?, "provider_turn")
         }
@@ -1636,6 +1639,18 @@ async fn apply_event(session: &mut Session, event: ProjectionApply) -> Result<()
     let context = normalization_context(session, &event, payload).await?;
     let normalized = normalized_payload(&event, context.as_ref())?;
     match event.event_type.as_str() {
+        "thread.visit-recorded" => {
+            let previous = normalized.as_deref().ok_or_else(|| invalid("projection thread does not exist"))?;
+            let fields = object_fields(&event.payload_json)?.ok_or(Error::IncompatibleStore)?;
+            let visited = field(&fields, "lastVisitedAt").ok_or_else(|| invalid("thread visit timestamp is missing"))?;
+            let mut updated = set_payload_field(previous, "lastVisitedAt", visited.into())?;
+            if let Some(opens) = field(&fields, "opens") {
+                updated = set_payload_field(&updated, "opens", opens.into())?;
+            }
+            let value: Value = serde_json::from_str(&updated).map_err(crate::json_error)?;
+            let updated_event = ProjectionApply { event_type: "thread.visited".into(), payload_json: updated, normalization: None, ..event.clone() };
+            upsert_projection(session, &updated_event, value.as_object().ok_or(Error::IncompatibleStore)?, THREADS, None).await?;
+        }
         "provider-session.detached" => {
             let id = payload_string(payload, "providerSessionId")?;
             delete_row(
@@ -1850,6 +1865,10 @@ async fn guard(session: &mut Session, guard: ProjectionGuard) -> Result<bool> {
                 return Ok(false);
             };
             Ok(text(&provider.row, "payload_json")? == expected_json)
+        }
+        ProjectionGuard::SubagentUnchanged { subagent_id, expected_json } => {
+            let Some(row) = read_row(tx, catalog, SUBAGENTS, &[text_cell(&subagent_id)]).await? else { return Ok(false); };
+            Ok(text(&row.row, "payload_json")? == expected_json)
         }
         ProjectionGuard::TurnItemUnchanged { turn_item_id, expected_json } => {
             let Some(item) = read_row(tx, catalog, ITEMS, &[text_cell(&turn_item_id)]).await? else {

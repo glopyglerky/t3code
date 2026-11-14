@@ -11,14 +11,18 @@ use crate::application::{
     schema_key, table,
 };
 use crate::application_rows::{
-    managed_marker, nullable, nullable_cell, read_row, text, text_cell, validate_table, write_row,
+    delete_row, int_cell, integer, managed_marker, nullable, nullable_cell, read_row, text,
+    text_cell, validate_table, write_row,
 };
 use crate::backend::Transaction;
 use crate::{Error, Result, Store, request_digest, store_key};
 
 const SESSIONS: &str = "auth_sessions";
 const LINKS: &str = "auth_pairing_links";
-const SESSION_COLUMNS: [&str; 16] = [
+const DEVICES: &str = "auth_connect_devices";
+const TABLES: [&str; 3] = [SESSIONS, LINKS, DEVICES];
+const DEVICE_COLUMNS: [&str; 3] = ["proof_key_thumbprint", "client_json", "approved_at"];
+const SESSION_COLUMNS: [&str; 17] = [
     "session_id",
     "subject",
     "scopes",
@@ -35,8 +39,9 @@ const SESSION_COLUMNS: [&str; 16] = [
     "revoked_at",
     "client_surface",
     "client_app_version",
+    "proof_key_thumbprint",
 ];
-const LINK_COLUMNS: [&str; 11] = [
+const LINK_COLUMNS: [&str; 14] = [
     "id",
     "credential",
     "method",
@@ -48,8 +53,11 @@ const LINK_COLUMNS: [&str; 11] = [
     "expires_at",
     "consumed_at",
     "revoked_at",
+    "requires_connect_approval",
+    "requested_client_json",
+    "connect_denied",
 ];
-const MARKER: &str = "auth-v1";
+const MARKER: &str = "auth-v2";
 const PAGE: usize = 128;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -73,6 +81,7 @@ pub struct CreateSession {
     pub client: ClientMetadata,
     pub issued_at: String,
     pub expires_at: String,
+    pub proof_key_thumbprint: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -85,6 +94,8 @@ pub struct CreateLink {
     pub subject: String,
     pub label: Option<String>,
     pub proof_key_thumbprint: Option<String>,
+    #[serde(default)]
+    pub requires_connect_approval: bool,
     pub created_at: String,
     pub expires_at: String,
 }
@@ -104,6 +115,13 @@ pub enum AuthOperation {
     },
     SessionGet {
         session_id: String,
+    },
+    SessionGetProofKey {
+        session_id: String,
+    },
+    SessionRevokeByProofKey {
+        proof_key_thumbprint: String,
+        revoked_at: String,
     },
     SessionListActive {
         now: String,
@@ -145,6 +163,38 @@ pub enum AuthOperation {
     PairingGet {
         credential: String,
     },
+    PairingGetActive {
+        id: String,
+        now: String,
+    },
+    PairingFindPendingConnect {
+        proof_key_thumbprint: String,
+        now: String,
+    },
+    PairingRecordConnectClient {
+        id: String,
+        client: String,
+    },
+    PairingRevokeUnspentByProofKey {
+        proof_key_thumbprint: Option<String>,
+        keep_proof_key_thumbprint: Option<String>,
+        revoked_at: String,
+    },
+    DeviceTrust {
+        proof_key_thumbprint: String,
+        client: Option<String>,
+        approved_at: String,
+    },
+    DeviceIsTrusted {
+        proof_key_thumbprint: String,
+    },
+    DeviceList,
+    DeviceRemove {
+        proof_key_thumbprint: String,
+    },
+    DeviceRemoveAllExcept {
+        keep_proof_key_thumbprint: Option<String>,
+    },
 }
 
 impl AuthOperation {
@@ -152,9 +202,14 @@ impl AuthOperation {
         matches!(
             self,
             Self::SessionGet { .. }
+                | Self::SessionGetProofKey { .. }
                 | Self::SessionListActive { .. }
                 | Self::PairingListActive { .. }
                 | Self::PairingGet { .. }
+                | Self::PairingGetActive { .. }
+                | Self::PairingFindPendingConnect { .. }
+                | Self::DeviceIsTrusted { .. }
+                | Self::DeviceList
         )
     }
 }
@@ -195,7 +250,7 @@ fn hex(value: &str) -> String {
 }
 fn key(catalog: &ApplicationCatalog, suffix: &str) -> Vec<u8> {
     store_key(&format!(
-        "application/generation/{}/auth/v1/{suffix}",
+        "application/generation/{}/auth/v2/{suffix}",
         catalog.generation
     ))
 }
@@ -207,12 +262,13 @@ fn end(prefix: &[u8]) -> Result<Vec<u8>> {
 }
 fn validate(catalog: &ApplicationCatalog) -> Result<()> {
     validate_table(catalog, SESSIONS, &SESSION_COLUMNS, &["session_id"])?;
-    validate_table(catalog, LINKS, &LINK_COLUMNS, &["id"])
+    validate_table(catalog, LINKS, &LINK_COLUMNS, &["id"])?;
+    validate_table(catalog, DEVICES, &DEVICE_COLUMNS, &["proof_key_thumbprint"])
 }
 
 async fn ready(session: &mut Session) -> Result<()> {
     validate(&session.catalog)?;
-    for name in [SESSIONS, LINKS] {
+    for name in TABLES {
         let marker = session
             .transaction
             .get(&managed_marker(&session.catalog, name))
@@ -235,10 +291,10 @@ async fn ready(session: &mut Session) -> Result<()> {
         .map(decode)
         .transpose()?
         .ok_or(Error::IncompatibleStore)?;
-    if state.version != 1 || state.table > 2 {
+    if state.version != 2 || state.table > TABLES.len() {
         return Err(Error::IncompatibleStore);
     }
-    if state.table != 2 {
+    if state.table != TABLES.len() {
         return Err(invalid("application authentication is not prepared"));
     }
     Ok(())
@@ -279,6 +335,23 @@ fn credential_key(catalog: &ApplicationCatalog, credential: &str) -> Vec<u8> {
         &format!("links/credential/{}", request_digest(&json!(credential))),
     )
 }
+fn proof_prefix(catalog: &ApplicationCatalog, name: &str, proof: &str) -> Vec<u8> {
+    key(
+        catalog,
+        &format!("{name}/proof/{}/", request_digest(&json!(proof))),
+    )
+}
+fn device_prefix(catalog: &ApplicationCatalog) -> Vec<u8> {
+    key(catalog, "devices/approved/")
+}
+fn identity_column(name: &str) -> Result<&'static str> {
+    match name {
+        SESSIONS => Ok("session_id"),
+        LINKS => Ok("id"),
+        DEVICES => Ok("proof_key_thumbprint"),
+        _ => Err(Error::IncompatibleStore),
+    }
+}
 fn is_active(name: &str, row: &Map<String, Value>) -> Result<bool> {
     Ok(nullable(row, "revoked_at")?.is_none()
         && (name == SESSIONS || nullable(row, "consumed_at")?.is_none()))
@@ -289,8 +362,32 @@ fn indexes(
     name: &str,
     row: &Map<String, Value>,
 ) -> Result<Vec<(Vec<u8>, Witness)>> {
-    let id = text(row, if name == SESSIONS { "session_id" } else { "id" })?;
+    let id = text(row, identity_column(name)?)?;
     let mut entries = Vec::new();
+    if name == DEVICES {
+        let approved = text(row, "approved_at")?;
+        let mut encoded = device_prefix(catalog);
+        encoded.extend_from_slice(format!("{}/{}/", hex(&approved), hex(&id)).as_bytes());
+        entries.push((
+            encoded,
+            Witness {
+                id,
+                value: approved,
+            },
+        ));
+        return Ok(entries);
+    }
+    if let Some(proof) = nullable(row, "proof_key_thumbprint")? {
+        let mut encoded = proof_prefix(catalog, name, &proof);
+        encoded.extend_from_slice(hex(&id).as_bytes());
+        entries.push((
+            encoded,
+            Witness {
+                id: id.clone(),
+                value: proof,
+            },
+        ));
+    }
     if name == LINKS {
         let credential = text(row, "credential")?;
         entries.push((
@@ -486,8 +583,8 @@ fn session_output(row: &Map<String, Value>) -> Result<Value> {
         ],
     )
 }
-fn link_output(row: &Map<String, Value>) -> Result<Value> {
-    output(
+async fn link_output(session: &mut Session, row: &Map<String, Value>) -> Result<Value> {
+    let mut result = output(
         row,
         &[
             ("id", "id"),
@@ -501,8 +598,16 @@ fn link_output(row: &Map<String, Value>) -> Result<Value> {
             ("expires_at", "expiresAt"),
             ("consumed_at", "consumedAt"),
             ("revoked_at", "revokedAt"),
+            ("requires_connect_approval", "requiresConnectApproval"),
+            ("requested_client_json", "requestedClient"),
         ],
-    )
+    )?;
+    let approved = match nullable(row, "proof_key_thumbprint")? {
+        Some(proof) => get_row(session, DEVICES, &proof).await?.is_some(),
+        None => false,
+    };
+    result["connectApproved"] = json!(if approved { 1 } else { 0 });
+    Ok(result)
 }
 
 fn session_row(session: CreateSession) -> Result<Map<String, Value>> {
@@ -544,6 +649,10 @@ fn session_row(session: CreateSession) -> Result<Map<String, Value>> {
         ("revoked_at".into(), nullable_cell(None)),
         ("client_surface".into(), nullable_cell(None)),
         ("client_app_version".into(), nullable_cell(None)),
+        (
+            "proof_key_thumbprint".into(),
+            nullable_cell(session.proof_key_thumbprint.as_deref()),
+        ),
     ]))
 }
 fn link_row(link: CreateLink) -> Result<Map<String, Value>> {
@@ -565,6 +674,12 @@ fn link_row(link: CreateLink) -> Result<Map<String, Value>> {
         ("expires_at".into(), text_cell(&link.expires_at)),
         ("consumed_at".into(), nullable_cell(None)),
         ("revoked_at".into(), nullable_cell(None)),
+        (
+            "requires_connect_approval".into(),
+            int_cell(i64::from(link.requires_connect_approval)),
+        ),
+        ("requested_client_json".into(), nullable_cell(None)),
+        ("connect_denied".into(), int_cell(0)),
     ]))
 }
 async fn create_session(
@@ -650,10 +765,10 @@ impl Store {
         let mut state = match tx.get(&state_key).await? {
             Some(bytes) => {
                 let state: Preparation = decode(&bytes)?;
-                if state.version != 1 || state.table > 2 {
+                if state.version != 2 || state.table > TABLES.len() {
                     return Err(Error::IncompatibleStore);
                 }
-                for name in [SESSIONS, LINKS] {
+                for name in TABLES {
                     if tx
                         .get(&managed_marker(&catalog, name))
                         .await?
@@ -669,7 +784,7 @@ impl Store {
                 state
             }
             None => {
-                for name in [SESSIONS, LINKS] {
+                for name in TABLES {
                     let marker = managed_marker(&catalog, name);
                     if tx.get(&marker).await?.is_some() {
                         return Err(Error::IncompatibleStore);
@@ -677,21 +792,21 @@ impl Store {
                     tx.put(marker, encode(&MARKER)?).await?;
                 }
                 Preparation {
-                    version: 1,
+                    version: 2,
                     table: 0,
                     after: None,
                     indexed_rows: 0,
                 }
             }
         };
-        if state.table == 2 {
+        if state.table == TABLES.len() {
             tx.rollback().await?;
             return Ok(PreparationResult {
                 prepared: true,
                 indexed_rows: state.indexed_rows,
             });
         }
-        let name = [SESSIONS, LINKS][state.table];
+        let name = TABLES[state.table];
         let prefix = row_prefix(&catalog.generation, name)?;
         let mut start = prefix.clone();
         if let Some(after) = &state.after {
@@ -731,7 +846,7 @@ impl Store {
         tx.put(state_key, encode(&state)?).await?;
         tx.commit().await?;
         Ok(PreparationResult {
-            prepared: state.table == 2,
+            prepared: state.table == TABLES.len(),
             indexed_rows: state.indexed_rows,
         })
     }
@@ -813,6 +928,33 @@ async fn execute(session: &mut Session, request: AuthOperation) -> Result<Value>
             .map(|row| session_output(&row))
             .transpose()
             .map(|row| row.unwrap_or(Value::Null)),
+        AuthOperation::SessionGetProofKey { session_id } => {
+            let proof = match get_row(session, SESSIONS, &session_id).await? {
+                Some(row) => nullable(&row, "proof_key_thumbprint")?,
+                None => None,
+            };
+            Ok(json!(proof))
+        }
+        AuthOperation::SessionRevokeByProofKey {
+            proof_key_thumbprint,
+            revoked_at,
+        } => {
+            let prefix = proof_prefix(&session.catalog, SESSIONS, &proof_key_thumbprint);
+            let rows = scan_index(session, prefix, None, SESSIONS).await?;
+            let mut ids = Vec::new();
+            for row in rows {
+                if nullable(&row, "proof_key_thumbprint")?.as_deref()
+                    != Some(proof_key_thumbprint.as_str())
+                {
+                    return Err(Error::IncompatibleStore);
+                }
+                if nullable(&row, "revoked_at")?.is_none() {
+                    ids.push(text(&row, "session_id")?);
+                    revoke_session(session, row, &revoked_at).await?;
+                }
+            }
+            Ok(json!(ids))
+        }
         AuthOperation::SessionListActive {
             now,
             connected_session_ids,
@@ -926,6 +1068,15 @@ async fn execute(session: &mut Session, request: AuthOperation) -> Result<Value>
             {
                 return Ok(Value::Null);
             }
+            if integer(&row, "requires_connect_approval")? != 0 {
+                let trusted = match &proof {
+                    Some(proof) => get_row(session, DEVICES, proof).await?.is_some(),
+                    None => false,
+                };
+                if !trusted {
+                    return Ok(Value::Null);
+                }
+            }
             let granted: Value = serde_json::from_str(&text(&row, "scopes")?)
                 .map_err(|_| invalid("malformed authentication scopes JSON"))?;
             let granted = granted
@@ -944,7 +1095,7 @@ async fn execute(session: &mut Session, request: AuthOperation) -> Result<Value>
             let mut updated = row.clone();
             updated.insert("consumed_at".into(), text_cell(&consumed_at));
             replace_row(session, LINKS, &row, updated.clone()).await?;
-            link_output(&updated)
+            link_output(session, &updated).await
         }
         AuthOperation::PairingListActive { now } => {
             let prefix = active_prefix(&session.catalog, LINKS);
@@ -954,27 +1105,221 @@ async fn execute(session: &mut Session, request: AuthOperation) -> Result<Value>
                 .map(|row| Ok((text(&row, "created_at")?, text(&row, "id")?, row)))
                 .collect::<Result<_>>()?;
             rows.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
-            rows.into_iter()
-                .map(|(_, _, row)| link_output(&row))
-                .collect::<Result<Vec<_>>>()
-                .map(Value::Array)
+            let mut result = Vec::new();
+            for (_, _, row) in rows {
+                result.push(link_output(session, &row).await?);
+            }
+            Ok(Value::Array(result))
         }
         AuthOperation::PairingRevoke { id, revoked_at } => {
             if let Some(row) = get_row(session, LINKS, &id).await? {
                 if is_active(LINKS, &row)? {
                     let mut updated = row.clone();
                     updated.insert("revoked_at".into(), text_cell(&revoked_at));
+                    updated.insert(
+                        "connect_denied".into(),
+                        int_cell(integer(&row, "requires_connect_approval")?),
+                    );
                     replace_row(session, LINKS, &row, updated).await?;
                     return Ok(Value::Bool(true));
                 }
             }
             Ok(Value::Bool(false))
         }
-        AuthOperation::PairingGet { credential } => credential_row(session, &credential)
-            .await?
-            .map(|row| link_output(&row))
-            .transpose()
-            .map(|row| row.unwrap_or(Value::Null)),
+        AuthOperation::PairingGet { credential } => {
+            match credential_row(session, &credential).await? {
+                Some(row) => link_output(session, &row).await,
+                None => Ok(Value::Null),
+            }
+        }
+        AuthOperation::PairingGetActive { id, now } => match get_row(session, LINKS, &id).await? {
+            Some(row) if is_active(LINKS, &row)? && text(&row, "expires_at")? > now => {
+                link_output(session, &row).await
+            }
+            _ => Ok(Value::Null),
+        },
+        AuthOperation::PairingFindPendingConnect {
+            proof_key_thumbprint,
+            now,
+        } => {
+            let prefix = proof_prefix(&session.catalog, LINKS, &proof_key_thumbprint);
+            let rows = scan_index(session, prefix, None, LINKS).await?;
+            let mut newest: Option<(String, String, Map<String, Value>)> = None;
+            for row in rows {
+                if nullable(&row, "proof_key_thumbprint")?.as_deref()
+                    != Some(proof_key_thumbprint.as_str())
+                {
+                    return Err(Error::IncompatibleStore);
+                }
+                if integer(&row, "requires_connect_approval")? == 1
+                    && (nullable(&row, "revoked_at")?.is_none()
+                        || integer(&row, "connect_denied")? == 1)
+                    && nullable(&row, "consumed_at")?.is_none()
+                    && text(&row, "expires_at")? > now
+                {
+                    let created = text(&row, "created_at")?;
+                    let id = text(&row, "id")?;
+                    if newest
+                        .as_ref()
+                        .is_none_or(|old| (&created, &id) > (&old.0, &old.1))
+                    {
+                        newest = Some((created, id, row));
+                    }
+                }
+            }
+            match newest {
+                Some((_, _, row)) => link_output(session, &row).await,
+                None => Ok(Value::Null),
+            }
+        }
+        AuthOperation::PairingRecordConnectClient { id, client } => {
+            if let Some(mut row) = get_row(session, LINKS, &id).await? {
+                if integer(&row, "requires_connect_approval")? == 1
+                    && nullable(&row, "requested_client_json")?.is_none()
+                {
+                    row.insert("requested_client_json".into(), text_cell(&client));
+                    write_row(&mut session.transaction, &session.catalog, LINKS, row).await?;
+                    return Ok(Value::Bool(true));
+                }
+            }
+            Ok(Value::Bool(false))
+        }
+        AuthOperation::PairingRevokeUnspentByProofKey {
+            proof_key_thumbprint,
+            keep_proof_key_thumbprint,
+            revoked_at,
+        } => {
+            let prefix = match &proof_key_thumbprint {
+                Some(proof) => proof_prefix(&session.catalog, LINKS, proof),
+                None => active_prefix(&session.catalog, LINKS),
+            };
+            let rows = scan_index(session, prefix, None, LINKS).await?;
+            let mut ids = Vec::new();
+            for row in rows {
+                let proof = nullable(&row, "proof_key_thumbprint")?;
+                if proof.is_some()
+                    && proof != keep_proof_key_thumbprint
+                    && proof_key_thumbprint
+                        .as_ref()
+                        .is_none_or(|expected| proof.as_ref() == Some(expected))
+                    && is_active(LINKS, &row)?
+                {
+                    ids.push(text(&row, "id")?);
+                    let mut updated = row.clone();
+                    updated.insert("revoked_at".into(), text_cell(&revoked_at));
+                    // Device revocation is not a denial of a waiting approval.
+                    replace_row(session, LINKS, &row, updated).await?;
+                }
+            }
+            Ok(json!(ids))
+        }
+        AuthOperation::DeviceTrust {
+            proof_key_thumbprint,
+            client,
+            approved_at,
+        } => {
+            match get_row(session, DEVICES, &proof_key_thumbprint).await? {
+                Some(mut row) => {
+                    if let Some(client) = client {
+                        row.insert("client_json".into(), text_cell(&client));
+                        write_row(&mut session.transaction, &session.catalog, DEVICES, row).await?;
+                    }
+                }
+                None => {
+                    let row = Map::from_iter([
+                        (
+                            "proof_key_thumbprint".into(),
+                            text_cell(&proof_key_thumbprint),
+                        ),
+                        ("client_json".into(), nullable_cell(client.as_deref())),
+                        ("approved_at".into(), text_cell(&approved_at)),
+                    ]);
+                    write_row(
+                        &mut session.transaction,
+                        &session.catalog,
+                        DEVICES,
+                        row.clone(),
+                    )
+                    .await?;
+                    add_indexes(&mut session.transaction, &session.catalog, DEVICES, &row).await?;
+                }
+            }
+            Ok(json!({"written":true}))
+        }
+        AuthOperation::DeviceIsTrusted {
+            proof_key_thumbprint,
+        } => Ok(Value::Bool(
+            get_row(session, DEVICES, &proof_key_thumbprint)
+                .await?
+                .is_some(),
+        )),
+        AuthOperation::DeviceList => {
+            let prefix = device_prefix(&session.catalog);
+            let mut rows = scan_index(session, prefix, None, DEVICES)
+                .await?
+                .into_iter()
+                .map(|row| {
+                    Ok((
+                        text(&row, "approved_at")?,
+                        text(&row, "proof_key_thumbprint")?,
+                        row,
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            rows.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+            rows.into_iter()
+                .map(|(_, _, row)| {
+                    output(
+                        &row,
+                        &[
+                            ("proof_key_thumbprint", "proofKeyThumbprint"),
+                            ("client_json", "client"),
+                            ("approved_at", "approvedAt"),
+                        ],
+                    )
+                })
+                .collect::<Result<Vec<_>>>()
+                .map(Value::Array)
+        }
+        AuthOperation::DeviceRemove {
+            proof_key_thumbprint,
+        } => {
+            let Some(row) = get_row(session, DEVICES, &proof_key_thumbprint).await? else {
+                return Ok(Value::Bool(false));
+            };
+            remove_indexes(&mut session.transaction, &session.catalog, DEVICES, &row).await?;
+            delete_row(
+                &mut session.transaction,
+                &session.catalog,
+                DEVICES,
+                &[text_cell(&proof_key_thumbprint)],
+            )
+            .await?;
+            Ok(Value::Bool(true))
+        }
+        AuthOperation::DeviceRemoveAllExcept {
+            keep_proof_key_thumbprint,
+        } => {
+            let prefix = device_prefix(&session.catalog);
+            let rows = scan_index(session, prefix, None, DEVICES).await?;
+            let mut removed = 0u64;
+            for row in rows {
+                let proof = text(&row, "proof_key_thumbprint")?;
+                if keep_proof_key_thumbprint.as_deref() != Some(proof.as_str()) {
+                    remove_indexes(&mut session.transaction, &session.catalog, DEVICES, &row)
+                        .await?;
+                    delete_row(
+                        &mut session.transaction,
+                        &session.catalog,
+                        DEVICES,
+                        &[text_cell(&proof)],
+                    )
+                    .await?;
+                    removed += 1;
+                }
+            }
+            Ok(json!(removed))
+        }
     }
 }
 

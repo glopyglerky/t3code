@@ -36,6 +36,7 @@ pub enum AuxiliaryRead {
     DeletedThreadWorktrees,
     PendingThreadCleanup { thread_id: String },
     NonStoppedProviderSessions,
+    EnabledScheduledThreadIds,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -453,6 +454,25 @@ impl ApplicationTransactions {
                         if let Some(project) = read_row(&mut session.transaction, &session.catalog, PROJECTS, &[text_cell(&text(&row.row,"project_id")?)]).await? {
                             result.push(json!({"payload_json":text(&row.row,"payload_json")?,"workspaceRoot":text(&project.row,"workspace_root")?}));
                         }
+                    }
+                    Ok(Value::Array(result))
+                }
+                AuxiliaryRead::EnabledScheduledThreadIds => {
+                    let prefix = row_prefix(&session.catalog.generation, "scheduled_tasks")?;
+                    let end = prefix_end(&prefix);
+                    let mut cursor = prefix;
+                    let mut result = Vec::new();
+                    loop {
+                        let page = session.transaction.scan(&cursor, &end, PAGE_ROWS).await?;
+                        let count = page.len();
+                        for (encoded, bytes) in page {
+                            let source = decode_row(&session.catalog, table(&session.catalog, "scheduled_tasks")?, &encoded, &bytes)?;
+                            if crate::application_rows::integer(&source.row, "enabled")? == 1 {
+                                if let Some(id) = nullable(&source.row, "thread_id")? { result.push(Value::String(id)); }
+                            }
+                            cursor = encoded; cursor.push(0);
+                        }
+                        if count < PAGE_ROWS { break; }
                     }
                     Ok(Value::Array(result))
                 }

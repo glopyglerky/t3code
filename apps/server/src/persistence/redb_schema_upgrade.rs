@@ -1,4 +1,4 @@
-//! Exclusive, bounded upgrades from the exact schema-80 and schema-88 histories.
+//! Exclusive, bounded upgrades from the exact schema-80, schema-88 and schema-89 histories.
 //! Staging never changes the source
 //! generation. Retry clears the candidate and copies the current source again,
 //! including writes an older executable may have made after an interrupted run.
@@ -13,6 +13,8 @@ const MESSAGES: &str = "orchestration_v2_projection_messages";
 const PROJECTS: &str = "projection_projects";
 const ITEMS: &str = "orchestration_v2_projection_turn_items";
 const EVENTS: &str = "orchestration_events";
+const SESSIONS: &str = "auth_sessions";
+const LINKS: &str = "auth_pairing_links";
 const PAGE: usize = 32;
 fn prefix(generation: &str) -> Vec<u8> {
     store_key(&format!("application/generation/{generation}/"))
@@ -58,10 +60,29 @@ fn target_89(source: &ApplicationCatalog, current: &Definition) -> ApplicationCa
     }
 }
 
+fn definition_89() -> Result<Definition> {
+    let previous: Definition = serde_json::from_str(include_str!("omdb-schema-89.json"))
+        .map_err(|_| Error::IncompatibleStore)?;
+    let current = definition()?;
+    if previous.format != 1
+        || previous.migrations.len() != 89
+        || current.migrations.len() != 91
+        || current.migrations[..89] != previous.migrations
+        || current.migrations[89].id != "90"
+        || current.migrations[89].name != "AuthConnectDevices"
+        || current.migrations[90].id != "91"
+        || current.migrations[90].name != "AuthConnectDeniedRequests"
+    {
+        return Err(Error::IncompatibleStore);
+    }
+    validate_schema(&previous.schema)?;
+    Ok(previous)
+}
+
 fn definition_88() -> Result<Definition> {
     let previous: Definition = serde_json::from_str(include_str!("omdb-schema-88.json"))
         .map_err(|_| Error::IncompatibleStore)?;
-    let current = definition()?;
+    let current = definition_89()?;
     if previous.format != 1
         || previous.migrations.len() != 88
         || current.migrations.len() != 89
@@ -102,7 +123,7 @@ async fn validate_80_lineage(
     .map_err(|_| Error::IncompatibleStore)?;
     let previous = previous_definition()?;
     let intermediate = definition_88()?;
-    let current = definition()?;
+    let current = definition_89()?;
     if lineage.version != 1
         || lineage.source.generation != imported_generation
         || lineage.source.schema != previous.schema
@@ -160,7 +181,7 @@ async fn validate_history(
     Ok(())
 }
 
-pub(crate) async fn validate_import_lineage(
+async fn validate_legacy_import_lineage(
     tx: &mut Transaction,
     catalog: &ApplicationCatalog,
     imported_generation: &str,
@@ -172,7 +193,7 @@ pub(crate) async fn validate_import_lineage(
     let lineage: ImportLineage =
         serde_json::from_slice(&bytes).map_err(|_| Error::IncompatibleStore)?;
     let previous = definition_88()?;
-    let current = definition()?;
+    let current = definition_89()?;
     if lineage.version != 1
         || lineage.source.schema != previous.schema
         || *catalog != target_89(&lineage.source, &current)
@@ -199,6 +220,91 @@ pub(crate) async fn validate_import_lineage(
         .await
     }
 }
+
+fn lineage_91_key(target: &ApplicationCatalog) -> Vec<u8> {
+    store_key(&format!(
+        "application/generation/{}/metadata/native-schema-upgrade-to-91",
+        target.generation
+    ))
+}
+
+fn target_91(source: &ApplicationCatalog, current: &Definition) -> ApplicationCatalog {
+    ApplicationCatalog {
+        generation: request_digest(&json!([
+            "native-schema-upgrade-to-91",
+            source.generation,
+            current.schema
+        ])),
+        schema: current.schema.clone(),
+    }
+}
+
+async fn source_definition(
+    tx: &mut Transaction,
+    source: &ApplicationCatalog,
+) -> Result<Definition> {
+    let actual = history(tx, source, 89).await?;
+    let oldest = previous_definition()?;
+    let intermediate = definition_88()?;
+    let latest = definition_89()?;
+    if latest.migrations[..80] != oldest.migrations {
+        return Err(Error::IncompatibleStore);
+    }
+    [oldest, intermediate, latest]
+        .into_iter()
+        .find(|known| source.schema == known.schema && actual == known.migrations)
+        .ok_or(Error::IncompatibleStore)
+}
+
+/// A bounded receipt chain: an original 80/88/89 import may have first passed
+/// through the two previously shipped upgrades. Only those exact catalogs and
+/// histories can precede this release's schema-91 publication.
+pub(crate) async fn validate_import_lineage(
+    tx: &mut Transaction,
+    catalog: &ApplicationCatalog,
+    imported_generation: &str,
+    imported_table_count: u64,
+) -> Result<()> {
+    let current = definition()?;
+    if catalog.schema != current.schema {
+        return validate_legacy_import_lineage(
+            tx,
+            catalog,
+            imported_generation,
+            imported_table_count,
+        )
+        .await;
+    }
+    let lineage: ImportLineage = serde_json::from_slice(
+        &tx.get(&lineage_91_key(catalog))
+            .await?
+            .ok_or(Error::IncompatibleStore)?,
+    )
+    .map_err(|_| Error::IncompatibleStore)?;
+    if lineage.version != 1
+        || *catalog != target_91(&lineage.source, &current)
+        || lineage.source.generation == catalog.generation
+    {
+        return Err(Error::IncompatibleStore);
+    }
+    validate_history(tx, catalog, &current.migrations).await?;
+    let previous = source_definition(tx, &lineage.source).await?;
+    if lineage.source.generation == imported_generation {
+        if previous.schema.tables.len() as u64 != imported_table_count {
+            return Err(Error::IncompatibleStore);
+        }
+        Ok(())
+    } else {
+        validate_legacy_import_lineage(
+            tx,
+            &lineage.source,
+            imported_generation,
+            imported_table_count,
+        )
+        .await
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Stage {
     Clear,
@@ -207,6 +313,8 @@ enum Stage {
     Projects,
     ProjectEvents,
     Counts,
+    AuthSessions,
+    AuthLinks,
 }
 impl Stage {
     fn table(self) -> Option<&'static str> {
@@ -215,6 +323,8 @@ impl Stage {
             Self::Projects => Some(PROJECTS),
             Self::ProjectEvents => Some(EVENTS),
             Self::Counts => Some(ITEMS),
+            Self::AuthSessions => Some(SESSIONS),
+            Self::AuthLinks => Some(LINKS),
             _ => None,
         }
     }
@@ -303,12 +413,65 @@ async fn transform(
         Stage::Counts => {
             crate::application_turn_item_counts::replace(tx, target, None, Some(&old.row)).await?
         }
+        Stage::AuthSessions | Stage::AuthLinks => {
+            let mut row = old.row;
+            if matches!(stage, Stage::AuthSessions) {
+                row.insert("proof_key_thumbprint".into(), nullable_cell(None));
+            } else {
+                row.insert("requires_connect_approval".into(), int_cell(0));
+                row.insert("requested_client_json".into(), nullable_cell(None));
+                row.insert("connect_denied".into(), int_cell(0));
+            }
+            crate::application::validate_row(table(target, name)?, &old.key, &row)?;
+            tx.put(
+                row_key(&target.generation, name, &old.key)?,
+                encode_row(&ApplicationRow { key: old.key, row })?,
+            )
+            .await?;
+        }
         Stage::Clear | Stage::Copy => return Err(Error::IncompatibleStore),
     }
     Ok(())
 }
 
 impl Store {
+    pub(super) async fn upgrade_application_91(
+        &self,
+        source: ApplicationCatalog,
+        current: Definition,
+    ) -> Result<BootstrapResult> {
+        let mut inspection = self.db.begin_read_only().await?;
+        let previous = source_definition(&mut inspection, &source).await?;
+        inspection.rollback().await?;
+        self.db.require_exclusive()?;
+        let target = target_91(&source, &current);
+        for stage in [Stage::Clear, Stage::Copy] {
+            self.upgrade_stage(&source, &target, stage).await?;
+        }
+        if previous.migrations.len() == 80 {
+            for stage in [
+                Stage::Messages,
+                Stage::Projects,
+                Stage::ProjectEvents,
+                Stage::Counts,
+            ] {
+                self.upgrade_stage(&source, &target, stage).await?;
+            }
+        }
+        for stage in [Stage::AuthSessions, Stage::AuthLinks] {
+            self.upgrade_stage(&source, &target, stage).await?;
+        }
+        let lineage = lineage_91_key(&target);
+        self.publish_upgrade(
+            source,
+            target,
+            current.migrations,
+            previous.migrations.len(),
+            lineage,
+        )
+        .await
+    }
+
     async fn upgrade_batch(
         &self,
         source: &ApplicationCatalog,
@@ -353,6 +516,18 @@ impl Store {
                     let suffix = key
                         .strip_prefix(scan_prefix.as_slice())
                         .ok_or(Error::IncompatibleStore)?;
+                    // Authentication gained proof-key indexes and columns. Its
+                    // old preparation witness cannot qualify the staged catalog.
+                    let auth_changed =
+                        table(source, SESSIONS)?.columns != table(target, SESSIONS)?.columns;
+                    if auth_changed
+                        && (suffix.starts_with(b"auth/v1/")
+                            || key == managed_marker(source, SESSIONS)
+                            || key == managed_marker(source, LINKS))
+                    {
+                        last = Some(key);
+                        continue;
+                    }
                     // Rebuild all relationship, count and compact-window indexes.
                     // Retain their insertion orders so historical SQL ordering survives.
                     if !suffix.starts_with(b"projection-reads/v1/")
@@ -396,6 +571,7 @@ impl Store {
         }
     }
 
+    #[cfg(test)]
     pub(super) async fn upgrade_application_80(
         &self,
         source: ApplicationCatalog,
@@ -437,6 +613,7 @@ impl Store {
         .await
     }
 
+    #[cfg(test)]
     pub(super) async fn upgrade_application_88(
         &self,
         source: ApplicationCatalog,

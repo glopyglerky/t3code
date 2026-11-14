@@ -7,12 +7,35 @@ import { PersistenceDecodeError, type PersistenceErrorCorrelation } from "./Erro
 import { RedbClient } from "./RedbClient.ts";
 
 const Written = Schema.Struct({ written: Schema.Literal(true) });
+const encodeCreateAuthPairingLinkInput = Schema.encodeEffect(Links.CreateAuthPairingLinkInput);
+const encodeConsumeAuthPairingLinkInput = Schema.encodeEffect(Links.ConsumeAuthPairingLinkInput);
+const encodeListActiveAuthPairingLinksInput = Schema.encodeEffect(
+  Links.ListActiveAuthPairingLinksInput,
+);
+const encodeRevokeAuthPairingLinkInput = Schema.encodeEffect(Links.RevokeAuthPairingLinkInput);
+const encodeGetAuthPairingLinkByCredentialInput = Schema.encodeEffect(
+  Links.GetAuthPairingLinkByCredentialInput,
+);
+const encodeGetActiveAuthPairingLinkByIdInput = Schema.encodeEffect(
+  Links.GetActiveAuthPairingLinkByIdInput,
+);
+const encodeFindPendingConnectPairingLinkInput = Schema.encodeEffect(
+  Links.FindPendingConnectPairingLinkInput,
+);
+const encodeRecordConnectRequestClientInput = Schema.encodeEffect(
+  Links.RecordConnectRequestClientInput,
+);
+const encodeRevokeUnspentByProofKeyInput = Schema.encodeEffect(Links.RevokeUnspentByProofKeyInput);
 const requestPhases = {
   create: "encodeRequest",
   consumeAvailable: "decodeRow",
   listActive: "decodeRows",
   revoke: "decodeRows",
   getByCredential: "decodeRow",
+  getActiveById: "decodeRow",
+  findPendingConnect: "decodeRow",
+  recordConnectRequestClient: "encodeRequest",
+  revokeUnspentByProofKey: "decodeRows",
 } as const;
 
 export const make = Effect.gen(function* () {
@@ -58,7 +81,7 @@ export const make = Effect.gen(function* () {
 
   return Links.AuthPairingLinkRepository.of({
     create: Effect.fn("AuthPairingLinkRepository.create")((input) =>
-      Schema.encodeEffect(Links.CreateAuthPairingLinkInput)(input).pipe(
+      encodeCreateAuthPairingLinkInput(input).pipe(
         Effect.mapError((cause) =>
           PersistenceDecodeError.fromSchemaError(
             "AuthPairingLinkRepository.create:encodeRequest",
@@ -75,7 +98,7 @@ export const make = Effect.gen(function* () {
       ),
     ),
     consumeAvailable: Effect.fn("AuthPairingLinkRepository.consumeAvailable")((input) =>
-      Schema.encodeEffect(Links.ConsumeAuthPairingLinkInput)(input).pipe(
+      encodeConsumeAuthPairingLinkInput(input).pipe(
         Effect.mapError((cause) =>
           PersistenceDecodeError.fromSchemaError(
             "AuthPairingLinkRepository.consumeAvailable:decodeRow",
@@ -103,7 +126,7 @@ export const make = Effect.gen(function* () {
       ),
     ),
     listActive: Effect.fn("AuthPairingLinkRepository.listActive")((input) =>
-      Schema.encodeEffect(Links.ListActiveAuthPairingLinksInput)(input).pipe(
+      encodeListActiveAuthPairingLinksInput(input).pipe(
         Effect.mapError((cause) =>
           PersistenceDecodeError.fromSchemaError(
             "AuthPairingLinkRepository.listActive:decodeRows",
@@ -134,7 +157,7 @@ export const make = Effect.gen(function* () {
       ),
     ),
     revoke: Effect.fn("AuthPairingLinkRepository.revoke")((input) =>
-      Schema.encodeEffect(Links.RevokeAuthPairingLinkInput)(input).pipe(
+      encodeRevokeAuthPairingLinkInput(input).pipe(
         Effect.mapError((cause) =>
           PersistenceDecodeError.fromSchemaError(
             "AuthPairingLinkRepository.revoke:decodeRows",
@@ -154,7 +177,7 @@ export const make = Effect.gen(function* () {
       ),
     ),
     getByCredential: Effect.fn("AuthPairingLinkRepository.getByCredential")((input) =>
-      Schema.encodeEffect(Links.GetAuthPairingLinkByCredentialInput)(input).pipe(
+      encodeGetAuthPairingLinkByCredentialInput(input).pipe(
         Effect.mapError((cause) =>
           PersistenceDecodeError.fromSchemaError(
             "AuthPairingLinkRepository.getByCredential:decodeRow",
@@ -171,6 +194,91 @@ export const make = Effect.gen(function* () {
         ),
         Effect.flatMap((row) => decodeOption("getByCredential", row)),
       ),
+    ),
+    getActiveById: Effect.fn("AuthPairingLinkRepository.getActiveById")((input) =>
+      encodeGetActiveAuthPairingLinkByIdInput(input).pipe(
+        Effect.mapError((cause) =>
+          PersistenceDecodeError.fromSchemaError(
+            "AuthPairingLinkRepository.getActiveById:decodeRow",
+            cause,
+            { pairingLinkId: input.id },
+          ),
+        ),
+        Effect.flatMap(({ id, now }) =>
+          request(
+            true,
+            { kind: "pairing_get_active", id, now },
+            Schema.NullOr(Links.AuthPairingLinkRawDbRow),
+            "getActiveById",
+            { pairingLinkId: id },
+          ),
+        ),
+        Effect.flatMap((row) => decodeOption("getActiveById", row)),
+      ),
+    ),
+    findPendingConnect: Effect.fn("AuthPairingLinkRepository.findPendingConnect")((input) =>
+      encodeFindPendingConnectPairingLinkInput(input).pipe(
+        Effect.mapError((cause) =>
+          PersistenceDecodeError.fromSchemaError(
+            "AuthPairingLinkRepository.findPendingConnect:decodeRow",
+            cause,
+          ),
+        ),
+        Effect.flatMap(({ proofKeyThumbprint, now }) =>
+          request(
+            true,
+            { kind: "pairing_find_pending_connect", proof_key_thumbprint: proofKeyThumbprint, now },
+            Schema.NullOr(Links.AuthPairingLinkRawDbRow),
+            "findPendingConnect",
+          ),
+        ),
+        Effect.flatMap((row) => decodeOption("findPendingConnect", row)),
+      ),
+    ),
+    recordConnectRequestClient: Effect.fn("AuthPairingLinkRepository.recordConnectRequestClient")(
+      (input) =>
+        encodeRecordConnectRequestClientInput(input).pipe(
+          Effect.mapError((cause) =>
+            PersistenceDecodeError.fromSchemaError(
+              "AuthPairingLinkRepository.recordConnectRequestClient:encodeRequest",
+              cause,
+              { pairingLinkId: input.id },
+            ),
+          ),
+          Effect.flatMap(({ id, client }) =>
+            request(
+              false,
+              { kind: "pairing_record_connect_client", id, client },
+              Schema.Boolean,
+              "recordConnectRequestClient",
+              { pairingLinkId: id },
+            ),
+          ),
+        ),
+    ),
+    revokeUnspentByProofKey: Effect.fn("AuthPairingLinkRepository.revokeUnspentByProofKey")(
+      (input) =>
+        encodeRevokeUnspentByProofKeyInput(input).pipe(
+          Effect.mapError((cause) =>
+            PersistenceDecodeError.fromSchemaError(
+              "AuthPairingLinkRepository.revokeUnspentByProofKey:decodeRows",
+              cause,
+            ),
+          ),
+          Effect.flatMap(({ proofKeyThumbprint, keepProofKeyThumbprint, revokedAt }) =>
+            request(
+              false,
+              {
+                kind: "pairing_revoke_unspent_by_proof_key",
+                proof_key_thumbprint: proofKeyThumbprint,
+                keep_proof_key_thumbprint: keepProofKeyThumbprint,
+                revoked_at: revokedAt,
+              },
+              Schema.Array(Schema.String),
+              "revokeUnspentByProofKey",
+            ),
+          ),
+        ),
     ),
   });
 });

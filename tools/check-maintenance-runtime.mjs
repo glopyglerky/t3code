@@ -163,7 +163,10 @@ const context = {
 const pending = { ...request, context };
 const wrapper = { request: { kind: "wrapper" }, result: null };
 const observedWrapper = { version: 1, ok: { kind: "observe", request: wrapper.request } };
-const completed = { ...pending, observations: [wrapper] };
+const afterWrapper = { ...pending, observations: [wrapper] };
+const macPorts = { request: { kind: "macPortsOwner" }, result: null };
+const observedMacPorts = { version: 1, ok: { kind: "observe", request: macPorts.request } };
+const completed = { ...pending, observations: [wrapper, macPorts] };
 const completedResponse = {
   ...terminal,
   ok: {
@@ -171,8 +174,9 @@ const completedResponse = {
     capabilities: { ...terminal.ok.capabilities, installPath: context.realCommandPath },
   },
 };
-NodeAssert.deepEqual(succeeded(frame(pending) + frame(completed)), [
+NodeAssert.deepEqual(succeeded(frame(pending) + frame(afterWrapper) + frame(completed)), [
   observedWrapper,
+  observedMacPorts,
   completedResponse,
 ]);
 NodeAssert.deepEqual(succeeded(frame(completed)), [completedResponse]);
@@ -266,6 +270,10 @@ const evidence = [
     result: [otherInstall, install],
   },
   { request: { kind: "miseToolPath", path: toolPath }, result: toolPath },
+  {
+    request: { kind: "miseAllListing" },
+    result: JSON.stringify({ "npm:@openai/codex": listingValue.codex }),
+  },
 ];
 const requests = Array.from({ length: evidence.length + 1 }, (_, count) => ({
   ...mise,
@@ -325,7 +333,7 @@ rejected(
 
 const maximumWrapper = {
   ...completed,
-  observations: [{ ...wrapper, result: "x".repeat(16 * 1024) }],
+  observations: [{ ...wrapper, result: "x".repeat(16 * 1024) }, macPorts],
 };
 NodeAssert.deepEqual(succeeded(frame(maximumWrapper)), [completedResponse]);
 rejected(
@@ -334,7 +342,7 @@ rejected(
   { category: "input limit exceeded" },
 );
 NodeAssert.deepEqual(
-  succeeded(frame({ ...completed, observations: [{ ...wrapper, result: "\0" }] })),
+  succeeded(frame({ ...completed, observations: [{ ...wrapper, result: "\0" }, macPorts] })),
   [completedResponse],
 );
 const maximumListing = " ".repeat(256 * 1024 - 2) + "{}";
@@ -438,7 +446,7 @@ const amplified = {
       hasEnv: false,
     },
   },
-  observations: [wrapper],
+  observations: [wrapper, macPorts],
 };
 NodeAssert.ok(Buffer.byteLength(frame(amplified)) < maximumBytes);
 rejected("output command and args amplification", frame(amplified), {
@@ -503,49 +511,77 @@ verified({ ...preUpdate, advisoryEnriched: false }, beforeUpdate(false));
 verified({ ...preUpdate, verifiedProviders: [] }, beforeUpdate(false));
 verified(postUpdate, afterUpdate());
 verified({ ...postUpdate, verifiedProviders: [] }, unverifiable);
-verified({
-  ...postUpdate,
-  verifiedProviders: [{ ...providerSnapshot, installedVersion: null }],
-}, unverifiable);
-verified({
-  ...postUpdate,
-  verifiedProviders: [{ ...providerSnapshot, installedVersion: "" }],
-}, unverifiable);
-verified({
-  ...postUpdate,
-  targetVersion: "",
-  verifiedProviders: [{ ...providerSnapshot, installedVersion: "" }],
-}, afterUpdate());
-verified({
-  ...postUpdate,
-  targetVersion: null,
-  verifiedProviders: [{ ...providerSnapshot, version: null, installedVersion: null }],
-}, afterUpdate());
-verified({
-  ...postUpdate,
-  targetVersion: null,
-  verifiedProviders: [{ ...providerSnapshot, versionAdvisoryStatus: "behind_latest" }],
-}, outdated);
-verified({
-  ...postUpdate,
-  verifiedProviders: [{ ...providerSnapshot, installedVersion: "v1.2.3", versionAdvisoryStatus: "behind_latest" }],
-}, afterUpdate());
-verified({
-  ...postUpdate,
-  targetVersion: null,
-  verifiedProviders: [
-    { ...providerSnapshot, versionAdvisoryStatus: "behind_latest" },
-    { ...providerSnapshot, installed: false },
-  ],
-}, unverifiable);
+verified(
+  {
+    ...postUpdate,
+    verifiedProviders: [{ ...providerSnapshot, installedVersion: null }],
+  },
+  unverifiable,
+);
+verified(
+  {
+    ...postUpdate,
+    verifiedProviders: [{ ...providerSnapshot, installedVersion: "" }],
+  },
+  unverifiable,
+);
+verified(
+  {
+    ...postUpdate,
+    targetVersion: "",
+    verifiedProviders: [{ ...providerSnapshot, installedVersion: "" }],
+  },
+  afterUpdate(),
+);
+verified(
+  {
+    ...postUpdate,
+    targetVersion: null,
+    verifiedProviders: [{ ...providerSnapshot, version: null, installedVersion: null }],
+  },
+  afterUpdate(),
+);
+verified(
+  {
+    ...postUpdate,
+    targetVersion: null,
+    verifiedProviders: [{ ...providerSnapshot, versionAdvisoryStatus: "behind_latest" }],
+  },
+  outdated,
+);
+verified(
+  {
+    ...postUpdate,
+    verifiedProviders: [
+      { ...providerSnapshot, installedVersion: "v1.2.3", versionAdvisoryStatus: "behind_latest" },
+    ],
+  },
+  afterUpdate(),
+);
+verified(
+  {
+    ...postUpdate,
+    targetVersion: null,
+    verifiedProviders: [
+      { ...providerSnapshot, versionAdvisoryStatus: "behind_latest" },
+      { ...providerSnapshot, installed: false },
+    ],
+  },
+  unverifiable,
+);
 
 for (const input of [preUpdate, postUpdate]) {
   for (const key of Object.keys(input)) {
     const missing = copy(input);
     delete missing[key];
     rejected(`verification ${input.mode} missing ${key}`, frame(missing));
-    const duplicate = frame(input).replace(`"${key}":`, `"${key}":${JSON.stringify(input[key])},"${key}":`);
-    rejected(`verification ${input.mode} duplicate ${key}`, duplicate, { category: "duplicate object key" });
+    const duplicate = frame(input).replace(
+      `"${key}":`,
+      `"${key}":${JSON.stringify(input[key])},"${key}":`,
+    );
+    rejected(`verification ${input.mode} duplicate ${key}`, duplicate, {
+      category: "duplicate object key",
+    });
   }
   for (const [key, value] of [
     ["version", 2],
@@ -564,8 +600,13 @@ for (const input of [preUpdate, postUpdate]) {
     const missing = copy(input);
     delete missing.verifiedProviders[0][key];
     rejected(`verification ${input.mode} missing provider ${key}`, frame(missing));
-    const duplicate = frame(input).replace('"verifiedProviders":[{', `"verifiedProviders":[{"${key}":${JSON.stringify(providerSnapshot[key])},`);
-    rejected(`verification ${input.mode} duplicate provider ${key}`, duplicate, { category: "duplicate object key" });
+    const duplicate = frame(input).replace(
+      '"verifiedProviders":[{',
+      `"verifiedProviders":[{"${key}":${JSON.stringify(providerSnapshot[key])},`,
+    );
+    rejected(`verification ${input.mode} duplicate provider ${key}`, duplicate, {
+      category: "duplicate object key",
+    });
   }
   for (const [key, value] of [
     ["checkedAt", null],
@@ -579,54 +620,94 @@ for (const input of [preUpdate, postUpdate]) {
     ["versionAdvisoryStatus", {}],
     ["extra", true],
   ]) {
-    rejected(`verification ${input.mode} invalid provider ${key}`, frame({
-      ...input,
-      verifiedProviders: [{ ...providerSnapshot, [key]: value }],
-    }));
+    rejected(
+      `verification ${input.mode} invalid provider ${key}`,
+      frame({
+        ...input,
+        verifiedProviders: [{ ...providerSnapshot, [key]: value }],
+      }),
+    );
   }
-  rejected(`verification ${input.mode} duplicate optional installedVersion`, frame({
-    ...input,
-    verifiedProviders: [{ ...providerSnapshot, installedVersion: null }],
-  }).replace('"installedVersion":null', '"installedVersion":null,"installedVersion":"1.2.3"'), {
-    category: "duplicate object key",
-  });
+  rejected(
+    `verification ${input.mode} duplicate optional installedVersion`,
+    frame({
+      ...input,
+      verifiedProviders: [{ ...providerSnapshot, installedVersion: null }],
+    }).replace('"installedVersion":null', '"installedVersion":null,"installedVersion":"1.2.3"'),
+    {
+      category: "duplicate object key",
+    },
+  );
   rejected(`verification ${input.mode} missing LF`, frame(input).slice(0, -1));
   rejected(`verification ${input.mode} repeated terminal request`, frame(input) + frame(input));
   rejected(`verification ${input.mode} trailing resolver request`, frame(input) + valid);
-  rejected(`verification ${input.mode} cannot replace pending observations`, frame(pending) + frame(input), {
-    previous: [observedWrapper],
-    category: "observation does not match request",
-  });
+  rejected(
+    `verification ${input.mode} cannot replace pending observations`,
+    frame(pending) + frame(input),
+    {
+      previous: [observedWrapper],
+      category: "observation does not match request",
+    },
+  );
 }
 for (const value of [false, 1, []]) {
   rejected("verification invalid priorCheckedAt", frame({ ...preUpdate, priorCheckedAt: value }));
   rejected("verification invalid targetVersion", frame({ ...postUpdate, targetVersion: value }));
 }
 rejected("verification null advisoryEnriched", frame({ ...preUpdate, advisoryEnriched: null }));
-rejected("verification accepts no post-update fields before update", frame({ ...preUpdate, targetVersion: null }));
-rejected("verification accepts no pre-update fields after update", frame({ ...postUpdate, priorCheckedAt: null }));
+rejected(
+  "verification accepts no post-update fields before update",
+  frame({ ...preUpdate, targetVersion: null }),
+);
+rejected(
+  "verification accepts no pre-update fields after update",
+  frame({ ...postUpdate, priorCheckedAt: null }),
+);
 
-for (const key of ["checkedAt", "status", "authStatus", "version", "installedVersion", "versionAdvisoryStatus"]) {
+for (const key of [
+  "checkedAt",
+  "status",
+  "authStatus",
+  "version",
+  "installedVersion",
+  "versionAdvisoryStatus",
+]) {
   const overLimit = { ...providerSnapshot, [key]: "x".repeat(65_537) };
-  rejected(`verification provider ${key} byte bound`, frame({ ...postUpdate, verifiedProviders: [overLimit] }), {
-    category: "input limit exceeded",
-  });
+  rejected(
+    `verification provider ${key} byte bound`,
+    frame({ ...postUpdate, verifiedProviders: [overLimit] }),
+    {
+      category: "input limit exceeded",
+    },
+  );
 }
 verified({ ...preUpdate, priorCheckedAt: "x".repeat(65_536) }, beforeUpdate(true));
-rejected("verification prior timestamp byte bound", frame({ ...preUpdate, priorCheckedAt: "x".repeat(65_537) }), {
-  category: "input limit exceeded",
-});
+rejected(
+  "verification prior timestamp byte bound",
+  frame({ ...preUpdate, priorCheckedAt: "x".repeat(65_537) }),
+  {
+    category: "input limit exceeded",
+  },
+);
 const maximumVersion = "💬".repeat(16_384);
-verified({
-  ...postUpdate,
-  targetVersion: maximumVersion,
-  verifiedProviders: [{ ...providerSnapshot, installedVersion: maximumVersion }],
-}, afterUpdate());
-rejected("verification target version UTF-8 byte bound", frame({ ...postUpdate, targetVersion: maximumVersion + "x" }), {
-  category: "input limit exceeded",
-});
+verified(
+  {
+    ...postUpdate,
+    targetVersion: maximumVersion,
+    verifiedProviders: [{ ...providerSnapshot, installedVersion: maximumVersion }],
+  },
+  afterUpdate(),
+);
+rejected(
+  "verification target version UTF-8 byte bound",
+  frame({ ...postUpdate, targetVersion: maximumVersion + "x" }),
+  {
+    category: "input limit exceeded",
+  },
+);
 const verifyBody = frame(preUpdate).slice(0, -1);
-const verifyAtLimit = verifyBody + " ".repeat(maximumBytes - Buffer.byteLength(verifyBody) - 1) + "\n";
+const verifyAtLimit =
+  verifyBody + " ".repeat(maximumBytes - Buffer.byteLength(verifyBody) - 1) + "\n";
 verified(verifyAtLimit, beforeUpdate(true));
 rejected("verification frame byte bound", verifyAtLimit.slice(0, -1) + " \n", {
   category: "input limit exceeded",

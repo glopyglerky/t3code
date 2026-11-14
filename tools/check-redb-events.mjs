@@ -52,7 +52,7 @@ const now = DateTime.makeUnsafe(at);
 const encodeEvent = Schema.encodeSync(OrchestrationV2DomainEventJson);
 const hash = (bytes) => NodeCrypto.createHash("sha256").update(bytes).digest("hex");
 const oraclePath = "apps/server/src/persistence/OrchestrationEventStore.ts";
-const oracleCommit = "c7a3f02e3851923ced8ebd000db79f641e11b038";
+const oracleCommit = "913d7fc45ec5814fff25c819cfe4de193ea42d63";
 const oracleBlob = "e55d82713871bce675d605da926da0514879b422";
 const upstreamLock = JSON.parse(
   await NodeFSP.readFile(new URL("../upstream.lock.json", import.meta.url), "utf8"),

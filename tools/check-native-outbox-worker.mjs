@@ -99,6 +99,7 @@ async function scenario(description, run) {
         const state = {
           dropClaimResponses: 0,
           dropResponses: new Map(),
+          rejectRequests: new Map(),
           requests: [],
           claimRequests: [],
           executions: [],
@@ -109,6 +110,13 @@ async function scenario(description, run) {
         const service = NativeDatabase.NativeDatabase.of({
           request: Effect.fn("NativeOutboxWorkerFixture.request")(function* (input, schema) {
             state.requests.push(structuredClone(input));
+            const rejection = state.rejectRequests.get(input.operation);
+            if (rejection !== undefined && rejection.remaining > 0) {
+              rejection.remaining -= 1;
+              if (rejection.observed !== undefined)
+                yield* Deferred.succeed(rejection.observed, undefined);
+              return yield* rejection.error;
+            }
             const discardResponse = state.dropResponses.get(input.operation) ?? 0;
             if (discardResponse > 0) state.dropResponses.set(input.operation, discardResponse - 1);
             if (input.operation === "outbox_claim_once")
@@ -684,6 +692,104 @@ await scenario(
     }),
 );
 
+for (const [label, request, settlement, expected] of [
+  ["replay-safe", { type: "terminal.cleanup" }, "outbox_retry", "pending"],
+  [
+    "process-bound",
+    { type: "provider-turn.start", runId: RunId.make("lock-run") },
+    "outbox_fail",
+    "failed",
+  ],
+]) {
+  await scenario(
+    `${label} recovery retries only native writer acquisition rejection and releases the running lane`,
+    ({ state }) =>
+      Effect.gen(function* () {
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const input = pending(`lock-retry-${label}`, { request });
+        yield* outbox.enqueue([input]);
+        state.rejectRequests.set("outbox_succeed", {
+          remaining: 1,
+          error: new NativeDatabase.NativeDatabaseRejected({ kind: "writer_busy" }),
+        });
+        state.rejectRequests.set(settlement, {
+          remaining: 3,
+          error: new NativeDatabase.NativeDatabaseRejected({ kind: "writer_busy" }),
+        });
+        const exit = yield* Effect.exit(worker.runOnce());
+        NodeAssert.equal(Exit.isFailure(exit), true, "Original settlement failure remains visible");
+        NodeAssert.equal(row(yield* outbox.get(input.id)).status, expected);
+        NodeAssert.equal(
+          state.requests.filter((input) => input.operation === settlement).length,
+          4,
+        );
+        NodeAssert.deepEqual(
+          state.executions.map(({ id }) => id),
+          [input.id],
+        );
+      }),
+  );
+  for (const [reason, error] of [
+    ["uncertain outcome", new NativeDatabase.NativeDatabaseOutcomeUnknown({ stage: "response" })],
+    [
+      "other rejection",
+      new NativeDatabase.NativeDatabaseRejected({ kind: "transaction_conflict" }),
+    ],
+  ]) {
+    await scenario(`${label} recovery does not retry ${reason}`, ({ state }) =>
+      Effect.gen(function* () {
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const input = pending(`no-lock-retry-${label}-${reason}`, { request });
+        yield* outbox.enqueue([input]);
+        state.rejectRequests.set("outbox_succeed", {
+          remaining: 1,
+          error: new NativeDatabase.NativeDatabaseRejected({ kind: "writer_busy" }),
+        });
+        state.rejectRequests.set(settlement, { remaining: 2, error });
+        NodeAssert.equal(Exit.isFailure(yield* Effect.exit(worker.runOnce())), true);
+        NodeAssert.equal(row(yield* outbox.get(input.id)).status, "running");
+        NodeAssert.equal(
+          state.requests.filter((input) => input.operation === settlement).length,
+          1,
+        );
+        NodeAssert.deepEqual(
+          state.executions.map(({ id }) => id),
+          [input.id],
+        );
+      }),
+    );
+  }
+  await scenario(`${label} native writer retries stop on worker shutdown`, ({ state }) =>
+    Effect.gen(function* () {
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+      const input = pending(`cancel-lock-retry-${label}`, { request });
+      yield* outbox.enqueue([input]);
+      const rejected = yield* Deferred.make();
+      state.rejectRequests.set("outbox_succeed", {
+        remaining: 1,
+        error: new NativeDatabase.NativeDatabaseRejected({ kind: "writer_busy" }),
+      });
+      state.rejectRequests.set(settlement, {
+        remaining: Number.POSITIVE_INFINITY,
+        error: new NativeDatabase.NativeDatabaseRejected({ kind: "writer_busy" }),
+        observed: rejected,
+      });
+      const running = yield* worker.runOnce().pipe(Effect.exit, Effect.forkScoped);
+      yield* beforeWorkerEnds(rejected, running);
+      const shutdown = yield* Fiber.interrupt(running).pipe(Effect.timeoutOption("1 second"));
+      NodeAssert.equal(Option.isSome(shutdown), true);
+      NodeAssert.equal(row(yield* outbox.get(input.id)).status, "running");
+      NodeAssert.deepEqual(
+        state.executions.map(({ id }) => id),
+        [input.id],
+      );
+    }),
+  );
+}
+
 const proof = {
   status: "passed",
   sourceCommit: process.env.GITHUB_SHA ?? null,
@@ -696,6 +802,7 @@ const proof = {
   boundaries: [
     "real NativeDatabase, NativeEffectOutbox and OrchestrationEffectWorkerV2 with a controlled executor",
     "response faults occur after actual native claim commits; the production worker decides dispatch and settlement",
+    "writer_busy faults reject before the native mutation and exercise settlement retries without rerunning provider actions",
     "isolated redb files; no production data, provider process, network call or paid turn",
     "production project/thread transactions and server backend selection are covered by separate application acceptance gates",
     "no exactly-once external effect or distributed fencing guarantee",

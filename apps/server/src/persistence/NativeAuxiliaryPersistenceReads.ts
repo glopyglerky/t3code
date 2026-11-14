@@ -69,6 +69,13 @@ export const make = Effect.gen(function* () {
         )
         .pipe(Effect.mapError(toAuxiliaryReadError("pendingThreadCleanup"))),
     ),
+    enabledScheduledThreadIds: client
+      .request(
+        "application_auxiliary_read",
+        { query: { kind: "enabled_scheduled_thread_ids" } },
+        Schema.Array(Schema.String),
+      )
+      .pipe(Effect.mapError(toAuxiliaryReadError("enabledScheduledThreadIds"))),
     nonStoppedProviderSessions: client
       .request(
         "application_auxiliary_read",

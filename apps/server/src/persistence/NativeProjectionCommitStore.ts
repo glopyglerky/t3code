@@ -30,6 +30,10 @@ const decodeRequest = Schema.decodeUnknownEffect(
 );
 const ThreadPayload = Schema.fromJsonString(OrchestrationV2AppThreadJson);
 const TurnPayload = Schema.fromJsonString(OrchestrationV2ProviderTurnJson);
+const decodeThreadPayload = Schema.decodeEffect(ThreadPayload);
+const encodeThreadPayload = Schema.encodeEffect(ThreadPayload);
+const decodeTurnPayload = Schema.decodeEffect(TurnPayload);
+const encodeTurnPayload = Schema.encodeEffect(TurnPayload);
 const Normalization = Schema.NullOr(
   Schema.Struct({
     kind: Schema.Literals(["thread", "provider_turn"]),
@@ -50,7 +54,11 @@ export const make = Effect.gen(function* () {
           occurred_at: encoded.occurredAt,
           payload_json: yield* encodeJson(encoded.payload),
         };
-        if (event.type !== "provider-thread.updated" && event.type !== "provider-turn.updated") {
+        if (
+          event.type !== "provider-thread.updated" &&
+          event.type !== "provider-turn.updated" &&
+          event.type !== "thread.visit-recorded"
+        ) {
           return yield* client
             .request("application_projections_apply", { event: input }, Schema.Null)
             .pipe(Effect.asVoid);
@@ -71,11 +79,11 @@ export const make = Effect.gen(function* () {
             // Rust chooses the old row and owns every merge and column mutation.
             const payloadJson =
               context.kind === "thread"
-                ? yield* Schema.decodeEffect(ThreadPayload)(context.payload_json).pipe(
-                    Effect.flatMap(Schema.encodeEffect(ThreadPayload)),
+                ? yield* decodeThreadPayload(context.payload_json).pipe(
+                    Effect.flatMap(encodeThreadPayload),
                   )
-                : yield* Schema.decodeEffect(TurnPayload)(context.payload_json).pipe(
-                    Effect.flatMap(Schema.encodeEffect(TurnPayload)),
+                : yield* decodeTurnPayload(context.payload_json).pipe(
+                    Effect.flatMap(encodeTurnPayload),
                   );
             yield* client.request(
               "application_projections_apply",
@@ -230,6 +238,20 @@ export const make = Effect.gen(function* () {
           Schema.Boolean,
         )
         .pipe(Effect.mapError(toProjectionCommitStoreError("provider-thread-unchanged"))),
+    subagentUnchanged: (subagentId, expectedJson) =>
+      client
+        .request(
+          "application_projections_guard",
+          {
+            guard: {
+              kind: "subagent_unchanged",
+              subagent_id: subagentId,
+              expected_json: expectedJson,
+            },
+          },
+          Schema.Boolean,
+        )
+        .pipe(Effect.mapError(toProjectionCommitStoreError("subagent-unchanged"))),
     turnItemUnchanged: (turnItemId, expectedJson) =>
       client
         .request(

@@ -1,4 +1,9 @@
-import { IDLE_COMPACTION_TEXT, type ThreadId, type GuestShareId } from "@t3tools/contracts";
+import {
+  IDLE_COMPACTION_TEXT,
+  type ThreadId,
+  type GuestShareId,
+  type ProjectId,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -13,7 +18,7 @@ import type {
   ShellSnapshotOptions,
   OlderSettledThreadsQuery,
 } from "./ProjectionStore.ts";
-import type { ProjectionShellRows } from "./ProjectionShellRows.ts";
+import type { ProjectionShellRows, ActiveThreadListRow } from "./ProjectionShellRows.ts";
 type PayloadRow = { readonly payload_json: string };
 const encodeIdList = Schema.encodeSync(Schema.fromJsonString(Schema.Array(Schema.String)));
 
@@ -114,7 +119,11 @@ export const make = Effect.gen(function* () {
       worktreePath,
       threadIds,
       listedOnly = false,
-    }: ShellSnapshotOptions & { readonly listedOnly?: boolean } = {},
+      includeDeleted = false,
+    }: ShellSnapshotOptions & {
+      readonly listedOnly?: boolean;
+      readonly includeDeleted?: boolean;
+    } = {},
   ) =>
     sql<ShellThreadRow>`
           SELECT
@@ -293,7 +302,7 @@ export const make = Effect.gen(function* () {
               candidate.ordinal DESC, candidate.run_id DESC
             LIMIT 1
           ) AND blocked.status = 'failed'
-          WHERE t.deleted_at IS NULL${
+          WHERE ${includeDeleted ? sql`1 = 1` : sql`t.deleted_at IS NULL`}${
             listedOnly
               ? sql` AND json_extract(t.payload_json, '$.lineage.relationshipToParent') IS NOT 'subagent'
                   AND json_extract(t.payload_json, '$.lineage.sideChat') IS NOT 1`
@@ -595,6 +604,24 @@ export const make = Effect.gen(function* () {
         SELECT COUNT(*) AS count FROM orchestration_v2_projection_threads WHERE deleted_at IS NULL
       `;
 
+  const selectActiveThreads = (projectId?: ProjectId) => sql<ActiveThreadListRow>`
+    SELECT
+      t.thread_id,
+      t.project_id,
+      t.title,
+      t.updated_at,
+      json_extract(t.payload_json, '$.lineage.relationshipToParent') AS relationship_to_parent,
+      json_extract(t.payload_json, '$.lineage.parentThreadId') AS parent_thread_id,
+      json_extract(t.payload_json, '$.lineage.rootThreadId') AS root_thread_id,
+      json_extract(t.payload_json, '$.lineage.sideChat') AS side_chat,
+      json_extract(t.payload_json, '$.settledOverride') AS settled_override,
+      json_extract(t.payload_json, '$.settledAt') AS settled_at,
+      json_extract(t.payload_json, '$.snoozedUntil') AS snoozed_until
+    FROM orchestration_v2_projection_threads t
+    WHERE t.deleted_at IS NULL
+      AND t.archived_at IS NULL${projectId === undefined ? sql`` : sql` AND t.project_id = ${projectId}`}
+  `;
+
   const selectActiveShellIndex = sql<{
     readonly thread_id: string;
     readonly project_id: string;
@@ -736,6 +763,7 @@ export const make = Effect.gen(function* () {
     selectActiveSubagentThreads,
     countThreads,
     selectActiveShellIndex,
+    selectActiveThreads,
     findGuestShareThread,
     selectOlderSettledThreads,
   } satisfies ProjectionShellRows;

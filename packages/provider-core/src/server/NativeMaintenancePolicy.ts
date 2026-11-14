@@ -36,11 +36,13 @@ const Observation = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("resolveMise") }),
   Schema.Struct({ kind: Schema.Literal("miseWhich") }),
   Schema.Struct({ kind: Schema.Literal("miseListing") }),
+  Schema.Struct({ kind: Schema.Literal("miseAllListing") }),
   Schema.Struct({ kind: Schema.Literal("miseInstallPaths"), paths: Schema.Array(Schema.String) }),
   Schema.Struct({ kind: Schema.Literal("miseToolPath"), path: Schema.String }),
   Schema.Struct({ kind: Schema.Literal("pnpmVersion") }),
   Schema.Struct({ kind: Schema.Literal("voltaPackage") }),
   Schema.Struct({ kind: Schema.Literal("npmShim") }),
+  Schema.Struct({ kind: Schema.Literal("macPortsOwner") }),
   Schema.Struct({ kind: Schema.Literal("homebrewExecutable"), prefix: Schema.String }),
   Schema.Struct({ kind: Schema.Literal("homebrewPrefix") }),
 ]);
@@ -61,6 +63,7 @@ const Lookup = Schema.Union([
     kind: Schema.Literals(["pnpm", "vite-plus", "bun"]),
     packageName: Schema.String,
   }),
+  Schema.Struct({ kind: Schema.Literal("npm"), packageName: Schema.String, prefix: Schema.String }),
   Schema.Struct({ kind: Schema.Literal("chocolatey") }),
 ]);
 

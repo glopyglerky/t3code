@@ -215,6 +215,7 @@ fn decode_observation(value: &Value) -> Result<Observation> {
         "resolveMise" => Ok(Observation::ResolveMise),
         "miseWhich" => Ok(Observation::MiseWhich),
         "miseListing" => Ok(Observation::MiseListing),
+        "miseAllListing" => Ok(Observation::MiseAllListing),
         "miseInstallPaths" => Ok(Observation::MiseInstallPaths(text_array(field(
             value, "paths",
         )?)?)),
@@ -222,6 +223,7 @@ fn decode_observation(value: &Value) -> Result<Observation> {
         "pnpmVersion" => Ok(Observation::PnpmVersion),
         "voltaPackage" => Ok(Observation::VoltaPackage),
         "npmShim" => Ok(Observation::NpmShim),
+        "macPortsOwner" => Ok(Observation::MacPortsOwner),
         "homebrewExecutable" => Ok(Observation::HomebrewExecutable(text(field(
             value, "prefix",
         )?)?)),
@@ -255,9 +257,11 @@ pub fn encode_observation(value: &Observation) -> Value {
                     Observation::ResolveMise => "resolveMise",
                     Observation::MiseWhich => "miseWhich",
                     Observation::MiseListing => "miseListing",
+                    Observation::MiseAllListing => "miseAllListing",
                     Observation::PnpmVersion => "pnpmVersion",
                     Observation::VoltaPackage => "voltaPackage",
                     Observation::NpmShim => "npmShim",
+                    Observation::MacPortsOwner => "macPortsOwner",
                     Observation::HomebrewPrefix => "homebrewPrefix",
                     _ => unreachable!(),
                 }
@@ -334,6 +338,50 @@ fn listing(value: &Value, tool: Option<&MiseTool>) -> Result<ObservationValue> {
     Ok(ObservationValue::Listing { present, installs })
 }
 
+fn all_listing(value: &Value) -> Result<ObservationValue> {
+    let raw = optional_text(value, MAX_PROBE_BYTES)?;
+    let parsed = match raw.as_deref() {
+        Some(raw) => match json::parse_with_limits(
+            raw,
+            json::Limits {
+                max_bytes: MAX_PROBE_BYTES,
+                max_depth: 128,
+                max_values: 131_072,
+            },
+        ) {
+            Ok(value) => Some(value),
+            Err(error) if error.message.contains("exceeds") => return Err(Error::InputLimit),
+            Err(error) if error.message == "unpaired Unicode surrogate" => {
+                return Err(Error::InvalidRequest);
+            }
+            Err(_) => None,
+        },
+        None => None,
+    };
+    let mut configured: Vec<(String, Vec<MiseInstall>)> = Vec::new();
+    if let Some(Value::Object(fields)) = parsed {
+        for (name, value) in fields {
+            let Some(installs) = decode_installs(&value) else {
+                return Ok(ObservationValue::AllInstalls(Vec::new()));
+            };
+            if let Some((_, previous)) = configured.iter_mut().find(|(key, _)| *key == name) {
+                *previous = installs;
+            } else {
+                configured.push((name, installs));
+            }
+        }
+        // Object.entries visits canonical array-index keys first, then other
+        // keys in insertion order. Preserve that choice when paths are shared.
+        let index = |key: &str| {
+            key.parse::<u32>()
+                .ok()
+                .filter(|index| *index != u32::MAX && index.to_string() == key)
+        };
+        configured.sort_by_key(|(key, _)| index(key).map_or((1, 0), |index| (0, index)));
+    }
+    Ok(ObservationValue::AllInstalls(configured))
+}
+
 fn observed(value: &Value, tool: Option<&MiseTool>) -> Result<Observed> {
     keys(value, &["request", "result"])?;
     let request = decode_observation(field(value, "request")?)?;
@@ -341,6 +389,7 @@ fn observed(value: &Value, tool: Option<&MiseTool>) -> Result<Observed> {
     let result = match &request {
         Observation::Wrapper => ObservationValue::Text(optional_text(value, MAX_WRAPPER_BYTES)?),
         Observation::MiseListing => listing(value, tool)?,
+        Observation::MiseAllListing => all_listing(value)?,
         Observation::PnpmVersion | Observation::VoltaPackage => {
             ObservationValue::Boolean(boolean(value)?)
         }
@@ -586,6 +635,14 @@ fn encode_lookup(value: &Lookup) -> Value {
         Lookup::Pnpm { package_name } => object(vec![
             ("kind", Value::String("pnpm".to_string())),
             ("packageName", Value::String(package_name.clone())),
+        ]),
+        Lookup::Npm {
+            package_name,
+            prefix,
+        } => object(vec![
+            ("kind", Value::String("npm".to_string())),
+            ("packageName", Value::String(package_name.clone())),
+            ("prefix", Value::String(prefix.clone())),
         ]),
         Lookup::VitePlus { package_name } => object(vec![
             ("kind", Value::String("vite-plus".to_string())),
@@ -1061,17 +1118,42 @@ mod tests {
         }
 
         let mut request = json::parse(request).unwrap();
+        let mut observations = vec![object(vec![
+            (
+                "request",
+                object(vec![("kind", Value::String("wrapper".to_string()))]),
+            ),
+            ("result", Value::Null),
+        ])];
         replace(
             &mut request,
             "observations",
-            Value::Array(vec![object(vec![
-                (
-                    "request",
-                    object(vec![("kind", Value::String("wrapper".to_string()))]),
-                ),
-                ("result", Value::Null),
-            ])]),
+            Value::Array(observations.clone()),
         );
+        let (response, completed) = session.respond(&frame(&request)).unwrap();
+        assert!(!completed);
+        assert_eq!(
+            response,
+            "{\"version\":1,\"ok\":{\"kind\":\"observe\",\"request\":{\"kind\":\"macPortsOwner\"}}}\n"
+        );
+        assert_eq!(
+            session.respond(&frame(&selection_request())),
+            Err(Error::ObservationMismatch)
+        );
+        for mode in ["pre-update", "post-update"] {
+            assert_eq!(
+                session.respond(&frame(&verification_request(mode))),
+                Err(Error::ObservationMismatch)
+            );
+        }
+        observations.push(object(vec![
+            (
+                "request",
+                object(vec![("kind", Value::String("macPortsOwner".to_string()))]),
+            ),
+            ("result", Value::Null),
+        ]));
+        replace(&mut request, "observations", Value::Array(observations));
         let (response, completed) = session.respond(&frame(&request)).unwrap();
         assert!(completed);
         assert_eq!(

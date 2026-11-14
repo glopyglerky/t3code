@@ -253,9 +253,19 @@ function answer(f, command, args) {
   if (args[0] === "which") return { stdout: `${f.which}\n` };
   if (args[0] === "ls" && args.includes("--installed"))
     return {
-      stdout: JSON.stringify([
-        { install_path: f.install, requested_version: f.requestedVersion, active: f.active },
-      ]),
+      stdout: JSON.stringify(
+        args.length === 3
+          ? {
+              [f.backendName ?? "codex"]: [
+                {
+                  install_path: f.install,
+                  requested_version: f.requestedVersion,
+                  active: f.active,
+                },
+              ],
+            }
+          : [{ install_path: f.install, requested_version: f.requestedVersion, active: f.active }],
+      ),
     };
   if (args[0] === "latest") return { stdout: `${f.latest}\n` };
   if (args[0] === "--version" && NodePath.basename(command) === "pnpm")
@@ -272,7 +282,12 @@ function answer(f, command, args) {
       }),
     };
   if (args[0] === "search") return { stdout: `claude-code|${f.latest}\n` };
-  if (args[0] === "upgrade" && command === f.mise && args[1] === "codex" && f.allowUpdate) {
+  if (
+    args[0] === "upgrade" &&
+    command === f.mise &&
+    args[1] === (f.backendName ?? "codex") &&
+    f.allowUpdate
+  ) {
     totalUpdateCommands++;
     f.updates.push(call);
     return { stdout: "Controlled update completed\n" };
@@ -1320,6 +1335,91 @@ try {
     },
   );
 
+  for (const name of ["codex", "invalid;port"]) {
+    await scenario(`MacPorts ${name} blocks automatic native updates`, async () => {
+      const f = await fixture(`macports-${scenarios.length}`, "bin/codex");
+      const port = await writeExecutable(NodePath.join(f.base, "bin", "port"));
+      f.respond = (command, args) => {
+        NodeAssert.equal(command, port);
+        NodeAssert.deepEqual(args, ["provides", f.command]);
+        return { stdout: `${f.command} is provided by: ${name}\n` };
+      };
+      const cap = await run(
+        full(f, {
+          ...definition,
+          mise: undefined,
+          nativeUpdate: {
+            args: ["update"],
+            isCommandPath: () => true,
+          },
+        }),
+        f,
+      );
+      NodeAssert.equal(cap.update, null);
+      NodeAssert.equal(cap.manualCommand, name === "codex" ? "sudo port upgrade codex" : undefined);
+      NodeAssert.equal(f.calls.length, 1);
+      NodeAssert.equal(f.updates.length, 0);
+    });
+  }
+
+  for (const registryError of [false, true]) {
+    await scenario(
+      `npm release-age lookup preserves eligible installed version and error ${registryError}`,
+      async () => {
+        const f = await fixture(
+          `npm-age-${registryError}`,
+          "node/lib/node_modules/@openai/codex/bin/codex.js",
+        );
+        const npm = await writeExecutable(NodePath.join(f.base, "bin", "npm"));
+        const prefix = NodePath.join(f.base, "node");
+        f.respond = (command, args) => {
+          NodeAssert.equal(command, npm);
+          if (args[0] === "outdated") {
+            NodeAssert.deepEqual(args, [
+              "outdated",
+              "-g",
+              "--prefix",
+              prefix,
+              "--json",
+              "@openai/codex",
+            ]);
+            return {
+              stdout: registryError ? '{"error":{"code":"ENOTFOUND"}}' : "{}",
+              code: registryError ? 1 : 0,
+            };
+          }
+          NodeAssert.deepEqual(args, [
+            "ls",
+            "-g",
+            "--prefix",
+            prefix,
+            "--depth",
+            "0",
+            "--json",
+            "@openai/codex",
+          ]);
+          return { stdout: '{"dependencies":{"@openai/codex":{"version":"1.0.0"}}}', code: 1 };
+        };
+        await run(
+          Effect.gen(function* () {
+            const cap = yield* full(f, { ...definition, mise: undefined });
+            NodeAssert.equal(cap.latestVersion, null);
+            NodeAssert.ok(
+              cap.latestVersionCacheKey.startsWith(
+                `npm-global\0${Maintenance.normalizeCommandPath(prefix)}\0`,
+              ),
+            );
+            NodeAssert.equal(f.calls.length, 0);
+            NodeAssert.equal(yield* cap.lookupLatestVersion, registryError ? null : "1.0.0");
+          }),
+          f,
+        );
+        NodeAssert.equal(f.calls.length, registryError ? 1 : 2);
+        NodeAssert.equal(f.updates.length, 0);
+      },
+    );
+  }
+
   await scenario(
     "unproven installations remain manual instead of running a native updater",
     async () => {
@@ -1375,7 +1475,7 @@ try {
           NodeAssert.equal(cap.update.executable, f.mise);
           NodeAssert.deepEqual(cap.update.env, f.env);
           NodeAssert.equal(cap.latestVersion, null);
-          NodeAssert.equal(f.calls.length, 2);
+          NodeAssert.equal(f.calls.length, 3);
           NodeAssert.equal(cap.latestVersionCacheKey.includes(f.env.PRIVATE_INSTALL_TOKEN), false);
           NodeAssert.equal(yield* cap.lookupLatestVersion, "2.0.0");
           NodeAssert.deepEqual(
@@ -1383,6 +1483,7 @@ try {
             [
               ["which", "codex"],
               ["ls", "--json", "--installed", "codex"],
+              ["ls", "--json", "--installed"],
               ["latest", "codex"],
             ],
           );
@@ -1403,6 +1504,34 @@ try {
       NodeAssert.equal(cap.update, null);
       NodeAssert.equal(cap.installPath, f.command);
       NodeAssert.equal(f.calls.length, 2);
+    },
+  );
+
+  await scenario(
+    "mise uses the configured backend name while its version lookup uses the driver tool",
+    async () => {
+      const f = await miseFixture("mise-backend-name");
+      f.backendName = "npm:@openai/codex";
+      await run(
+        Effect.gen(function* () {
+          const cap = yield* full(f);
+          NodeAssert.deepEqual(cap.update.args, ["upgrade", f.backendName]);
+          NodeAssert.equal(cap.update.command, `mise upgrade ${f.backendName}`);
+          NodeAssert.equal(yield* cap.lookupLatestVersion, "2.0.0");
+        }),
+        f,
+      );
+      NodeAssert.ok(
+        f.calls.some(
+          (args) =>
+            JSON.stringify(args) === JSON.stringify([f.mise, "ls", "--json", "--installed"]),
+        ),
+      );
+      NodeAssert.ok(
+        f.calls.some(
+          (args) => JSON.stringify(args) === JSON.stringify([f.mise, "latest", "codex"]),
+        ),
+      );
     },
   );
 
@@ -1645,6 +1774,19 @@ try {
   );
 
   const faults = [
+    [
+      "omitted MacPorts ownership observation",
+      policyReply(
+        "{kind:'resolved',capabilities:{provider:q.owner.provider,packageName:q.owner.packageName,update:{command:q.context.resolvedCommandPath+' update',executable:q.context.resolvedCommandPath,args:['update'],lockKey:'codex-native',env:'none'}}}",
+      ),
+    ],
+    ["unbound full mise listing", policyReply("{kind:'observe',request:{kind:'miseAllListing'}}")],
+    [
+      "forged MacPorts command",
+      policyReply(
+        "{kind:'resolved',capabilities:{provider:q.owner.provider,packageName:q.owner.packageName,update:null,manualCommand:'sudo port upgrade forged'}}",
+      ),
+    ],
     [
       "wrong owner",
       policyReply(

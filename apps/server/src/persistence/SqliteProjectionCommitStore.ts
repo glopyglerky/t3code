@@ -120,6 +120,15 @@ const make = Effect.gen(function* () {
       },
       Effect.mapError(toProjectionCommitStoreError("provider-thread-unchanged")),
     ),
+    subagentUnchanged: Effect.fnUntraced(
+      function* (subagentId, expectedJson) {
+        const rows = yield* sql<{ readonly payload_json: string }>`
+          SELECT payload_json FROM orchestration_v2_projection_subagents WHERE subagent_id = ${subagentId} LIMIT 1
+        `;
+        return rows[0]?.payload_json === expectedJson;
+      },
+      Effect.mapError(toProjectionCommitStoreError("subagent-unchanged")),
+    ),
     turnItemUnchanged: Effect.fnUntraced(
       function* (turnItemId, expectedJson) {
         const rows = yield* sql<{ readonly payload_json: string }>`

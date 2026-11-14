@@ -42,7 +42,11 @@ async function withServices(kind, filename, use, target = fixture) {
     return withNative(executable, target, (client) =>
       Effect.gen(function* () {
         const store = yield* NativeProjectionStore.make;
-        return yield* use({ store, apply: store.apply, transaction: client.withTransaction });
+        return yield* use({
+          store,
+          apply: store.apply,
+          transaction: client.withTransaction,
+        });
       }),
     );
   return withSqlite(filename, (sql) =>
@@ -88,13 +92,19 @@ const seedIndexed = (malformed) =>
       ["thread:family-child", { lineage: family("thread:family-root", true) }],
       [
         "thread:family-other-path",
-        { lineage: family("thread:family-root", true), worktreePath: "/fixture/other" },
+        {
+          lineage: family("thread:family-root", true),
+          worktreePath: "/fixture/other",
+        },
       ],
       ["thread:other-root", {}],
       ["thread:deleted-root", { deletedAt: fixedTime, worktreePath: "/fixture/deleted" }],
       [
         "thread:live-descendant",
-        { lineage: family("thread:deleted-root", true), worktreePath: "/fixture/deleted" },
+        {
+          lineage: family("thread:deleted-root", true),
+          worktreePath: "/fixture/deleted",
+        },
       ],
     ])
       yield* store.apply(makeEvent("thread.created", indexedThread(id, extra), { threadId: id }));
@@ -306,7 +316,11 @@ const exerciseIndexed = (malformed) =>
                 ),
               );
               NodeAssert.deepEqual(
-                shellIds(yield* store.getShellSnapshot({ worktreePath: "/fixture/nested" })),
+                shellIds(
+                  yield* store.getShellSnapshot({
+                    worktreePath: "/fixture/nested",
+                  }),
+                ),
                 [moved.id],
               );
               return yield* Effect.fail("rollback shell index change");
@@ -402,14 +416,25 @@ const threadEvent = (id, extra = {}) =>
       ...jsonPayloads.thread,
       id,
       title: `Title ${id}`,
-      lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: id },
+      lineage: {
+        parentThreadId: null,
+        relationshipToParent: null,
+        rootThreadId: id,
+      },
       ...extra,
     },
     { threadId: id },
   );
 const taskEvent = (id, type, status, ordinal, extra = {}) => {
   const { text: _text, streaming: _streaming, ...base } = jsonPayloads.turnItem;
-  return makeEvent("turn-item.updated", { ...base, id, type, status, ordinal, ...extra });
+  return makeEvent("turn-item.updated", {
+    ...base,
+    id,
+    type,
+    status,
+    ordinal,
+    ...extra,
+  });
 };
 
 const exercise = Effect.fn("checkRedbProjectionShells.exercise")(function* ({
@@ -444,13 +469,34 @@ const exercise = Effect.fn("checkRedbProjectionShells.exercise")(function* ({
   result.awareness = yield* store.getAgentAwarenessSnapshot();
   result.awarenessOne = yield* store.getAgentAwarenessSnapshot("thread:side");
   result.pullSnapshot = yield* store.getPullRequestSnapshot({});
-  result.pullArchived = yield* store.getPullRequestSnapshot({ threadId: "thread:archived" });
-  result.pullUnsettled = yield* store.getPullRequestSnapshot({ unsettledOnly: true });
+  result.pullArchived = yield* store.getPullRequestSnapshot({
+    threadId: "thread:archived",
+  });
+  result.pullUnsettled = yield* store.getPullRequestSnapshot({
+    unsettledOnly: true,
+  });
   result.subagents = yield* store.listActiveSubagentThreadIds();
   result.count = yield* store.countThreads();
   result.activeIndex = yield* store.listActiveShellIndex();
+  result.activeThreads = yield* store.listActiveThreads();
+  result.projectActiveThreads = yield* store.listActiveThreads("project:second");
+  result.missingProjectActiveThreads = yield* store.listActiveThreads("project:missing");
+  NodeAssert.ok(result.activeThreads.some((row) => row.id === "thread:subagent"));
+  NodeAssert.ok(result.activeThreads.some((row) => row.id === "thread:side"));
+  NodeAssert.ok(
+    !result.activeThreads.some(
+      (row) => row.id === "thread:deleted" || row.id === "thread:archived",
+    ),
+  );
+  NodeAssert.deepEqual(
+    result.projectActiveThreads.map((row) => row.id),
+    ["thread:settled-b"],
+  );
+  NodeAssert.deepEqual(result.missingProjectActiveThreads, []);
   result.worktrees = yield* store.getThreadWorktreePaths();
-  result.allWorktrees = yield* store.getThreadWorktreePaths({ includeArchived: true });
+  result.allWorktrees = yield* store.getThreadWorktreePaths({
+    includeArchived: true,
+  });
   result.remote = yield* store.getOpenRemoteDelegatedTasks;
   result.pullRequests = yield* store.getThreadsWithPullRequests();
   result.settlement = yield* store.getSettlementCandidates();
@@ -460,7 +506,10 @@ const exercise = Effect.fn("checkRedbProjectionShells.exercise")(function* ({
     { before: { settledAt: fixedTime }, limit: 10 },
     { before: { settledAt: "2026-11-11T00:00:00.000Z" }, limit: 1 },
     {
-      before: { settledAt: "2026-11-09T12:00:00.000Z", threadId: "thread:settled-a" },
+      before: {
+        settledAt: "2026-11-09T12:00:00.000Z",
+        threadId: "thread:settled-a",
+      },
       limit: 10,
     },
     { before: { settledAt: "2026-11-11T00:00:00.000Z" }, limit: 0 },
@@ -469,13 +518,21 @@ const exercise = Effect.fn("checkRedbProjectionShells.exercise")(function* ({
       projectIds: ["project:second"],
       limit: 0,
     },
-    { before: { settledAt: "2026-11-11T00:00:00.000Z" }, projectIds: [], limit: 10 },
+    {
+      before: { settledAt: "2026-11-11T00:00:00.000Z" },
+      projectIds: [],
+      limit: 10,
+    },
   ])
     result[`older:${JSON.stringify(input)}`] = yield* store.listOlderSettledThreads(input);
 
   // A failed run's terminal error wins over session errors; held queues are not presented.
   yield* apply(
-    makeEvent("run.updated", { ...jsonPayloads.run, status: "failed", completedAt: fixedTime }),
+    makeEvent("run.updated", {
+      ...jsonPayloads.run,
+      status: "failed",
+      completedAt: fixedTime,
+    }),
   );
   yield* apply(
     taskEvent("item:error", "error", "failed", 90, {
@@ -540,12 +597,30 @@ const exercise = Effect.fn("checkRedbProjectionShells.exercise")(function* ({
   );
   result.rolledBack = yield* store.getThreadShell("thread:main");
 
+  // A live fork still inherits run state after its source is deleted.
+  const beforeSourceDelete = yield* store.getThreadShell("thread:fork");
+  yield* apply(
+    makeEvent(
+      "thread.deleted",
+      {
+        ...jsonPayloads.thread,
+        deletedAt: fixedTime,
+      },
+      { id: "event:delete-fork-source" },
+    ),
+  );
+  NodeAssert.equal(yield* store.getThreadShell("thread:main"), null);
+  result.forkAfterSourceDelete = yield* store.getThreadShell("thread:fork");
+  NodeAssert.deepEqual(result.forkAfterSourceDelete, beforeSourceDelete);
+  result.afterSourceDelete = yield* store.getShellSnapshot();
+  NodeAssert.ok(!result.afterSourceDelete.threads.some((thread) => thread.id === "thread:main"));
+  const countBeforeRollback = yield* store.countThreads();
   const before = normalized(yield* store.getShellSnapshot());
   yield* failed(
     transaction(
       Effect.gen(function* () {
         yield* apply(threadEvent("thread:discarded"));
-        NodeAssert.equal(yield* store.countThreads(), result.count + 1);
+        NodeAssert.equal(yield* store.countThreads(), countBeforeRollback + 1);
         NodeAssert.ok((yield* store.getThreadShell("thread:discarded")) !== null);
         return yield* Effect.fail("rollback shell rows");
       }),
@@ -614,7 +689,11 @@ try {
         [
           "thread:fork",
           {
-            forkedFrom: { type: "run", threadId: "thread:main", runId: "run:main" },
+            forkedFrom: {
+              type: "run",
+              threadId: "thread:main",
+              runId: "run:main",
+            },
             lineage: {
               parentThreadId: "thread:main",
               relationshipToParent: "fork",
@@ -631,7 +710,9 @@ try {
         }),
       );
       yield* store.apply(
-        taskEvent("item:search", "web_search", "running", 20, { query: "fixture" }),
+        taskEvent("item:search", "web_search", "running", 20, {
+          query: "fixture",
+        }),
       );
       yield* store.apply(
         makeEvent("message.updated", {
@@ -670,7 +751,7 @@ try {
     "Native shell summaries match immutable SQLite",
   );
   checks.push(
-    "The complete NativeProjectionStore serves all fourteen shell/query methods with immutable upstream parity",
+    "The complete NativeProjectionStore serves all fifteen shell/query methods with immutable upstream parity",
     "Active/archive/project/family/worktree/list filters, fork inheritance, event snapshot sequence and deferred decode agree",
     "Settlement lists, compact active index, user-authored timestamps and older-settled cursors/counts agree",
     "Held queues, failed roots, silent compaction, rolled-back counts and pending tool work retain source presentation",

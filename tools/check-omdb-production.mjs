@@ -295,6 +295,7 @@ try {
       "apps/server/src/persistence/omdb-schema.json",
       "apps/server/src/persistence/omdb-schema-80.json",
       "apps/server/src/persistence/omdb-schema-88.json",
+      "apps/server/src/persistence/omdb-schema-89.json",
       "tools/omdb-schema-upgrade-fixture.mjs",
       "apps/server/src/persistence/SelectedPersistence.ts",
       "apps/server/src/persistence/Sqlite.ts",

@@ -32,6 +32,8 @@ import * as NativeAuthSessions from "./NativeAuthSessions.ts";
 import * as AuthSessions from "./AuthSessions.ts";
 import * as NativeAuthPairingLinks from "./NativeAuthPairingLinks.ts";
 import * as AuthPairingLinks from "./AuthPairingLinks.ts";
+import * as NativeAuthConnectDevices from "./NativeAuthConnectDevices.ts";
+import * as AuthConnectDevices from "./AuthConnectDevices.ts";
 import * as NativeProjectionMaintenance from "../orchestration-v2/NativeProjectionMaintenance.ts";
 import * as ProjectionMaintenance from "../orchestration-v2/ProjectionMaintenance.ts";
 
@@ -117,6 +119,10 @@ export const authPairing = select(
   native(NativeAuthPairingLinks.layer),
   sqlite(AuthPairingLinks.layer),
 );
+export const authConnectDevices = select(
+  native(NativeAuthConnectDevices.layer),
+  sqlite(AuthConnectDevices.layer),
+);
 
 // CLI readers may share a current server's schema, but pending migrations need
 // the same exclusive ownership check as upstream's CLI persistence layer.
@@ -147,4 +153,8 @@ export const cliAuthSessions = select(
 export const cliAuthPairing = select(
   native(NativeAuthPairingLinks.layer),
   sqliteCli(AuthPairingLinks.layer),
+);
+export const cliAuthConnectDevices = select(
+  native(NativeAuthConnectDevices.layer),
+  sqliteCli(AuthConnectDevices.layer),
 );

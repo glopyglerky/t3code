@@ -296,8 +296,16 @@ async fn select(session: &mut Session, q: ProjectionContextQuery) -> Result<Valu
         "turn_transfers"=>{let mut rows=related(session,TRANSFERS,"source_thread_id",t).await?;rows.extend(related(session,TRANSFERS,"target_thread_id",t).await?);(TRANSFERS,sorted(unique(TRANSFERS,rows)?,&[])?)},
         "turn_items"=>(ITEMS,sorted(keep(related(session,ITEMS,"run_id",required(&q.run_id)?).await?,|row|Ok(string(row,"thread_id")?==*t))?,&["ordinal","turn_item_id"])?),
         "turn_sessions"=>(SESSIONS,sorted(bound_sessions(session,t).await?,&["updated_at","provider_session_id"])?),
-        "turn_messages"=>{let run=point(session,RUNS,Some(required(&q.run_id)?),Some(t)).await?;let user=run.first().map(p).transpose()?.and_then(|p|p.get("userMessageId").and_then(Value::as_str).map(str::to_owned));
-            (MESSAGES,sorted(keep(thread_rows(session,MESSAGES,t).await?,|row|Ok(user.as_deref()==Some(id(row,MESSAGES)?.as_str())||string(row,"role")?=="user"&&(flag(row,"nativeCompactCommand")?||flag(row,"nativeGoalCommand")?)))?,&["created_at","message_id"])?)},
+        "turn_messages" => {
+            let ids = q.ids.as_deref().unwrap_or(&[]);
+            let rows = keep(thread_rows(session, MESSAGES, t).await?, |row| {
+                let message_id = id(row, MESSAGES)?;
+                Ok(ids.iter().any(|value| value.as_deref() == Some(message_id.as_str()))
+                    || (string(row, "role")? == "user"
+                        && (flag(row, "nativeCompactCommand")? || flag(row, "nativeGoalCommand")?)))
+            })?;
+            (MESSAGES, sorted(rows, &["created_at", "message_id"])?)
+        },
         "turn_conversation" => {
             let mut present = false;
             for row in thread_rows(session, MESSAGES, t).await? {

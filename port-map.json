@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "recovery_commit": "d29a94f3a175eac1f26c548023fedd8695cedfaf",
-  "integrated_upstream_commit": "c7a3f02e3851923ced8ebd000db79f641e11b038",
+  "integrated_upstream_commit": "913d7fc45ec5814fff25c819cfe4de193ea42d63",
   "source_history": [
     "521ac7c218b3faa74281fb72fc36ce74a0951fb3",
     "822671581383a357c5dc8d3ea9984b408c3e03c6",
@@ -13,7 +13,9 @@
     "ed7e5010baafd73d0164ee1d5adbd21e26f8f9cb",
     "4aec277f79b2d4dabd88f13cfab264d9f80cbcef",
     "2d8a843e6be9ca170f3bce98cc92ad76617b00c4",
-    "c7a3f02e3851923ced8ebd000db79f641e11b038"
+    "c7a3f02e3851923ced8ebd000db79f641e11b038",
+    "121f0cf014dcd6e94327588bf3f1f200a5f07ad7",
+    "913d7fc45ec5814fff25c819cfe4de193ea42d63"
   ],
   "upstream_removals": [
     {
@@ -45,7 +47,7 @@
       "reason": "Upstream replaced the t3.16 Enriched Markdown archive with its updated t3.18 archive and locked the new dependency identity.",
       "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
       "replacement_paths": [
-        "apps/mobile/deps/react-native-enriched-markdown-1.2.0-t3.18-0dc7ed81.tgz"
+        "apps/mobile/deps/react-native-enriched-markdown-1.2.0-t3.18-16db4c75.tgz"
       ]
     },
     {
@@ -516,7 +518,7 @@
       "reason": "Upstream dropped the t3.16 patch when moving to the updated t3.18 source archive. The replacement archive is the dependency source at the integrated revision.",
       "fork_disposition": "The fork and recovery copies match the previous upstream blob exactly; no fork-specific edits require migration. Retain the upstream behavior and coverage at the listed replacement paths.",
       "replacement_paths": [
-        "apps/mobile/deps/react-native-enriched-markdown-1.2.0-t3.18-0dc7ed81.tgz"
+        "apps/mobile/deps/react-native-enriched-markdown-1.2.0-t3.18-16db4c75.tgz"
       ]
     },
     {
@@ -567,7 +569,7 @@
       "reason": "Upstream replaced or removed this source in the integrated default-branch revision.",
       "fork_disposition": "The fork copy matched the prior upstream source. Its upstream removal is preserved; this is not retirement through Rust acceptance.",
       "replacement_paths": [
-        "apps/mobile/deps/react-native-enriched-markdown-1.2.0-t3.18-0dc7ed81.tgz"
+        "apps/mobile/deps/react-native-enriched-markdown-1.2.0-t3.18-16db4c75.tgz"
       ]
     },
     {
@@ -711,6 +713,27 @@
       "fork_disposition": "The fork copy matched the prior upstream source. Its upstream removal is preserved; this is not retirement through Rust acceptance.",
       "replacement_paths": ["packages/client-runtime/src/work-log/embeddedScripts.ts"],
       "recovery_blob": "72847b773114428f5a0c9b6a8fa7b3ce76ee1a14"
+    },
+    {
+      "path": "apps/mobile/deps/react-native-enriched-markdown-1.2.0-t3.18-0dc7ed81.tgz",
+      "source_commit": "c7a3f02e3851923ced8ebd000db79f641e11b038",
+      "source_blob": "74fcb8768906f0867ac62de03f214f6e25e39644",
+      "removed_in": "121f0cf014dcd6e94327588bf3f1f200a5f07ad7",
+      "reason": "Upstream updated the vendored mobile dependency.",
+      "fork_disposition": "The fork copy matched the preceding upstream source; preserve the upstream removal and Git history. This removal does not claim Rust retirement.",
+      "replacement_paths": [
+        "apps/mobile/deps/react-native-enriched-markdown-1.2.0-t3.18-16db4c75.tgz"
+      ]
+    },
+    {
+      "path": "apps/server/src/orchestration-v2/testkit/fixtures/message_steering/grok_transcript.ndjson",
+      "source_commit": "c7a3f02e3851923ced8ebd000db79f641e11b038",
+      "source_blob": "da8314feb536e8c7bfec6aaa23d97e13b36227c4",
+      "removed_in": "121f0cf014dcd6e94327588bf3f1f200a5f07ad7",
+      "reason": "Upstream removed the obsolete Grok message-steering fixture.",
+      "fork_disposition": "The fork copy matched the preceding upstream source; preserve the upstream removal and Git history. This removal does not claim Rust retirement.",
+      "replacement_paths": [],
+      "recovery_blob": "a7f4f9fbbd8cf693583868a264fd0dd4bb3b3beb"
     }
   ],
   "supported_targets": [
@@ -724,7 +747,7 @@
     "ios",
     "android"
   ],
-  "qualification": "Upstream c7a3f02e is integrated with retained production Rust adapters. Native storage, orchestration and API behavior requires exact-commit qualification; this integration does not retire implementations for unqualified platforms.",
+  "qualification": "Upstream 913d7fc4 is integrated with retained production Rust adapters. Native schema 91, Connect authorization, projections, search, maintenance and Codex execution require exact-commit qualification. Source integration does not establish unqualified platform acceptance.",
   "compiler_policy": "The current full-Rust route is the pinned Lustr coordinator with rustc-derived BlueFe. Direct native Lust coverage requires its own exact compiler identity and behavior receipts. Application CI consumes qualified compiler artifacts.",
   "layout_policy": "Retain upstream paths. Current crates are preserved during recovery; domain_owner records where their responsibilities belong. Move source separately from behavior changes.",
   "intentional_divergences": [
@@ -736,7 +759,7 @@
       "id": "command-and-dispatch-policy",
       "state": "integrated",
       "domain_owner": "apps/server/src/orchestration-v2",
-      "reviewed_upstream_commit": "c7a3f02e3851923ced8ebd000db79f641e11b038",
+      "reviewed_upstream_commit": "913d7fc45ec5814fff25c819cfe4de193ea42d63",
       "upstream_sources": [
         {
           "path": "apps/server/src/orchestration-v2/CommandPolicy.ts",
@@ -785,7 +808,7 @@
       "id": "project-commands",
       "state": "integrated",
       "domain_owner": "apps/server/src/project",
-      "reviewed_upstream_commit": "c7a3f02e3851923ced8ebd000db79f641e11b038",
+      "reviewed_upstream_commit": "913d7fc45ec5814fff25c819cfe4de193ea42d63",
       "upstream_sources": [
         {
           "path": "apps/server/src/orchestration-v2/ProjectCommands.ts",
@@ -793,7 +816,7 @@
         },
         {
           "path": "apps/server/src/project/ProjectService.ts",
-          "blob": "464454ebba7638375c59880f8f5505ea6d9be1d5"
+          "blob": "4bdc8386438cad7908a832c42df9ac1a7b357c8e"
         }
       ],
       "rust_paths": [
@@ -837,7 +860,7 @@
       "id": "guest-share-decisions",
       "state": "integrated",
       "domain_owner": "apps/server/src/guest",
-      "reviewed_upstream_commit": "c7a3f02e3851923ced8ebd000db79f641e11b038",
+      "reviewed_upstream_commit": "913d7fc45ec5814fff25c819cfe4de193ea42d63",
       "upstream_sources": [
         {
           "path": "apps/server/src/orchestration-v2/GuestShareDecider.ts",
@@ -894,11 +917,11 @@
       "id": "provider-recovery",
       "state": "integrated",
       "domain_owner": "apps/server/src/orchestration-v2",
-      "reviewed_upstream_commit": "c7a3f02e3851923ced8ebd000db79f641e11b038",
+      "reviewed_upstream_commit": "913d7fc45ec5814fff25c819cfe4de193ea42d63",
       "upstream_sources": [
         {
           "path": "packages/provider-core/src/server/subagentProjection.ts",
-          "blob": "699067abb3e6f0b8735976a9f0aca5705631a8ba"
+          "blob": "f476bdc70ff800473bdb93a55df70add177a9bae"
         },
         {
           "path": "apps/server/src/orchestration-v2/ProviderRuntimeRecoveryService.ts",
@@ -946,11 +969,11 @@
       "id": "provider-maintenance",
       "state": "integrated",
       "domain_owner": "packages/provider-core/src/server",
-      "reviewed_upstream_commit": "c7a3f02e3851923ced8ebd000db79f641e11b038",
+      "reviewed_upstream_commit": "913d7fc45ec5814fff25c819cfe4de193ea42d63",
       "upstream_sources": [
         {
           "path": "packages/provider-core/src/server/maintenanceResolver.ts",
-          "blob": "88730be615d7878a8b85eb1e9839125fa77a817b"
+          "blob": "d83d7375cf646b3d49ee025dceeb45560b25a2b4"
         },
         {
           "path": "apps/server/src/provider/providerMaintenanceRunner.ts",
@@ -999,11 +1022,11 @@
       "id": "codex-structured-generation",
       "state": "integrated",
       "domain_owner": "apps/server/src/textGeneration",
-      "reviewed_upstream_commit": "c7a3f02e3851923ced8ebd000db79f641e11b038",
+      "reviewed_upstream_commit": "913d7fc45ec5814fff25c819cfe4de193ea42d63",
       "upstream_sources": [
         {
           "path": "apps/server/src/textGeneration/CodexTextGeneration.ts",
-          "blob": "4de5392502c8c32abf01d4b7654c1777dc6d774a"
+          "blob": "49c60166111baff98b5160f9f963ea41a8d3d963"
         }
       ],
       "rust_paths": [
@@ -1054,15 +1077,15 @@
       "id": "codex-process-runtime",
       "state": "integrated",
       "domain_owner": "apps/server/src/provider",
-      "reviewed_upstream_commit": "c7a3f02e3851923ced8ebd000db79f641e11b038",
+      "reviewed_upstream_commit": "913d7fc45ec5814fff25c819cfe4de193ea42d63",
       "upstream_sources": [
         {
           "path": "apps/server/src/provider/CodexProvider.ts",
-          "blob": "ab2cda61e53ee3cdd0712caebbfa78c768df1315"
+          "blob": "df105d3ba20feb7b06ae11d1dfd5bf5def73f2b6"
         },
         {
           "path": "apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts",
-          "blob": "efa5d0a9c28f1b24a11d781e63fefec915078e16"
+          "blob": "f7d3b49a687e51723143f5f7ad8dd53a830fbe25"
         }
       ],
       "rust_paths": [
@@ -1108,7 +1131,7 @@
       "id": "redb-persistence",
       "state": "integrated",
       "domain_owner": "apps/server/src/persistence",
-      "reviewed_upstream_commit": "c7a3f02e3851923ced8ebd000db79f641e11b038",
+      "reviewed_upstream_commit": "913d7fc45ec5814fff25c819cfe4de193ea42d63",
       "upstream_sources": [
         {
           "path": "apps/server/integration/transferBudgetV2.integration.test.ts",
@@ -1116,15 +1139,15 @@
         },
         {
           "path": "apps/server/src/auth/EnvironmentAuth.ts",
-          "blob": "58c1f1bc0cadfa3d128cb874c606dfde3bb299f5"
+          "blob": "384afb2d72c1c33e0db921a05f6597f1597ac8d9"
         },
         {
           "path": "apps/server/src/auth/PairingGrantStore.ts",
-          "blob": "bf9eccee8c51ba5aa4718808f4ac9396267cd725"
+          "blob": "f5f558d57526a343562cfa75efd06068123a9b9e"
         },
         {
           "path": "apps/server/src/auth/SessionStore.ts",
-          "blob": "5a25d152c5174ff0b016faec866ff4a5099da2a2"
+          "blob": "5717479a47ba92b702dda00f05023c74fca13466"
         },
         {
           "path": "apps/server/src/background/KeepAwake.ts",
@@ -1148,7 +1171,7 @@
         },
         {
           "path": "apps/server/src/config.ts",
-          "blob": "1acad23117c8d61e7a24831e66c1312aad382bd4"
+          "blob": "c707c912d672d1afc07c231057315a4aabd4f80a"
         },
         {
           "path": "apps/server/src/mcpApps/McpAppModelContext.ts",
@@ -1164,11 +1187,11 @@
         },
         {
           "path": "apps/server/src/orchestration-v2/EffectWorker.ts",
-          "blob": "9dd50798057453db58bb8dcdd882fb12bee69398"
+          "blob": "bbb214542540db6dbaab3ffb80254bab0b0d553b"
         },
         {
           "path": "apps/server/src/orchestration-v2/EventSink.ts",
-          "blob": "edae3077912ec3fb272df9d4d8a8258d91414cfd"
+          "blob": "6b27f90aa6d5c6aba3ebb2b992266e72f9ed2006"
         },
         {
           "path": "apps/server/src/orchestration-v2/EventStore.ts",
@@ -1184,7 +1207,7 @@
         },
         {
           "path": "apps/server/src/orchestration-v2/ProjectionStore.ts",
-          "blob": "721006481e83e828588dfd9039f598114ae2d24a"
+          "blob": "3c1d353f061b4a729cd6ce6a7b79da9628dff96d"
         },
         {
           "path": "apps/server/src/orchestration-v2/ProviderCommitBatch.ts",
@@ -1200,11 +1223,11 @@
         },
         {
           "path": "apps/server/src/orchestration-v2/ThreadSearch.test.ts",
-          "blob": "421e79f5a090468b2a4cc6efe90c9f1d35b65cdd"
+          "blob": "1dee6c9cfc0f7cf16b472bc9572e383bec04e10b"
         },
         {
           "path": "apps/server/src/orchestration-v2/ThreadSearch.ts",
-          "blob": "d3c96a40ce2b82d68010fe031033818f3e9fb2a9"
+          "blob": "3bcdf9e84d4a22420c24aa80d21752eaa0759bc0"
         },
         {
           "path": "apps/server/src/orchestration-v2/TurnItemPositionStore.ts",
@@ -1228,7 +1251,7 @@
         },
         {
           "path": "apps/server/src/orchestration-v2/runtimeLayer.ts",
-          "blob": "0cfa599ed5486c07005b01493ddb8491354da70d"
+          "blob": "6866633397168e8e4c006a55b6324e9a9a6f5afa"
         },
         {
           "path": "apps/server/src/peer/PeerLinks.ts",
@@ -1236,11 +1259,11 @@
         },
         {
           "path": "apps/server/src/persistence/AuthPairingLinks.ts",
-          "blob": "52323f9690af5e2d54efe0921d664976d656a564"
+          "blob": "df513f9963ca628e8b0370838d3db225e8a00a0a"
         },
         {
           "path": "apps/server/src/persistence/AuthSessions.ts",
-          "blob": "7b82b012e674fefa121582f8bf3a2c7b885ec55c"
+          "blob": "04f10dd34b0b5fe156c8b2fde422ba048252632f"
         },
         {
           "path": "apps/server/src/persistence/DatabaseStorage.ts",
@@ -1248,7 +1271,7 @@
         },
         {
           "path": "apps/server/src/persistence/Migrations.ts",
-          "blob": "c076c0119d2f9dc7289d175c48238a8d6d6dbe6a"
+          "blob": "f1b8f6c9d806ebed2836f561220841bb3f083f5b"
         },
         {
           "path": "apps/server/src/persistence/Migrations/089_ShellThreadReadIndexes.ts",
@@ -1304,7 +1327,7 @@
         },
         {
           "path": "apps/server/src/server.ts",
-          "blob": "dae95787afe823e9c758794b1457e5e4398cef38"
+          "blob": "d5e42154898cd2012ca2d43db3262d00f68d8a66"
         },
         {
           "path": "apps/server/src/serverOwnership.ts",
@@ -1320,7 +1343,7 @@
         },
         {
           "path": "apps/server/src/storageCleanup.ts",
-          "blob": "0cf5eca0b80d0cc6a9f8938c7593c0750b47f555"
+          "blob": "257fef03ae52dcd778ab0f2add6944706ffb0d90"
         },
         {
           "path": "apps/server/src/triage/triagePrompt.ts",
@@ -1336,19 +1359,19 @@
         },
         {
           "path": "apps/server/src/ws.test.ts",
-          "blob": "c4470e0905c8a32b574a4efd57745f09af662a4d"
+          "blob": "660548c1dd68ba3ca721294bb6b1177d2adb2e6b"
         },
         {
           "path": "apps/server/src/ws.ts",
-          "blob": "66512ab6a22c0a5ab2d307c8a918b5fa5471ddb9"
+          "blob": "16a8d856ab7e9dc05828dbb92b4c53ab82be02f4"
         },
         {
           "path": "packages/shared/package.json",
-          "blob": "ba0b394f26d0c5e136b3cb6ed37259ce5b76dd03"
+          "blob": "c49d9c03c85a29969524c4eb1216fc1884f0ca52"
         },
         {
           "path": "packages/shared/src/nodeSqliteClient.ts",
-          "blob": "73872a8805b0ffbb823ecc9d8af792c74b8c79dd"
+          "blob": "ab14675c7bfc07b5818ca68e541ac7d77421429e"
         },
         {
           "path": "scripts/dev-runner.test.ts",
@@ -1365,6 +1388,10 @@
         {
           "path": "scripts/mobile-showcase.ts",
           "blob": "425c371fd0c2a3a76b160e7f309b6de331465bfa"
+        },
+        {
+          "path": "apps/server/src/persistence/AuthConnectDevices.ts",
+          "blob": "52ec1039f018c76e4ed2808a9ee72826fd257400"
         }
       ],
       "rust_paths": [
@@ -1552,6 +1579,7 @@
         "apps/server/src/persistence/migrateSqliteToOmdb.ts",
         "apps/server/src/persistence/omdb-schema-80.json",
         "apps/server/src/persistence/omdb-schema-88.json",
+        "apps/server/src/persistence/omdb-schema-89.json",
         "apps/server/src/persistence/omdb-schema.json",
         "apps/server/src/persistence/sqliteExport.d.mts",
         "apps/server/src/persistence/sqliteExport.mjs",
@@ -1650,7 +1678,8 @@
         "tools/redb-thread-find-tsconfig.json",
         "tools/redb-thread-search-tsconfig.json",
         "tools/server-test-runtime/package-lock.json",
-        "tools/server-test-runtime/package.json"
+        "tools/server-test-runtime/package.json",
+        "apps/server/src/persistence/NativeAuthConnectDevices.ts"
       ],
       "platform_routes": [
         {
@@ -1700,18 +1729,18 @@
         "tools/check-redb-cli.mjs"
       ],
       "retired_paths": [],
-      "notes": "The selected production server and CLI use the complete omdb application boundary through one transaction owner. Native upgrades from the exact schema80 and schema88 histories to89 preserve activated data and import lineage. Schema80 backfills citation-aware message search, turn item counts and custom project titles; schema89 adds indexed worktree and family shell selection before payload decoding. Typed native APIs cover atomic event guards, outbox claims, compaction filters, fork visibility, shell and recovery state, attachment retention, scheduler compare-and-set, KeepAwake active-run existence and legacy subagent identifier retention. The active-run query stops at the first indexed match. Queue-only run filters use the existing global queued-run index and recheck thread ownership, avoiding completed history. Explicit run-ID filters read compact keys directly; includeLatestRun preserves full-thread candidates and original filtering/order semantics. Bootstrap and CLI preserve upgrade ownership and never reopen SQLite after native activation. SQLite remains the migration source, immutable behavior comparison and unqualified-platform implementation. Fresh exact-commit platform receipts remain required. The retained native project API and standalone plan-and-project executable share the core project projection reducer and remain independently compared with immutable ProjectStore behavior; the selected application graph uses shared ProjectStore semantics over native project rows.",
+      "notes": "The selected production server and CLI use the complete omdb application boundary through one transaction owner. Native upgrades from the exact schema80 and schema88 histories to89 preserve activated data and import lineage. Schema80 backfills citation-aware message search, turn item counts and custom project titles; schema89 adds indexed worktree and family shell selection before payload decoding. Typed native APIs cover atomic event guards, outbox claims, compaction filters, fork visibility, shell and recovery state, attachment retention, scheduler compare-and-set, KeepAwake active-run existence and legacy subagent identifier retention. The active-run query stops at the first indexed match. Queue-only run filters use the existing global queued-run index and recheck thread ownership, avoiding completed history. Explicit run-ID filters read compact keys directly; includeLatestRun preserves full-thread candidates and original filtering/order semantics. Bootstrap and CLI preserve upgrade ownership and never reopen SQLite after native activation. SQLite remains the migration source, immutable behavior comparison and unqualified-platform implementation. Fresh exact-commit platform receipts remain required. The retained native project API and standalone plan-and-project executable share the core project projection reducer and remain independently compared with immutable ProjectStore behavior; the selected application graph uses shared ProjectStore semantics over native project rows. Schema 91 retains atomic schema-89 upgrades and adds persistent Connect device trust and denied requests. Conditional subagent writes and partial thread visits use the same transaction owner. Native active-thread listing, inherited deleted-source shells, continuation-message reads and scheduled scratch-folder protection track the integrated source.",
       "rust_crates": ["crates/core", "crates/storage"]
     },
     {
       "id": "iroh-transport",
       "state": "candidate",
       "domain_owner": "infra/relay",
-      "reviewed_upstream_commit": "c7a3f02e3851923ced8ebd000db79f641e11b038",
+      "reviewed_upstream_commit": "913d7fc45ec5814fff25c819cfe4de193ea42d63",
       "upstream_sources": [
         {
           "path": "apps/server/src/ws.ts",
-          "blob": "66512ab6a22c0a5ab2d307c8a918b5fa5471ddb9"
+          "blob": "16a8d856ab7e9dc05828dbb92b4c53ab82be02f4"
         }
       ],
       "rust_paths": [
@@ -1742,15 +1771,15 @@
       "id": "native-api-component",
       "state": "candidate",
       "domain_owner": "apps/server",
-      "reviewed_upstream_commit": "c7a3f02e3851923ced8ebd000db79f641e11b038",
+      "reviewed_upstream_commit": "913d7fc45ec5814fff25c819cfe4de193ea42d63",
       "upstream_sources": [
         {
           "path": "packages/contracts/src/orchestrationV2.ts",
-          "blob": "35ac16fc063a410f23d6667ddd3d97fac62f1387"
+          "blob": "e4a57262d12dc934e378e5372b7cc103733e307e"
         },
         {
           "path": "apps/server/src/ws.ts",
-          "blob": "66512ab6a22c0a5ab2d307c8a918b5fa5471ddb9"
+          "blob": "16a8d856ab7e9dc05828dbb92b4c53ab82be02f4"
         }
       ],
       "rust_paths": [

@@ -65,6 +65,20 @@ const ActiveShellIndexRow = Schema.Struct({
   has_remote_tasks: Schema.Number,
 });
 
+const ActiveThreadListRow = Schema.Struct({
+  thread_id: Schema.String,
+  project_id: Schema.String,
+  title: Schema.String,
+  updated_at: Schema.String,
+  relationship_to_parent: Nullable,
+  parent_thread_id: Nullable,
+  root_thread_id: Schema.String,
+  side_chat: Schema.NullOr(Schema.Number),
+  settled_override: Nullable,
+  settled_at: Nullable,
+  snoozed_until: Nullable,
+});
+
 const makeRows = Effect.gen(function* () {
   const client = yield* RedbClient;
   while (!(yield* client.prepareProjectionReads).prepared) yield* Effect.yieldNow;
@@ -175,6 +189,11 @@ const makeRows = Effect.gen(function* () {
       { kind: "count_threads" },
       Schema.Array(Schema.Struct({ count: Schema.Number })),
     ),
+    selectActiveThreads: (projectId) =>
+      request(
+        { kind: "active_threads", ...(projectId === undefined ? {} : { project_id: projectId }) },
+        Schema.Array(ActiveThreadListRow),
+      ),
     selectActiveShellIndex: request({ kind: "active_index" }, Schema.Array(ActiveShellIndexRow)),
     findGuestShareThread: (shareId) =>
       request({ kind: "guest_share", share_id: shareId }, Schema.Array(ThreadIdRow)),

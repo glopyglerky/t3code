@@ -202,7 +202,10 @@ async function run(f, body, options = {}) {
         );
         command = {
           ...command,
-          options: { ...command.options, stdin: { ...command.options.stdin, stream } },
+          options: {
+            ...command.options,
+            stdin: { ...command.options.stdin, stream },
+          },
         };
       }
       return actual.spawn(command).pipe(
@@ -233,7 +236,11 @@ async function run(f, body, options = {}) {
               }),
             );
             return {
-              config: { ...config, customModels: [], homePath: "~/managed-home" },
+              config: {
+                ...config,
+                customModels: [],
+                homePath: "~/managed-home",
+              },
               environment: {
                 ...f.env,
                 T3_CODE_LS_GENERATION_EXECUTABLE: "/untrusted-provider-overlay",
@@ -354,7 +361,11 @@ try {
         NodeAssert.deepEqual(
           value(
             await run(f, (service) =>
-              service[operation]({ ...input, cwd: f.workspace, modelSelection: defaultSelection }),
+              service[operation]({
+                ...input,
+                cwd: f.workspace,
+                modelSelection: defaultSelection,
+              }),
             ),
           ),
           expected,
@@ -407,7 +418,9 @@ try {
   );
 
   await check("model fallback drops incompatible options and uses the listed default", async () => {
-    const f = await fixture({ models: ["gpt-5.4-mini", { slug: "gpt-6-astra", isDefault: true }] });
+    const f = await fixture({
+      models: ["gpt-5.4-mini", { slug: "gpt-6-astra", isDefault: true }],
+    });
     value(
       await run(f, (service) =>
         title(service, f, {
@@ -469,6 +482,33 @@ try {
         ),
       );
       NodeAssert.ok(exec.args.includes('service_tier="priority"'));
+    },
+  );
+
+  await check(
+    "MCP isolation keeps user nested config and defeats a whole-table override",
+    async () => {
+      const f = await fixture({
+        config: {
+          launchArgs: "--config mcp_servers.safe.enabled=true --config mcp_servers={}",
+        },
+        servers: [
+          { name: "safe", enabled: true },
+          { name: "dotted.name", enabled: true },
+          { name: "equal=name", enabled: true },
+        ],
+      });
+      value(await run(f, (service) => title(service, f)));
+      const exec = (await closed(f))[1];
+      const table =
+        'mcp_servers={"safe"={enabled=false},"dotted.name"={enabled=false},"equal=name"={enabled=false}}';
+      NodeAssert.ok(exec.args.indexOf(table) < exec.args.indexOf("mcp_servers.safe.enabled=true"));
+      NodeAssert.ok(exec.args.lastIndexOf(table) > exec.args.indexOf("mcp_servers={}"));
+      NodeAssert.ok(
+        exec.args.indexOf("mcp_servers.safe.enabled=false") > exec.args.lastIndexOf(table),
+      );
+      NodeAssert.ok(!exec.args.includes("mcp_servers.dotted.name.enabled=false"));
+      NodeAssert.ok(!exec.args.includes("mcp_servers.equal=name.enabled=false"));
     },
   );
 
@@ -719,7 +759,9 @@ try {
   });
 
   await check("an unset selector uses the default native generation executable", async () => {
-    const f = await fixture({ environment: { T3_CODE_LS_GENERATION_EXECUTABLE: executable } });
+    const f = await fixture({
+      environment: { T3_CODE_LS_GENERATION_EXECUTABLE: executable },
+    });
     NodeAssert.deepEqual(
       value(await run(f, (service) => title(service, f), { unselected: true })),
       { title: "Fixture title" },
@@ -732,7 +774,9 @@ try {
   await check(
     "the application TextGeneration service routes to the selected native implementation",
     async () => {
-      const f = await fixture({ output: JSON.stringify({ transcription: "Routed fixture" }) });
+      const f = await fixture({
+        output: JSON.stringify({ transcription: "Routed fixture" }),
+      });
       let textGeneratorLookups = 0;
       NodeAssert.deepEqual(
         value(

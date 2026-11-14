@@ -5,6 +5,8 @@
     "../apps/server/src/persistence/AuthSessions.ts",
     "../apps/server/src/persistence/AuthPairingLinks.ts",
     "../apps/server/src/persistence/NativeAuthSessions.ts",
-    "../apps/server/src/persistence/NativeAuthPairingLinks.ts"
+    "../apps/server/src/persistence/NativeAuthPairingLinks.ts",
+    "../apps/server/src/persistence/AuthConnectDevices.ts",
+    "../apps/server/src/persistence/NativeAuthConnectDevices.ts"
   ]
 }

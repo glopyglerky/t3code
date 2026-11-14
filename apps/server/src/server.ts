@@ -4,7 +4,6 @@ import * as Random from "effect/Random";
 import * as EnvironmentKeys from "./cloud/environmentKeys.ts";
 import * as AssetSigner from "./assets/AssetSigner.ts";
 import * as DatabaseStorage from "./persistence/DatabaseStorage.ts";
-import * as StorageCleanup from "./storageCleanup.ts";
 import * as PullRequestSyncReactor from "./orchestration-v2/PullRequestSyncReactor.ts";
 import * as PullRequestWatchReactor from "./orchestration-v2/PullRequestWatchReactor.ts";
 import * as DelegatedTaskQuestionReactor from "./orchestration-v2/DelegatedTaskQuestionReactor.ts";
@@ -29,6 +28,7 @@ import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 
 import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
 import * as HostPowerMonitor from "./background/HostPowerMonitor.ts";
+import * as NonBlockingSpawner from "./process/NonBlockingSpawner.ts";
 import * as KeepAwake from "./background/KeepAwake.ts";
 import * as ServerConfig from "./config.ts";
 import { withUntracedRequests } from "./http.ts";
@@ -55,8 +55,6 @@ import * as PullRequestService from "./pullRequest/PullRequestService.ts";
 import * as SelectedPersistence from "./persistence/SelectedPersistence.ts";
 import * as Omdb from "./persistence/Omdb.ts";
 import * as NativeServerOwnershipLock from "./persistence/NativeServerOwnershipLock.ts";
-import * as PullRequestFilesViewed from "./persistence/PullRequestFilesViewed.ts";
-import * as PullRequestReviewGuides from "./persistence/PullRequestReviewGuides.ts";
 import * as PullRequestReviewGuideService from "./pullRequest/PullRequestReviewGuideService.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
@@ -88,7 +86,6 @@ import * as McpHttpServer from "./mcp/McpHttpServer.ts";
 import * as PeerForwarding from "./peer/PeerForwarding.ts";
 import * as RemoteDelegation from "./peer/RemoteDelegation.ts";
 import * as PeerLinkRequests from "./peer/PeerLinkRequests.ts";
-import * as PeerLinks from "./peer/PeerLinks.ts";
 import * as PeerMcpClient from "./peer/PeerMcpClient.ts";
 import * as McpSessionRegistry from "./mcp/McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
@@ -109,7 +106,6 @@ import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import * as ServerOwnership from "./serverOwnership.ts";
 import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
 import { hasCloudPublicConfig } from "./cloud/publicConfig.ts";
-import * as ServerSettings from "./serverSettings.ts";
 import * as ManagedLimits from "./policy/managedLimits.ts";
 import * as ManagedPolicy from "./policy/ManagedPolicy.ts";
 import * as ProjectEnrichmentService from "./project/ProjectEnrichmentService.ts";
@@ -127,7 +123,6 @@ import * as ProjectFaviconResolver from "./project/ProjectFaviconResolver.ts";
 import * as T3ProjectFileLoader from "./project/T3ProjectFileLoader.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
 import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
-import * as KnownWorkspaces from "./workspace/KnownWorkspaces.ts";
 import * as WorkspaceFileSystem from "./workspace/WorkspaceFileSystem.ts";
 import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
@@ -177,12 +172,14 @@ import * as ConnectReachability from "./cloud/ConnectReachability.ts";
 import { pendingServiceUpdateExists } from "./cloud/updateHandoff.ts";
 import * as RelayTracing from "./cloud/relayTracing.ts";
 import * as CloudManagedEndpointRuntime from "./cloud/ManagedEndpointRuntime.ts";
+import * as RelayClientLedger from "./cloud/RelayClientLedger.ts";
 import {
   MANAGED_TUNNEL_FIRST_REGISTRATION_JITTER,
   makeManagedTunnelRecovery,
   managedTunnelStartupAction,
   retryDesiredLinkReconcile,
   retryManagedTunnelRegistration,
+  watchManagedTunnelOrigin,
 } from "./cloud/managedTunnelStartup.ts";
 import * as CloudCliTokenManager from "./cloud/CliTokenManager.ts";
 import * as CloudCliState from "./cloud/CliState.ts";
@@ -205,16 +202,11 @@ import { MuseUsageHome } from "@t3tools/provider-muse/server";
 import * as CursorAccountReader from "@t3tools/provider-cursor/server/CursorAccountReader";
 import * as CursorUsageAccounts from "@t3tools/provider-cursor/server/CursorUsageAccounts";
 import * as UsageService from "./usage/UsageService.ts";
-import * as CodexUsageHistory from "./usage/CodexUsageHistory.ts";
 import * as RuntimeLayer from "./orchestration-v2/selectedRuntimeLayer.ts";
-import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
-import * as ThreadSearch from "./orchestration-v2/ThreadSearch.ts";
 import * as ThreadSettlementService from "./orchestration-v2/ThreadSettlementService.ts";
 import * as IdleCompactionService from "./orchestration-v2/IdleCompactionService.ts";
 import * as ThreadPullRequestService from "./orchestration-v2/ThreadPullRequestService.ts";
 import * as RunFinalizationService from "./orchestration-v2/RunFinalizationService.ts";
-import * as ProjectionMaintenance from "./orchestration-v2/ProjectionMaintenance.ts";
-import * as ProjectionStoreV2 from "./orchestration-v2/ProjectionStore.ts";
 import { makePersistedServerRuntimeState } from "./serverRuntimeState.ts";
 import { acceptsPrivateNetworkConnection, loopbackUrlHostForAddress } from "./startupAccess.ts";
 import * as OrchestrationHttp from "./orchestration-v2/http.ts";
@@ -384,9 +376,14 @@ const layerHttpServer = Layer.unwrap(
       },
     );
   }),
-).pipe(Layer.provide(ManagedPolicy.layer));
+).pipe(
+  Layer.provide(ManagedPolicy.layer),
+  // NodeHttpServer.layer also outputs NodeServices, whose spawner would shadow the wrapped one.
+  (layer) => NonBlockingSpawner.layer.pipe(Layer.provideMerge(layer)),
+);
 
 const layerPlatformServices = DocumentText.layer.pipe(
+  Layer.provideMerge(NonBlockingSpawner.layer),
   Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
 );
 
@@ -549,6 +546,14 @@ const layerCloudManagedEndpointRuntime = Layer.mergeAll(
   CloudManagedEndpointRuntime.layer.pipe(
     Layer.provide(ServerSecretStore.layer),
     Layer.provide(layerRelayClient),
+    Layer.provide(
+      Layer.unwrap(
+        Effect.gen(function* () {
+          const config = yield* ServerConfig.ServerConfig;
+          return RelayClientLedger.layer({ stateDir: config.stateDir });
+        }),
+      ),
+    ),
   ),
 );
 
@@ -576,6 +581,7 @@ const layerScheduledTaskWebhookOrigin = Layer.effect(
 );
 
 const layerOrchestrationV2Runtime = RuntimeLayer.layerProduction.pipe(
+  Layer.provide(UsageLimitSources.layerResetFallback),
   Layer.provide(layerScheduledTaskWebhookOrigin),
   Layer.provide(ProviderUsageAnalytics.layer),
   Layer.provide(layerCheckpointStore),
@@ -705,15 +711,15 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   Layer.provideMerge(Layer.merge(SelectedPersistence.projects, SelectedPersistence.search)),
   Layer.provideMerge(SecretCheck.layer),
   Layer.provideMerge(SecretResolver.layer),
+  // Above the settings it writes when a theme is applied.
+  Layer.provideMerge(EnvironmentTheme.layer),
   Layer.provideMerge(layerServerSettings),
   Layer.provideMerge(layerSourceControlProviderRegistry),
   Layer.provideMerge(layerGit),
   Layer.provideMerge(layerVcs),
   Layer.provideMerge(Layer.mergeAll(layerTerminal, layerPreview, layerDevice)),
   Layer.provideMerge(layerPersistence),
-  Layer.provideMerge(
-    Layer.mergeAll(Keybindings.layer, EnvironmentTheme.layer, UsageLimitSources.layer),
-  ),
+  Layer.provideMerge(Layer.mergeAll(Keybindings.layer, UsageLimitSources.layer)),
   Layer.provideMerge(ProviderRegistry.layer),
   Layer.provideMerge(
     ProviderInstanceRegistryHydration.layerWithPersistenceReads.pipe(
@@ -900,6 +906,17 @@ const layerMakeServer = (ownership: AcquiredOwnership) =>
           yield* HttpServer.HttpServer;
           const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
           yield* startup.markHttpListening;
+        }),
+      );
+      const layerDesktopReadySignal = Layer.effectDiscard(
+        Effect.gen(function* () {
+          const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
+          const receiver = yield* DesktopTelemetryReceiver.DesktopTelemetryReceiver;
+          yield* startup.awaitCommandReady.pipe(
+            Effect.andThen(receiver.announceServerReady),
+            Effect.ignore,
+            Effect.forkScoped,
+          );
         }),
       );
       const layerRuntimeState = Layer.effectDiscard(
@@ -1136,6 +1153,28 @@ const layerMakeServer = (ownership: AcquiredOwnership) =>
                 Stream.runForEach(recoverManagedTunnel),
                 Effect.forkScoped,
               );
+              yield* watchManagedTunnelOrigin({
+                localOrigin,
+                readIngressOrigin: endpointRuntime.inspectConnector.pipe(
+                  Effect.map((connector) => connector?.origin ?? null),
+                ),
+                // Like startup, a publish-only link never routes the tunnel to this host.
+                register: CloudCliState.readCliDesiredLinkMode.pipe(
+                  Effect.flatMap((mode) =>
+                    mode === "publish_only"
+                      ? Effect.void
+                      : cloudLink
+                          .registerManagedTunnelRecovery(localOrigin)
+                          .pipe(
+                            Effect.flatMap((registration) =>
+                              registration.status === "recovery_required"
+                                ? endpointRuntime.requestRecovery(registration.config)
+                                : Effect.void,
+                            ),
+                          ),
+                  ),
+                ),
+              }).pipe(Effect.forkScoped);
               const wantsCliLink = hasCloudPublicConfig
                 ? yield* CloudCliState.readCliDesiredCloudLink.pipe(
                     Effect.catch((cause) =>
@@ -1286,6 +1325,7 @@ const layerMakeServer = (ownership: AcquiredOwnership) =>
       const layerServerApplication = Layer.mergeAll(
         layerRoutes,
         layerHttpListening,
+        layerDesktopReadySignal,
         layerRuntimeState.pipe(Layer.provide(layerLauncher)),
         layerTailscaleServe,
         layerCloudDesiredLinkReconcile,
@@ -1333,7 +1373,9 @@ export const runServer = Effect.scoped(
               Effect.mapError((cause) => new Omdb.OmdbStartupError({ path: config.dbPath, cause })),
             ),
           };
-    return yield* Layer.launch(layerMakeServer(ownership)).pipe(
+    return yield* Layer.launch(
+      layerMakeServer(ownership).pipe(Layer.provide(NonBlockingSpawner.layer)),
+    ).pipe(
       Effect.provideService(Omdb.BootstrapOwnership, bootstrapOwnership),
       Effect.raceFirst(ownership.awaitLost),
     );

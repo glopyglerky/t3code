@@ -96,11 +96,10 @@ impl Store {
         if let Some(bytes) = tx.get(&schema_key()).await? {
             let catalog = decode_catalog(&bytes)?;
             tx.rollback().await?;
-            if catalog.schema != definition.schema {
-                return self.upgrade_application_80(catalog, definition).await;
-            }
-            if self.application_migrations().await? != definition.migrations {
-                return self.upgrade_application_88(catalog, definition).await;
+            if catalog.schema != definition.schema
+                || self.application_migrations().await? != definition.migrations
+            {
+                return self.upgrade_application_91(catalog, definition).await;
             }
             return Ok(BootstrapResult {
                 initialized: false,
@@ -156,7 +155,7 @@ mod tests {
         store.shutdown().await.unwrap();
         let before = std::fs::read(fixture.path()).unwrap();
         let read_only = Store::open_read_only(fixture.path()).await.unwrap();
-        assert_eq!(read_only.application_migrations().await.unwrap().len(), 89);
+        assert_eq!(read_only.application_migrations().await.unwrap().len(), 91);
         assert!(read_only.bootstrap_application().await.is_err());
         read_only.shutdown().await.unwrap();
         assert_eq!(std::fs::read(fixture.path()).unwrap(), before);
@@ -172,10 +171,10 @@ mod tests {
         let store = fixture.initialize().await;
         let first = store.bootstrap_application().await.unwrap();
         assert!(first.initialized);
-        assert_eq!(first.migrations.len(), 89);
+        assert_eq!(first.migrations.len(), 91);
         assert!(store.prepare_application_search().await.unwrap().prepared);
         assert!(!store.bootstrap_application().await.unwrap().initialized);
-        assert_eq!(store.application_migrations().await.unwrap().len(), 89);
+        assert_eq!(store.application_migrations().await.unwrap().len(), 91);
         while !store
             .prepare_application_message_rowids()
             .await

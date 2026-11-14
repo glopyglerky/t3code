@@ -57,6 +57,10 @@ export class AuxiliaryPersistenceReads extends Context.Service<
     readonly pendingThreadCleanup: (
       threadId: string,
     ) => Effect.Effect<ReadonlyArray<typeof PendingCleanupRow.Type>, AuxiliaryPersistenceReadError>;
+    readonly enabledScheduledThreadIds: Effect.Effect<
+      ReadonlyArray<string>,
+      AuxiliaryPersistenceReadError
+    >;
     readonly nonStoppedProviderSessions: Effect.Effect<
       ReadonlyArray<typeof ProviderSessionRow.Type>,
       AuxiliaryPersistenceReadError

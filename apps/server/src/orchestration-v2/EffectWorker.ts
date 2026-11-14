@@ -9,7 +9,10 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Metric from "effect/Metric";
 import * as Option from "effect/Option";
+import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
+import * as SqlError from "effect/sql/SqlError";
+import { NativeDatabaseRejected } from "./NativeDatabase.ts";
 
 import {
   increment,
@@ -666,6 +669,20 @@ export class OrchestrationEffectWorkerError extends Schema.TaggedError<Orchestra
 ) {}
 
 const isOrchestrationEffectWorkerError = Schema.is(OrchestrationEffectWorkerError);
+const isNativeDatabaseRejected = Schema.is(NativeDatabaseRejected);
+
+// Only the claiming worker settles its row, and a running row blocks every later effect on its
+// thread until the server restarts. onError masks interruption, so retries must restore it.
+const isLockTimeout = (error: EffectOutbox.EffectOutboxError) =>
+  (SqlError.isSqlError(error.cause) && error.cause.reason._tag === "LockTimeoutError") ||
+  // Writer acquisition rejects before the native transaction body runs. Other
+  // rejections and unknown outcomes must retain their existing recovery policy.
+  (isNativeDatabaseRejected(error.cause) && error.cause.kind === "writer_busy");
+const lockRetrySchedule = Schedule.spaced(Duration.millis(100));
+const retryWhileLocked = <A>(settlement: Effect.Effect<A, EffectOutbox.EffectOutboxError>) =>
+  Effect.interruptible(
+    Effect.retry(settlement, { schedule: lockRetrySchedule, while: isLockTimeout }),
+  );
 
 type ClaimFilter = Omit<Parameters<EffectOutbox.EffectOutboxV2Shape["claimNext"]>[0], "workerId">;
 
@@ -728,6 +745,7 @@ export const layerWithOptions = (
                 delayMs: 0,
               })
               .pipe(
+                retryWhileLocked,
                 Effect.flatMap((requeued) =>
                   requeued
                     ? Effect.logWarning("Requeued effect after unexpected worker failure", {
@@ -759,6 +777,7 @@ export const layerWithOptions = (
             error: `Worker failed to settle a process-bound effect after execution started: ${Cause.pretty(cause)}`,
           })
           .pipe(
+            retryWhileLocked,
             Effect.flatMap((failed) =>
               failed
                 ? Effect.logError("Terminalized process-bound effect after settlement failure", {

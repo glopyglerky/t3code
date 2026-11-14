@@ -356,11 +356,24 @@
     {
       "id": "89",
       "name": "ShellThreadReadIndexes"
+    },
+    {
+      "id": "90",
+      "name": "AuthConnectDevices"
+    },
+    {
+      "id": "91",
+      "name": "AuthConnectDeniedRequests"
     }
   ],
   "schema": {
     "version": 1,
     "tables": [
+      {
+        "name": "auth_connect_devices",
+        "columns": ["proof_key_thumbprint", "client_json", "approved_at"],
+        "primary_key": ["proof_key_thumbprint"]
+      },
       {
         "name": "auth_pairing_links",
         "columns": [
@@ -374,7 +387,10 @@
           "expires_at",
           "consumed_at",
           "revoked_at",
-          "proof_key_thumbprint"
+          "proof_key_thumbprint",
+          "requires_connect_approval",
+          "requested_client_json",
+          "connect_denied"
         ],
         "primary_key": ["id"]
       },
@@ -396,7 +412,8 @@
           "last_connected_at",
           "revoked_at",
           "client_surface",
-          "client_app_version"
+          "client_app_version",
+          "proof_key_thumbprint"
         ],
         "primary_key": ["session_id"]
       },
@@ -1042,7 +1059,6 @@
     ]
   },
   "sources": {
-    "apps/server/src/persistence/Migrations.ts": "e21eff3974aba47afa8bd385393ad7f0725e3def3bcdfbfc9e03fcf8851375f1",
     "apps/server/src/persistence/Migrations/001_OrchestrationEvents.ts": "aa225c01eb205ed475b473b04e230da564af8fd32324d9e803f52bb9df26330a",
     "apps/server/src/persistence/Migrations/002_OrchestrationCommandReceipts.ts": "f178d1d325229e8423d416d14ad1bc85766704b539baa30a28f17350dc1f02ee",
     "apps/server/src/persistence/Migrations/003_CheckpointDiffBlobs.ts": "415f5e22bae6eb552edf4454a9fd1ae8be3f8e9ba4fa0305d675d7f925b6591d",
@@ -1132,6 +1148,8 @@
     "apps/server/src/persistence/Migrations/087_ProjectionProjectsCustomTitle.ts": "2226f386dac9523b3175e4ba1bb4af8b1cc86b8e1b219c71dac400c972a556ef",
     "apps/server/src/persistence/Migrations/088_TurnItemTypeStatusIndex.ts": "328f42dcf473d6ef63d0f8cd51c26e7f00139952bc6dfe7221b4633433675aa1",
     "apps/server/src/persistence/Migrations/089_ShellThreadReadIndexes.ts": "6b7382a30f8f644f602b3e613ef81511a1c2817092534ec2a219bff199d1bd8e",
+    "apps/server/src/persistence/Migrations/090_AuthConnectDevices.ts": "5f2f24cf3088763ac77bd2e4a2d5e9fd97250c35834ef279103208acad2ee577",
+    "apps/server/src/persistence/Migrations/091_AuthConnectDeniedRequests.ts": "c7bcc3cd6c5bd9a7165be75261248255ae8eb767d59539da72632b5fa9009f9f",
     "apps/server/src/persistence/Migrations/OrchestrationV2/ApplicationEventSequenceIndexes.ts": "2a0201e505ad468d0a2cbfc5860725d1b9ded91e1d0f4e275cdb106b26d5dcd9",
     "apps/server/src/persistence/Migrations/OrchestrationV2/ApplicationEventSource.ts": "b0e4ed8c72dd7b9186c822c9c38dc7f191336abcd92cf5f367049574a06dafa1",
     "apps/server/src/persistence/Migrations/OrchestrationV2/EffectCancellation.ts": "d73145d2b0fe4907074cfc13cdfdcc319efd17a4440d2649897fc816d30f8204",
@@ -1144,6 +1162,7 @@
     "apps/server/src/persistence/Migrations/OrchestrationV2/Subagents.ts": "bdb4c2396affa5edadddbdbcb9a5bddd5e8cd346ebaa0cbbb89f182d95846ef7",
     "apps/server/src/persistence/Migrations/OrchestrationV2/ThreadLaunchWorkflows.ts": "4b1fe33c74cd5d674f70d762655b3eafa9e26cb31d6b1480d4e6968734891bc2",
     "apps/server/src/persistence/Migrations/legacyThreadPullRequestKey.ts": "ea546b8c6464107c68e8f918598782ad370b721f17e64311412afc02e2f61cb1",
+    "apps/server/src/persistence/Migrations.ts": "e1498d9286296986c040e37f853b29edc2388ce7c30e0e6f525af99693e605d2",
     "apps/server/src/persistence/reconcileV2PreviewMigration.ts": "5b5902289db76836921a2353c96d53781e3ed1d512bc908cb6821117714f92f1"
   }
 }

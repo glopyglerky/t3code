@@ -949,6 +949,158 @@ fn list(input: &str) -> Result<Vec<String>> {
     serde_json::from_str(input).map_err(|_| invalid("expected an encoded string list"))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Substring {
+    token: String,
+    accent_insensitive: String,
+}
+
+enum GlobAtom {
+    Star,
+    Any,
+    Literal(char),
+    Class {
+        inverted: bool,
+        characters: BTreeSet<char>,
+        ranges: Vec<(char, char)>,
+    },
+}
+
+impl GlobAtom {
+    fn matches(&self, point: char) -> bool {
+        match self {
+            Self::Star | Self::Any => true,
+            Self::Literal(expected) => *expected == point,
+            Self::Class {
+                inverted,
+                characters,
+                ranges,
+            } => {
+                (characters.contains(&point)
+                    || ranges
+                        .iter()
+                        .any(|&(start, end)| start <= point && point <= end))
+                    != *inverted
+            }
+        }
+    }
+}
+
+/// SQLite GLOB is case-sensitive and ends at the first NUL. Compile once per
+/// query; match iteratively so wildcard retries never consume the call stack.
+struct GlobPattern(Option<Vec<GlobAtom>>);
+
+impl GlobPattern {
+    fn compile(pattern: &str) -> Result<Self> {
+        // SQLite's default LIKE/GLOB pattern byte limit also applies to the
+        // SQL oracle. The application produces small, bounded query patterns.
+        if pattern.len() > 50_000 {
+            return Err(invalid("GLOB pattern exceeds SQLite's pattern limit"));
+        }
+        let mut points = pattern
+            .split('\0')
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .peekable();
+        let mut atoms = Vec::new();
+        while let Some(point) = points.next() {
+            match point {
+                '*' => {
+                    if !matches!(atoms.last(), Some(GlobAtom::Star)) {
+                        atoms.push(GlobAtom::Star);
+                    }
+                }
+                '?' => atoms.push(GlobAtom::Any),
+                '[' => {
+                    let inverted = points.peek() == Some(&'^');
+                    if inverted {
+                        points.next();
+                    }
+                    let mut characters = BTreeSet::new();
+                    let mut ranges = Vec::new();
+                    if points.peek() == Some(&']') {
+                        characters.insert(']');
+                        points.next();
+                    }
+                    let mut prior = None;
+                    let mut closed = false;
+                    while let Some(point) = points.next() {
+                        if point == ']' {
+                            closed = true;
+                            break;
+                        }
+                        if point == '-'
+                            && prior.is_some()
+                            && points.peek().is_some_and(|next| *next != ']')
+                        {
+                            ranges.push((prior.take().unwrap(), points.next().unwrap()));
+                        } else {
+                            characters.insert(point);
+                            prior = Some(point);
+                        }
+                    }
+                    if !closed {
+                        return Ok(Self(None));
+                    }
+                    atoms.push(GlobAtom::Class {
+                        inverted,
+                        characters,
+                        ranges,
+                    });
+                }
+                point => atoms.push(GlobAtom::Literal(point)),
+            }
+        }
+        Ok(Self(Some(atoms)))
+    }
+
+    fn matches(&self, text: &str) -> bool {
+        let Some(atoms) = &self.0 else {
+            return false;
+        };
+        let text = text.split('\0').next().unwrap_or_default();
+        let (mut pattern_at, mut text_at) = (0, 0);
+        let mut retry: Option<(usize, usize)> = None;
+        while text_at < text.len() {
+            if matches!(atoms.get(pattern_at), Some(GlobAtom::Star)) {
+                pattern_at += 1;
+                retry = Some((pattern_at, text_at));
+                continue;
+            }
+            let point = text[text_at..].chars().next().unwrap();
+            if atoms
+                .get(pattern_at)
+                .is_some_and(|atom| atom.matches(point))
+            {
+                pattern_at += 1;
+                text_at += point.len_utf8();
+            } else if let Some((resume, previous)) = retry {
+                if previous == text.len() {
+                    return false;
+                }
+                let next = previous + text[previous..].chars().next().unwrap().len_utf8();
+                retry = Some((resume, next));
+                pattern_at = resume;
+                text_at = next;
+            } else {
+                return false;
+            }
+        }
+        while matches!(atoms.get(pattern_at), Some(GlobAtom::Star)) {
+            pattern_at += 1;
+        }
+        pattern_at == atoms.len()
+    }
+}
+
+fn holds_accented_latin(text: &str) -> bool {
+    // Exact UTF-8 lead bytes generated by upstream's Latin-1/Extended-A/B and
+    // Additional letter ranges after foldSearchQuery selects ASCII letters.
+    text.bytes().any(|byte| matches!(byte, 0xc3..=0xc8 | 0xe1))
+}
+
 async fn latest_user_message_at(session: &mut Session, thread_id: &str) -> Result<Option<String>> {
     let mut candidates = Vec::new();
     // The shared compact index retains role/createdBy and scalar timestamps.
@@ -1026,7 +1178,17 @@ async fn message_hits(
     project_id: Option<String>,
     excluded_thread_ids: String,
 ) -> Result<Value> {
-    let substrings = list(&substrings)?;
+    let substrings: Vec<Substring> = serde_json::from_str(&substrings)
+        .map_err(|_| invalid("expected encoded substring token and GLOB pairs"))?;
+    let substrings = substrings
+        .into_iter()
+        .map(|substring| {
+            Ok((
+                substring.token,
+                GlobPattern::compile(&substring.accent_insensitive)?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
     let spellings: Vec<Vec<String>> = serde_json::from_str(&short_spellings)
         .map_err(|_| invalid("invalid short-token spellings"))?;
     let excluded = list(&excluded_thread_ids)?.into_iter().collect();
@@ -1109,7 +1271,10 @@ async fn message_hits(
         let raw_text = readable_text(&row, &value)?;
         let text = sql_text(&raw_text).unwrap_or_default();
         let lower = text.to_ascii_lowercase();
-        if substrings.iter().any(|token| !lower.contains(token))
+        let accented = holds_accented_latin(&text);
+        if substrings
+            .iter()
+            .any(|(token, pattern)| !lower.contains(token) && !(accented && pattern.matches(&text)))
             || spellings
                 .iter()
                 .any(|forms| !forms.iter().any(|spelling| text.contains(spelling)))
@@ -1331,6 +1496,35 @@ impl ApplicationTransactions {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sqlite_glob_keeps_case_classes_literal_wildcards_and_nul_boundaries() {
+        for (pattern, text, expected) in [
+            ("*[eEéÉ]cole*", "Une École", true),
+            ("*[eEéÉ]cole*", "Une école", true),
+            ("*[eEéÉ]cole*", "Une ECOLE", false),
+            ("*[[][*][?][]]*", "É [*?]", true),
+            ("*[A-Z]*", "É Z", true),
+            ("*[z-a]*", "É a", false),
+            ("*[z-a]*", "É z", true),
+            ("*[^a-z]*", "école", true),
+            ("*[^a-z]*", "ecole", false),
+            ("*[", "É [", false),
+            ("*?cole*", "école", true),
+            ("*hidden*", "École\0hidden", false),
+            ("*École\0anything", "École\0hidden", true),
+            ("*a*a*a*b", "aaaaaaaaac", false),
+            ("*", "", true),
+        ] {
+            assert_eq!(
+                GlobPattern::compile(pattern).unwrap().matches(text),
+                expected,
+                "{pattern:?} {text:?}"
+            );
+        }
+        assert!(holds_accented_latin("Școala"));
+        assert!(holds_accented_latin("Hồ"));
+        assert!(!holds_accented_latin("plain ASCII 東京"));
+    }
     #[test]
     fn generated_phrases_keep_quotes_and_ignore_empty_tokens_like_fts5() {
         assert_eq!(

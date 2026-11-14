@@ -475,24 +475,22 @@ const runProbe = Effect.fn("runProbe")(function* (
   );
 });
 
-const decodePnpmOutdated = Schema.decodeUnknownOption(
+const decodeOutdated = Schema.decodeUnknownOption(
   Schema.fromJsonString(
     Schema.Record(Schema.String, Schema.Struct({ latest: Schema.optional(Schema.String) })),
   ),
 );
-const decodePnpmList = Schema.decodeUnknownOption(
-  Schema.fromJsonString(
-    Schema.Array(
-      Schema.Struct({
-        dependencies: Schema.optional(
-          Schema.Record(Schema.String, Schema.Struct({ version: Schema.optional(Schema.String) })),
-        ),
-      }),
-    ),
+const GlobalPackageList = Schema.Struct({
+  dependencies: Schema.optional(
+    Schema.Record(Schema.String, Schema.Struct({ version: Schema.optional(Schema.String) })),
   ),
+});
+const decodePnpmList = Schema.decodeUnknownOption(
+  Schema.fromJsonString(Schema.Array(GlobalPackageList)),
 );
+const decodeNpmList = Schema.decodeUnknownOption(Schema.fromJsonString(GlobalPackageList));
 
-// Unlike npm's latest tag, pnpm outdated respects minimumReleaseAge and its excludes.
+// Unlike the registry's latest tag, pnpm outdated respects minimumReleaseAge and its excludes.
 const resolvePnpmGlobalLatestVersion = Effect.fn("resolvePnpmGlobalLatestVersion")(function* (
   packageName: string,
   env: NodeJS.ProcessEnv,
@@ -510,9 +508,7 @@ const resolvePnpmGlobalLatestVersion = Effect.fn("resolvePnpmGlobalLatestVersion
     // pnpm outdated exits 1 when updates are available.
     [0, 1],
   );
-  const outdatedEntries = outdated
-    ? Option.getOrUndefined(decodePnpmOutdated(outdated))
-    : undefined;
+  const outdatedEntries = outdated ? Option.getOrUndefined(decodeOutdated(outdated)) : undefined;
   if (!outdatedEntries) return null;
   const latest = nonEmptyString(outdatedEntries[packageName]?.latest);
   if (latest) return latest;
@@ -524,6 +520,41 @@ const resolvePnpmGlobalLatestVersion = Effect.fn("resolvePnpmGlobalLatestVersion
   );
   const listedEntries = listed ? Option.getOrUndefined(decodePnpmList(listed)) : undefined;
   return nonEmptyString(listedEntries?.[0]?.dependencies?.[packageName]?.version);
+});
+
+// Unlike `npm view`, `outdated` applies min-release-age, before and their excludes.
+const resolveNpmGlobalLatestVersion = Effect.fn("resolveNpmGlobalLatestVersion")(function* (
+  packageName: string,
+  npmPrefix: string,
+  env: NodeJS.ProcessEnv,
+) {
+  // Match the updater's npm and environment.
+  const npmPath = yield* resolveCommandPath("npm", {
+    env: { ...(yield* HostProcess.Environment), ...env },
+  });
+  if (!npmPath) return null;
+  const outdated = yield* runProbe(
+    npmPath,
+    ["outdated", "-g", "--prefix", npmPrefix, "--json", packageName],
+    env,
+    // npm outdated exits 1 when updates are available.
+    [0, 1],
+  );
+  const outdatedEntries = outdated ? Option.getOrUndefined(decodeOutdated(outdated)) : undefined;
+  // npm prints failures such as an unreachable registry as `{"error": ...}`, also exiting 1.
+  if (!outdatedEntries || "error" in outdatedEntries) return null;
+  const latest = nonEmptyString(outdatedEntries[packageName]?.latest);
+  if (latest) return latest;
+  // An empty result means the installed version is still the eligible release.
+  const listed = yield* runProbe(
+    npmPath,
+    ["ls", "-g", "--prefix", npmPrefix, "--depth", "0", "--json", packageName],
+    env,
+    // npm ls still prints the tree but exits 1 when other globals have problems.
+    [0, 1],
+  );
+  const listedEntries = listed ? Option.getOrUndefined(decodeNpmList(listed)) : undefined;
+  return nonEmptyString(listedEntries?.dependencies?.[packageName]?.version);
 });
 
 // npm names the tarball `${name}-${version}.tgz`, dropping a scope's `@` and its `/`.
@@ -710,7 +741,15 @@ export const resolveMiseProviderMaintenance = Effect.fn("resolveMiseProviderMain
       const resolved = normalizeCommandPath(context.resolvedCommandPath);
       if (!latestDirs.some((dir) => isUnder(resolved, dir))) return manual(binaryPath);
     }
-    const args = ["upgrade", miseTool];
+    // `mise upgrade <short name>` skips a tool configured by its backend name, like `npm:<pkg>`.
+    const configured = Option.getOrUndefined(
+      decodeMiseInstalls(yield* runProbe(misePath, ["ls", "--json", "--installed"], context.env)),
+    );
+    const configuredTool =
+      Object.entries(configured ?? {}).find(([, installs]) =>
+        installs.some((candidate) => candidate.install_path === install.install_path),
+      )?.[0] ?? miseTool;
+    const args = ["upgrade", configuredTool];
     const services = yield* Effect.context<ProviderMaintenanceResolverServices>();
     const capabilities = makeProviderMaintenanceCapabilities({
       ...owner,
@@ -881,6 +920,15 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
   if (commandPaths.some(isNixStoreCommandPath)) {
     return manual;
   }
+  const macPortsName = yield* resolveMacPortsOwner(context);
+  if (macPortsName !== null) {
+    return makeManualOnlyProviderMaintenanceCapabilities({
+      provider: definition.provider,
+      packageName,
+      installPath: context.realCommandPath,
+      ...(macPortsName ? { manualCommand: `sudo port upgrade ${macPortsName}` } : {}),
+    });
+  }
 
   const nativeUpdate = definition.nativeUpdate;
   const nativeEnv = nativeUpdate?.env;
@@ -995,8 +1043,9 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
   // npm proof outranks a containing Homebrew keg; Homebrew Node globals still belong to npm.
   const npmPrefix = yield* resolveNpmGlobalPrefix(context, packageName);
   if (npmPrefix) {
+    const services = yield* Effect.context<ProviderMaintenanceResolverServices>();
     // npm 12 requires script approval to install native binaries; older npm only warns about the flag.
-    return makeProviderMaintenanceCapabilities({
+    const capabilities = makeProviderMaintenanceCapabilities({
       provider: definition.provider,
       packageName,
       updateExecutable: "npm",
@@ -1010,7 +1059,22 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
       ],
       updateLockKey: `npm-global:${normalizeCommandPath(npmPrefix)}`,
       env: context.env,
+      // Inside min-release-age `@latest` installs an older release than the
+      // registry's tag, so only npm's own answer is worth advertising.
+      latestVersion: null,
+      lookupLatestVersion: resolveNpmGlobalLatestVersion(packageName, npmPrefix, context.env).pipe(
+        Effect.provideContext(services),
+      ),
     });
+    return {
+      ...capabilities,
+      latestVersionCacheKey: [
+        "npm-global",
+        normalizeCommandPath(npmPrefix),
+        packageName,
+        environmentCacheKey(context.env),
+      ].join("\0"),
+    };
   }
 
   const homebrew = homebrewOwnershipFromCommandPath(context.realCommandPath);
@@ -1117,6 +1181,30 @@ const isMiseWrapperScript = Effect.fn("isMiseWrapperScript")(function* (
   return script.startsWith("#!") && /\bmise\s+(?:x|exec)\b/.test(script);
 });
 
+/**
+ * The port that installed the executable, "" when MacPorts owns it under an unusable name,
+ * or null when it does not. MacPorts prefixes are root-owned and its Claude port disables
+ * `claude update`, so neither npm nor the native updater can upgrade these installs.
+ */
+const resolveMacPortsOwner = Effect.fn("resolveMacPortsOwner")(function* (
+  context: ProviderMaintenanceResolutionContext,
+) {
+  if (context.platform === "win32") return null;
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const siblingPort = path.join(path.dirname(context.resolvedCommandPath), "port");
+  const portPath = (yield* fileSystem.exists(siblingPort).pipe(Effect.orElseSucceed(() => false)))
+    ? siblingPort
+    : yield* resolveCommandPath("port", { env: context.env });
+  if (!portPath) return null;
+  const prefix = `${normalizeCommandPath(path.dirname(path.dirname(portPath)))}/`;
+  if (!normalizeCommandPath(context.realCommandPath).startsWith(prefix)) return null;
+  const output = yield* runProbe(portPath, ["provides", context.realCommandPath], context.env);
+  const name = output ? /\bis provided by: (\S+)/.exec(output)?.[1] : undefined;
+  if (name === undefined) return null;
+  return /^[\w.+-]+$/.test(name) ? name : "";
+});
+
 // Volta bin links only identify its shim; the package image proves ownership.
 const isVoltaPackageInstall = Effect.fn("isVoltaPackageInstall")(function* (
   context: ProviderMaintenanceResolutionContext,
@@ -1183,6 +1271,12 @@ function sameNativeLookup(
     case "vite-plus":
     case "bun":
       return right.kind === left.kind && left.packageName === right.packageName;
+    case "npm":
+      return (
+        right.kind === "npm" &&
+        left.packageName === right.packageName &&
+        left.prefix === right.prefix
+      );
     case "homebrew":
       return (
         right.kind === "homebrew" &&
@@ -1347,6 +1441,18 @@ const resolveNativeMaintenance = Effect.fn("resolveNativeMaintenance")(function*
           });
         return yield* Effect.forEach(paths, realPath);
       }
+      case "miseAllListing": {
+        const manager = miseExecutable(evidence);
+        if (
+          !manager ||
+          !definition.mise ||
+          !evidence.some((entry) => entry.request.kind === "miseInstallPaths")
+        )
+          return yield* new NativeMaintenancePolicy.NativeMaintenancePolicyError({
+            stage: "observation",
+          });
+        return yield* runProbe(manager, ["ls", "--json", "--installed"], context.env);
+      }
       case "miseToolPath": {
         const permitted = listing(evidence).some(
           (install) =>
@@ -1383,6 +1489,13 @@ const resolveNativeMaintenance = Effect.fn("resolveNativeMaintenance")(function*
           )
           .pipe(Effect.orElseSucceed(() => false));
         return { directory, exists };
+      }
+      case "macPortsOwner": {
+        if (mode !== "package" || context.platform === "win32")
+          return yield* new NativeMaintenancePolicy.NativeMaintenancePolicyError({
+            stage: "observation",
+          });
+        return yield* resolveMacPortsOwner(context);
       }
       case "homebrewExecutable": {
         if (ownership === null || ownership.prefix !== request.prefix)
@@ -1502,6 +1615,7 @@ const resolveNativeMaintenance = Effect.fn("resolveNativeMaintenance")(function*
           `--allow-scripts=${packageName}`,
           `${packageName}@latest`,
         ]);
+      if (prefix !== null) expectedLookup = { kind: "npm", packageName, prefix };
     } else if (update.lockKey === "homebrew" && ownership !== null) {
       const brew = observedString(evidence, "homebrewExecutable");
       const prefix = observedString(evidence, "homebrewPrefix");
@@ -1549,6 +1663,13 @@ const resolveNativeMaintenance = Effect.fn("resolveNativeMaintenance")(function*
         .replace(/\/+$/, "")
         .replace(/\/[^/]+$/, "");
       const realToolDir = observedString(evidence, "miseToolPath");
+      const configured = Option.getOrUndefined(
+        decodeMiseInstalls(observedString(evidence, "miseAllListing") ?? ""),
+      );
+      const configuredTool =
+        Object.entries(configured ?? {}).find(([, candidates]) =>
+          candidates.some((candidate) => candidate.install_path === install?.install_path),
+        )?.[0] ?? definition.mise.tool;
       const moving = isShim
         ? normalizeCommandPath(context.resolvedCommandPath)
             .split("/")
@@ -1566,32 +1687,50 @@ const resolveNativeMaintenance = Effect.fn("resolveNativeMaintenance")(function*
         install !== undefined &&
         moving &&
         definition.mise.upgrade !== false &&
+        evidence.some((entry) => entry.request.kind === "miseAllListing") &&
         update.executable === mise &&
-        sameArgs(["upgrade", definition.mise.tool]) &&
+        sameArgs(["upgrade", configuredTool]) &&
         update.env === "context" &&
-        update.command === `mise upgrade ${definition.mise.tool}`;
+        update.command === `mise upgrade ${configuredTool}`;
       if (mise !== null)
         expectedLookup = { kind: "mise", executable: mise, tool: definition.mise.tool };
     }
   }
   if (capabilities.manualCommand !== undefined) {
-    validUpdate &&=
-      update === null &&
-      capabilities.manualCommand === "choco upgrade claude-code" &&
-      context !== null &&
-      owner.provider === "claudeAgent" &&
-      context.platform === "win32" &&
-      paths.some((entry) => isChocolateyClaudeCommandPath(entry, context.env));
-    expectedLookup = { kind: "chocolatey" };
+    const macPortsName = observedString(evidence, "macPortsOwner");
+    if (mode === "package" && context !== null && context.platform !== "win32" && macPortsName) {
+      validUpdate &&=
+        update === null &&
+        /^[\w.+-]+$/.test(macPortsName) &&
+        capabilities.manualCommand === `sudo port upgrade ${macPortsName}`;
+    } else {
+      validUpdate &&=
+        update === null &&
+        capabilities.manualCommand === "choco upgrade claude-code" &&
+        context !== null &&
+        owner.provider === "claudeAgent" &&
+        context.platform === "win32" &&
+        paths.some((entry) => isChocolateyClaudeCommandPath(entry, context.env));
+      expectedLookup = { kind: "chocolatey" };
+    }
   }
   if (
     !validUpdate ||
     (update !== null && paths.some(isNixStoreCommandPath) && update.lockKey !== "mise") ||
+    (mode === "package" &&
+      context !== null &&
+      context.platform !== "win32" &&
+      update !== null &&
+      update.lockKey !== "mise" &&
+      observed(evidence, "macPortsOwner") !== null) ||
     !sameNativeLookup(lookup, expectedLookup) ||
     (capabilities.installPath !== undefined &&
       capabilities.installPath !== context?.realCommandPath &&
       capabilities.installPath !== observedString(evidence, "miseWhich")) ||
-    (lookup?.kind === "mise" || lookup?.kind === "homebrew" || lookup?.kind === "chocolatey") !==
+    (lookup?.kind === "mise" ||
+      lookup?.kind === "homebrew" ||
+      lookup?.kind === "chocolatey" ||
+      lookup?.kind === "npm") !==
       (capabilities.latestVersion === null)
   )
     return yield* new NativeMaintenancePolicy.NativeMaintenancePolicyError({ stage: "response" });
@@ -1626,6 +1765,22 @@ const resolveNativeMaintenance = Effect.fn("resolveNativeMaintenance")(function*
   };
   if (lookup === undefined || context === null) return hydrated;
   let latest: Effect.Effect<string | null, never, ProviderMaintenanceResolverServices>;
+  if (lookup.kind === "npm") {
+    return {
+      ...hydrated,
+      lookupLatestVersion: resolveNpmGlobalLatestVersion(
+        lookup.packageName,
+        lookup.prefix,
+        context.env,
+      ).pipe(Effect.provideContext(services)),
+      latestVersionCacheKey: [
+        "npm-global",
+        normalizeCommandPath(lookup.prefix),
+        lookup.packageName,
+        environmentCacheKey(context.env),
+      ].join("\0"),
+    };
+  }
   if (lookup.kind === "mise") {
     latest = runProbe(lookup.executable, ["latest", lookup.tool], context.env).pipe(
       Effect.map((value) => {
@@ -1729,21 +1884,9 @@ const withConfiguredNpmVersionLookup = Effect.fn("withConfiguredNpmVersionLookup
   const npmPath = yield* resolveCommandPath("npm", { env });
   if (!npmPath) return capabilities;
   const services = yield* Effect.context<ProviderMaintenanceResolverServices>();
-  const update = capabilities.update;
-  const prefixIndex = update?.lockKey.startsWith("npm-global:")
-    ? update.args.indexOf("--prefix")
-    : -1;
-  const prefix = prefixIndex >= 0 ? update?.args[prefixIndex + 1] : undefined;
   const lookup = runProbe(
     npmPath,
-    [
-      "view",
-      "--global",
-      ...(prefix ? ["--prefix", prefix] : []),
-      "--json",
-      `${packageName}@latest`,
-      "version",
-    ],
+    ["view", "--global", "--json", `${packageName}@latest`, "version"],
     env,
   ).pipe(
     Effect.map((stdout) => {
@@ -1765,7 +1908,6 @@ const withConfiguredNpmVersionLookup = Effect.fn("withConfiguredNpmVersionLookup
       "configured-npm",
       npmPath,
       packageName,
-      prefix ?? "",
       environmentCacheKey(env),
       installerLatestVersionKey(capabilities) ?? "",
     ].join("\0"),

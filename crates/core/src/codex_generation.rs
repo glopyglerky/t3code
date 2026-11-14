@@ -311,13 +311,31 @@ pub fn exec_args(
     selection: &Selection,
     schema_path: &str,
     output_path: &str,
-    disabled_mcp: Option<&str>,
+    enabled_mcp_names: &[String],
 ) -> Vec<String> {
     let mut args = vec!["exec".to_owned()];
+    let disabled_mcp = disabled_mcp_config(enabled_mcp_names);
+    if let Some(config) = &disabled_mcp {
+        args.extend(["--config".to_owned(), config.clone()]);
+    }
     args.extend(selection.launch_args.clone());
     plugin_args(&mut args);
-    if let Some(config) = disabled_mcp {
-        args.extend(["--config".to_owned(), config.to_owned()]);
+    let launch_sets_mcp_table = selection.launch_args.iter().any(|arg| {
+        arg.match_indices("mcp_servers").any(|(offset, name)| {
+            let boundary = offset == 0
+                || !arg[..offset].chars().next_back().is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+            boundary && js_trim(&arg[offset + name.len()..]).starts_with('=')
+        })
+    });
+    if launch_sets_mcp_table {
+        if let Some(config) = &disabled_mcp {
+            args.extend(["--config".to_owned(), config.clone()]);
+        }
+    }
+    for name in enabled_mcp_names {
+        if !name.contains('.') && !name.contains('=') {
+            args.extend(["--config".to_owned(), format!("mcp_servers.{name}.enabled=false")]);
+        }
     }
     for value in [
         "--ephemeral",
@@ -758,13 +776,12 @@ pub mod process {
             .output
             .to_str()
             .ok_or_else(|| Error::new("io", "Generation temporary path is not UTF-8."))?;
-        let disabled = super::disabled_mcp_config(&names);
         let args = super::exec_args(
             request,
             &selection,
             schema_path,
             output_path,
-            disabled.as_deref(),
+            &names,
         );
         let result = capture(
             request,

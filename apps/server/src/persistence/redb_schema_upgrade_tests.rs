@@ -180,7 +180,7 @@ async fn populated_80_upgrade_is_exclusive_atomic_and_preserves_original_rows() 
             .unwrap()
             .migrations
             .len(),
-        89
+        91
     );
     let mut tx = store.db.begin_read_only().await.unwrap();
     let target = decode_catalog(&tx.get(&schema_key()).await.unwrap().unwrap()).unwrap();
@@ -226,7 +226,7 @@ async fn populated_80_upgrade_is_exclusive_atomic_and_preserves_original_rows() 
     assert!(!store.bootstrap_application().await.unwrap().initialized);
     store.shutdown().await.unwrap();
     let reopened = fixture.connect().await;
-    assert_eq!(reopened.application_migrations().await.unwrap().len(), 89);
+    assert_eq!(reopened.application_migrations().await.unwrap().len(), 91);
     assert!(!reopened.bootstrap_application().await.unwrap().initialized);
     reopened.shutdown().await.unwrap();
 }
@@ -237,14 +237,7 @@ async fn interrupted_staging_retries_from_current_source_and_removes_stale_candi
     store.shutdown().await.unwrap();
     let store = Store::open_exclusive(fixture.path()).await.unwrap();
     let current = definition().unwrap();
-    let target = ApplicationCatalog {
-        generation: request_digest(&json!([
-            "native-schema-upgrade",
-            source.generation,
-            current.schema
-        ])),
-        schema: current.schema,
-    };
+    let target = target_91(&source, &current);
     store
         .upgrade_stage(&source, &target, Stage::Copy)
         .await
@@ -450,7 +443,7 @@ async fn imported_upgrade_retains_receipt_and_requires_exact_durable_lineage_on_
         .unwrap();
     assert_eq!(replayed, receipt);
     let target = decode_catalog(&store.db.read(&schema_key()).await.unwrap().unwrap()).unwrap();
-    let key = lineage_key(&target);
+    let key = lineage_91_key(&target);
     let original = store.db.read(&key).await.unwrap().unwrap();
     let mut changed: Value = serde_json::from_slice(&original).unwrap();
     changed["source"]["generation"] = json!("unrelated");
@@ -480,7 +473,7 @@ async fn imported_upgrade_retains_receipt_and_requires_exact_durable_lineage_on_
     tx.put(key, original).await.unwrap();
     tx.commit().await.unwrap();
     assert_eq!(store.application_import().await.unwrap().unwrap(), receipt);
-    assert_eq!(store.application_migrations().await.unwrap().len(), 89);
+    assert_eq!(store.application_migrations().await.unwrap().len(), 91);
     store.shutdown().await.unwrap();
 }
 
@@ -606,11 +599,10 @@ async fn replace_thread(app: &mut ApplicationTransactions, transaction: &str, pa
 }
 
 #[tokio::test]
-async fn index_only_88_upgrade_rebuilds_after_interruption_preserves_counts_and_supports_live_writes()
- {
+async fn schema_88_upgrade_rebuilds_after_interruption_preserves_counts_and_supports_live_writes() {
     let (fixture, store, source) = fixture_88().await;
     let current = definition().unwrap();
-    let target = target_89(&source, &current);
+    let target = target_91(&source, &current);
     assert_ne!(source.generation, target.generation);
     assert!(
         store
@@ -661,7 +653,7 @@ async fn index_only_88_upgrade_rebuilds_after_interruption_preserves_counts_and_
             .unwrap()
             .migrations
             .len(),
-        89
+        91
     );
     assert_eq!(generation_bytes(&store, &source).await, before);
     let active = decode_catalog(&store.db.read(&schema_key()).await.unwrap().unwrap()).unwrap();
@@ -743,8 +735,10 @@ async fn index_only_88_upgrade_rebuilds_after_interruption_preserves_counts_and_
 }
 
 #[tokio::test]
-async fn direct_88_import_and_80_88_89_chain_retain_the_original_receipt_and_exact_lineage() {
-    for original_version in [80, 88] {
+async fn direct_imports_and_historical_upgrade_chains_retain_original_receipts_and_exact_lineage() {
+    for (original_version, intermediate_version) in
+        [(80, 88), (80, 89), (88, 88), (88, 89), (89, 89)]
+    {
         let fixture = TestFixture::start().await;
         let store = fixture.initialize().await;
         let archive = fixture.path().with_extension("original.ndjson");
@@ -752,8 +746,10 @@ async fn direct_88_import_and_80_88_89_chain_retain_the_original_receipt_and_exa
             &archive,
             if original_version == 80 {
                 previous_definition().unwrap()
-            } else {
+            } else if original_version == 88 {
                 definition_88().unwrap()
+            } else {
+                definition_89().unwrap()
             },
         );
         let original_archive = std::fs::read(&archive).unwrap();
@@ -770,10 +766,27 @@ async fn direct_88_import_and_80_88_89_chain_retain_the_original_receipt_and_exa
         let store = Store::open_exclusive(fixture.path()).await.unwrap();
         if original_version == 80 {
             store
-                .upgrade_application_80(original.clone(), definition_88().unwrap())
+                .upgrade_application_80(
+                    original.clone(),
+                    if intermediate_version == 88 {
+                        definition_88().unwrap()
+                    } else {
+                        definition_89().unwrap()
+                    },
+                )
                 .await
                 .unwrap();
             // Read-only startup inspects this old receipt before requesting89.
+            assert_eq!(
+                store.application_import().await.unwrap().unwrap().summary,
+                imported.summary
+            );
+        }
+        if original_version == 88 && intermediate_version == 89 {
+            store
+                .upgrade_application_88(original.clone(), definition_89().unwrap())
+                .await
+                .unwrap();
             assert_eq!(
                 store.application_import().await.unwrap().unwrap().summary,
                 imported.summary
@@ -784,7 +797,7 @@ async fn direct_88_import_and_80_88_89_chain_retain_the_original_receipt_and_exa
         let intermediate_rows = generation_bytes(&store, &intermediate).await;
         store.bootstrap_application().await.unwrap();
         let active = decode_catalog(&store.db.read(&schema_key()).await.unwrap().unwrap()).unwrap();
-        assert_eq!(active, target_89(&intermediate, &definition().unwrap()));
+        assert_eq!(active, target_91(&intermediate, &definition().unwrap()));
         assert_eq!(generation_bytes(&store, &original).await, original_rows);
         assert_eq!(
             generation_bytes(&store, &intermediate).await,
@@ -798,7 +811,7 @@ async fn direct_88_import_and_80_88_89_chain_retain_the_original_receipt_and_exa
         let receipt = store.application_import().await.unwrap().unwrap();
         assert_eq!(receipt.generation, imported.generation);
         assert_eq!(receipt.summary, imported.summary);
-        let key = lineage_89_key(&active);
+        let key = lineage_91_key(&active);
         let good = store.db.read(&key).await.unwrap().unwrap();
         let mut wrong: Value = serde_json::from_slice(&good).unwrap();
         wrong["source"]["generation"] = json!("unrelated");
@@ -891,4 +904,147 @@ async fn exact_88_history_is_required_and_read_only_future_or_damaged_histories_
         );
         store.shutdown().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn schema_89_auth_upgrade_preserves_rows_and_rebuilds_old_managed_indexes() {
+    let (fixture, store, original) = fixture_80().await;
+    store.shutdown().await.unwrap();
+    let store = Store::open_exclusive(fixture.path()).await.unwrap();
+    store
+        .upgrade_application_80(original, definition_89().unwrap())
+        .await
+        .unwrap();
+    let source = decode_catalog(&store.db.read(&schema_key()).await.unwrap().unwrap()).unwrap();
+    let mut tx = store.db.begin().await.unwrap();
+    for index in 0..35 {
+        for name in [SESSIONS, LINKS] {
+            let mut row: Map<String, Value> = table(&source, name)
+                .unwrap()
+                .columns
+                .iter()
+                .map(|column| (column.clone(), nullable_cell(None)))
+                .collect();
+            for (column, value) in [
+                ("subject", "owner"),
+                ("method", "one-time-token"),
+                ("scopes", "[\"orchestration:read\"]"),
+                ("expires_at", "2099-01-01T00:00:00.000Z"),
+            ] {
+                row.insert(column.into(), text_cell(value));
+            }
+            if name == SESSIONS {
+                row.insert("session_id".into(), text_cell(&format!("session-{index}")));
+                row.insert("issued_at".into(), text_cell(NOW));
+                row.insert("client_device_type".into(), text_cell("desktop"));
+            } else {
+                row.insert("id".into(), text_cell(&format!("link-{index}")));
+                row.insert(
+                    "credential".into(),
+                    text_cell(&format!("credential-{index}")),
+                );
+                row.insert("created_at".into(), text_cell(NOW));
+                row.insert("proof_key_thumbprint".into(), text_cell("old-link-proof"));
+            }
+            write_row(&mut tx, &source, name, row).await.unwrap();
+        }
+    }
+    for name in [SESSIONS, LINKS] {
+        tx.put(managed_marker(&source, name), encode(&"auth-v1").unwrap())
+            .await
+            .unwrap();
+    }
+    let stale_index = store_key(&format!(
+        "application/generation/{}/auth/v1/preparation",
+        source.generation
+    ));
+    tx.put(stale_index, encode(&json!({"ready":true})).unwrap())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let source_bytes = generation_bytes(&store, &source).await;
+    let target = target_91(&source, &definition().unwrap());
+    // Interruption leaves the current catalog and its preparation witnesses
+    // untouched even after one page of the new authentication rows is staged.
+    store
+        .upgrade_stage(&source, &target, Stage::Copy)
+        .await
+        .unwrap();
+    store
+        .upgrade_batch(&source, &target, Stage::AuthSessions, None, 1)
+        .await
+        .unwrap();
+    assert_eq!(store.application_migrations().await.unwrap().len(), 89);
+    assert_eq!(generation_bytes(&store, &source).await, source_bytes);
+    store.shutdown().await.unwrap();
+    let store = Store::open_exclusive(fixture.path()).await.unwrap();
+    assert_eq!(
+        store
+            .bootstrap_application()
+            .await
+            .unwrap()
+            .migrations
+            .len(),
+        91
+    );
+    assert_eq!(generation_bytes(&store, &source).await, source_bytes);
+    let mut tx = store.db.begin_read_only().await.unwrap();
+    for index in 0..35 {
+        let session = read_row(
+            &mut tx,
+            &target,
+            SESSIONS,
+            &[text_cell(&format!("session-{index}"))],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            nullable(&session.row, "proof_key_thumbprint").unwrap(),
+            None
+        );
+        assert_eq!(text(&session.row, "subject").unwrap(), "owner");
+        let link = read_row(
+            &mut tx,
+            &target,
+            LINKS,
+            &[text_cell(&format!("link-{index}"))],
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(integer(&link.row, "requires_connect_approval").unwrap(), 0);
+        assert_eq!(integer(&link.row, "connect_denied").unwrap(), 0);
+        assert_eq!(nullable(&link.row, "requested_client_json").unwrap(), None);
+        assert_eq!(
+            text(&link.row, "proof_key_thumbprint").unwrap(),
+            "old-link-proof"
+        );
+    }
+    for name in [SESSIONS, LINKS] {
+        assert!(
+            tx.get(&managed_marker(&target, name))
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+    let obsolete = store_key(&format!(
+        "application/generation/{}/auth/v1/",
+        target.generation
+    ));
+    assert!(
+        tx.scan(&obsolete, &end(&obsolete), 1)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(table(&target, "auth_connect_devices").is_ok());
+    tx.rollback().await.unwrap();
+    while !store.prepare_application_auth().await.unwrap().prepared {}
+    store.shutdown().await.unwrap();
+    let reopened = fixture.connect().await;
+    assert!(!reopened.bootstrap_application().await.unwrap().initialized);
+    assert!(reopened.prepare_application_auth().await.unwrap().prepared);
+    reopened.shutdown().await.unwrap();
 }
